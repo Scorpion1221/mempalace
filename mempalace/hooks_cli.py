@@ -20,8 +20,10 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
     "1. mempalace_diary_write — AAAK-compressed session summary\n"
-    "2. mempalace_add_drawer — verbatim quotes, decisions, code snippets\n"
+    "2. mempalace_add_drawer — verbatim quotes, decisions, code snippets "
+    "(params: wing=project name, room=topic, content=verbatim text)\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
+    "Use mempalace_list_wings first if unsure which wing to use. "
     "Do NOT write to Claude Code's native auto-memory (.md files). "
     "Continue conversation after saving."
 )
@@ -29,7 +31,8 @@ STOP_BLOCK_REASON = (
 PRECOMPACT_BLOCK_REASON = (
     "COMPACTION IMMINENT (MemPalace). Save ALL session content before context is lost:\n"
     "1. mempalace_diary_write — thorough AAAK-compressed session summary\n"
-    "2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context\n"
+    "2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context "
+    "(params: wing=project name, room=topic, content=verbatim text)\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
     "Be thorough \u2014 after compaction, detailed context will be lost. "
     "Do NOT write to Claude Code's native auto-memory (.md files). "
