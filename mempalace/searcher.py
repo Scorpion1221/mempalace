@@ -149,6 +149,8 @@ def _hybrid_rank(
     query: str,
     vector_weight: float = 0.6,
     bm25_weight: float = 0.4,
+    preferred_wing: str = None,
+    wing_boost: float = 0.15,
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
 
@@ -159,6 +161,10 @@ def _hybrid_rank(
     * BM25 is real Okapi-BM25 with corpus-relative IDF over the candidates
       themselves. Since the absolute scale is unbounded, BM25 is min-max
       normalized within the candidate set so weights are commensurable.
+    * When ``preferred_wing`` is set, results from that wing receive an
+      additive ``wing_boost`` (default 0.15). This soft-prioritizes the
+      active wing without filtering out cross-wing results that score high
+      on their own merit.
 
     Mutates each result dict to add ``bm25_score`` and reorders the list
     in place. Returns the same list for convenience.
@@ -175,7 +181,10 @@ def _hybrid_rank(
     for r, raw, norm in zip(results, bm25_raw, bm25_norm):
         vec_sim = max(0.0, 1.0 - r.get("distance", 1.0))
         r["bm25_score"] = round(raw, 3)
-        scored.append((vector_weight * vec_sim + bm25_weight * norm, r))
+        score = vector_weight * vec_sim + bm25_weight * norm
+        if preferred_wing and r.get("wing") == preferred_wing:
+            score += wing_boost
+        scored.append((score, r))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     results[:] = [r for _, r in scored]
@@ -343,6 +352,7 @@ def search_memories(
     room: str = None,
     n_results: int = 5,
     max_distance: float = 0.0,
+    preferred_wing: str = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -523,7 +533,7 @@ def search_memories(
         h["total_drawers"] = len(ordered_docs)
 
     # BM25 hybrid re-rank within the final candidate set.
-    hits = _hybrid_rank(hits, query)
+    hits = _hybrid_rank(hits, query, preferred_wing=preferred_wing)
     for h in hits:
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)
