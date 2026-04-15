@@ -91,16 +91,23 @@ def _count_human_messages(transcript_path: str) -> int:
                     entry = json.loads(line)
 
                     # --- Claude Code transcript format ---
-                    # {"type": "user", "content": "..."} = real user message
-                    # {"type": "tool_use", ...} and {"type": "tool_result", ...} = skip
+                    # {"type": "user"} can be:
+                    #   - real user message (no toolUseResult, no isMeta)
+                    #   - tool result (has "toolUseResult" key) — skip
+                    #   - meta/system (has "isMeta" key) — skip
                     entry_type = entry.get("type", "")
                     if entry_type == "user":
+                        # Skip tool results and meta messages
+                        if "toolUseResult" in entry or entry.get("isMeta"):
+                            continue
                         content = entry.get("content", "")
                         if isinstance(content, str) and "<command-message>" in content:
                             continue
                         count += 1
                         continue
-                    if entry_type in ("tool_use", "tool_result", "assistant"):
+                    if entry_type in ("tool_use", "tool_result", "assistant",
+                                      "permission-mode", "attachment", "system",
+                                      "file-history-snapshot", "last-prompt"):
                         continue
 
                     # --- Legacy format: {"message": {"role": "user"}} ---
