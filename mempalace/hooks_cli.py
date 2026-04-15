@@ -15,7 +15,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SAVE_INTERVAL = 5
+SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "3"))
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 # UserPromptSubmit recall settings
