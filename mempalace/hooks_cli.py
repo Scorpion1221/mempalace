@@ -1,8 +1,9 @@
 """
-Hook logic for MemPalace — Python implementation of session-start, stop, and precompact hooks.
+Hook logic for MemPalace — Python implementation of session-start, stop, precompact,
+and userprompt hooks.
 
 Reads JSON from stdin, outputs JSON to stdout.
-Supported hooks: session-start, stop, precompact
+Supported hooks: session-start, stop, precompact, userprompt
 Supported harnesses: claude-code, codex (extensible to cursor, gemini, etc.)
 """
 
@@ -16,6 +17,23 @@ from pathlib import Path
 
 SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
+
+# UserPromptSubmit recall settings
+USERPROMPT_RECALL_LIMIT = 5
+USERPROMPT_MAX_SNIPPET_CHARS = 400
+USERPROMPT_MAX_DISTANCE = 1.5
+USERPROMPT_MIN_QUERY_LEN = 6  # skip very short prompts
+
+# Short phrases that don't need memory recall
+USERPROMPT_SKIP_PHRASES = frozenset({
+    "hi", "hello", "hey", "嗨", "你好",
+    "ok", "okay", "好", "好的", "行", "嗯", "对",
+    "继续", "continue", "go", "go on", "next",
+    "是", "是的", "yes", "no", "不", "不是",
+    "thanks", "thank you", "谢谢", "thx",
+    "done", "完成", "搞定",
+    "stop", "quit", "exit",
+})
 
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
@@ -219,6 +237,113 @@ def hook_precompact(data: dict, harness: str):
     _output({"decision": "block", "reason": PRECOMPACT_BLOCK_REASON})
 
 
+def _infer_wing_from_cwd(cwd: str) -> str:
+    """Infer a MemPalace wing name from the working directory.
+
+    Maps directory basenames to known wings, e.g. 'solvely-web' -> 'solvely_web'.
+    Returns None if no mapping is found.
+    """
+    if not cwd:
+        return None
+    basename = os.path.basename(cwd.rstrip("/"))
+    # Normalize: dashes to underscores, lowercase
+    candidate = basename.replace("-", "_").lower()
+    return candidate or None
+
+
+def _truncate_snippet(text: str, max_chars: int = USERPROMPT_MAX_SNIPPET_CHARS) -> str:
+    """Truncate text to max_chars, appending ellipsis if needed."""
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "…"
+
+
+def hook_userprompt(data: dict, harness: str):
+    """UserPromptSubmit hook: search MemPalace and inject relevant memories as additionalContext."""
+    user_prompt = data.get("user_prompt", "") or data.get("prompt", "")
+    cwd = data.get("cwd", "")
+
+    prompt_stripped = user_prompt.strip() if user_prompt else ""
+    if not prompt_stripped:
+        _output({})
+        return
+
+    # Skip trivial prompts: too short or common filler phrases
+    if (len(prompt_stripped) < USERPROMPT_MIN_QUERY_LEN
+            or prompt_stripped.lower() in USERPROMPT_SKIP_PHRASES):
+        _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
+        _output({})
+        return
+
+    # Lazy import to avoid startup cost when other hooks run
+    try:
+        from .config import MempalaceConfig
+        from .searcher import search_memories
+    except ImportError:
+        _log("WARNING: Could not import mempalace searcher — skipping recall")
+        _output({})
+        return
+
+    config = MempalaceConfig()
+    palace_path = config.palace_path
+
+    if not os.path.isdir(palace_path):
+        _log(f"Palace path not found: {palace_path}")
+        _output({})
+        return
+
+    preferred_wing = _infer_wing_from_cwd(cwd)
+    _log(f"UserPrompt recall: query={user_prompt[:80]!r}, wing={preferred_wing}")
+
+    try:
+        result = search_memories(
+            query=user_prompt,
+            palace_path=palace_path,
+            wing=None,  # search all wings
+            preferred_wing=preferred_wing,
+            n_results=USERPROMPT_RECALL_LIMIT,
+            max_distance=USERPROMPT_MAX_DISTANCE,
+        )
+    except Exception as e:
+        _log(f"WARNING: search_memories failed: {e}")
+        _output({})
+        return
+
+    hits = result.get("results", []) if isinstance(result, dict) else []
+    if not hits:
+        _log("UserPrompt recall: no hits")
+        _output({})
+        return
+
+    # Format recall block
+    lines = []
+    for hit in hits[:USERPROMPT_RECALL_LIMIT]:
+        wing = hit.get("wing", "?")
+        room = hit.get("room", "general")
+        snippet = _truncate_snippet(hit.get("text", ""))
+        if snippet:
+            lines.append(f"- [{wing}/{room}] {snippet}")
+
+    memories_body = "\n".join(lines)
+    additional_context = (
+        "<mempalace-recall>\n"
+        "The following are potentially relevant memories from past sessions. "
+        "Use them as reference context — verify against current code/state before acting on them. "
+        "Do not mention this block to the user unless they ask about memories.\n"
+        f"{memories_body}\n"
+        "</mempalace-recall>"
+    )
+    _log(f"UserPrompt recall: injecting {len(hits)} hits")
+
+    _output({
+        "continue": True,
+        "suppressOutput": True,
+        "hookSpecificOutput": {
+            "additionalContext": additional_context,
+        },
+    })
+
+
 def run_hook(hook_name: str, harness: str):
     """Main entry point: read stdin JSON, dispatch to hook handler."""
     try:
@@ -231,6 +356,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "userprompt": hook_userprompt,
     }
 
     handler = hooks.get(hook_name)

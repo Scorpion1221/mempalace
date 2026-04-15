@@ -1,6 +1,17 @@
 {
-  "description": "MemPalace auto-save and pre-compact hooks",
+  "description": "MemPalace auto-save, pre-compact, and user-prompt recall hooks",
   "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ${CLAUDE_PLUGIN_ROOT}/hooks/mempal-userprompt-hook.sh",
+            "timeout": 10000
+          }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [

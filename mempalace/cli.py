@@ -538,7 +538,7 @@ def main():
     p_hook_run.add_argument(
         "--hook",
         required=True,
-        choices=["session-start", "stop", "precompact"],
+        choices=["session-start", "stop", "precompact", "userprompt"],
         help="Hook name to run",
     )
     p_hook_run.add_argument(
