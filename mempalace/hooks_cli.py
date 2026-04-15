@@ -346,6 +346,7 @@ def hook_userprompt(data: dict, harness: str):
         "continue": True,
         "suppressOutput": True,
         "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
             "additionalContext": additional_context,
         },
     })
