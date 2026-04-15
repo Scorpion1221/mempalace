@@ -27,12 +27,62 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
 
+# Split on non-word boundaries.  Latin/Cyrillic/digits stay word-level;
+# CJK ideographs are split into overlapping bigrams below.
 _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
+
+# CJK Unified Ideographs + Extension A + CJK Compat Ideographs + some Kana
+_CJK_RE = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    r"\U00020000-\U0002a6df\U0002a700-\U0002ebef]+",
+    re.UNICODE,
+)
 
 
 def _tokenize(text: str) -> list:
-    """Lowercase + strip to alphanumeric tokens of length ≥ 2."""
-    return _TOKEN_RE.findall(text.lower())
+    """Tokenize for BM25 — word-level for Latin, bigram for CJK.
+
+    CJK scripts lack whitespace word boundaries, so a single ``\\w{2,}``
+    regex treats an entire Chinese sentence as one token.  BM25 then fails
+    because a query token like ``"之前做的飞书回复表情的补丁"`` will never
+    exactly match any document token.
+
+    Fix: detect CJK runs and split them into overlapping character bigrams
+    (e.g. ``"飞书回复"`` → ``["飞书", "书回", "回复"]``).  Bigrams are the
+    smallest unit that preserves meaningful Chinese word fragments (most
+    Chinese words are 2 characters) while staying dependency-free (no jieba).
+    """
+    lower = text.lower()
+    tokens: list = []
+    for raw_token in _TOKEN_RE.findall(lower):
+        cjk_runs = _CJK_RE.findall(raw_token)
+        if not cjk_runs:
+            # Pure Latin / digits / Cyrillic — keep as-is
+            tokens.append(raw_token)
+            continue
+        # Mixed or pure CJK token: extract bigrams from CJK runs,
+        # keep non-CJK fragments as word tokens.
+        pos = 0
+        for run in cjk_runs:
+            idx = raw_token.find(run, pos)
+            # Non-CJK prefix between previous run and this one
+            if idx > pos:
+                prefix = raw_token[pos:idx]
+                if len(prefix) >= 2:
+                    tokens.append(prefix)
+            # CJK bigrams (+ single-char fallback for 1-char runs)
+            if len(run) == 1:
+                tokens.append(run)
+            else:
+                for i in range(len(run) - 1):
+                    tokens.append(run[i : i + 2])
+            pos = idx + len(run)
+        # Non-CJK suffix after last CJK run
+        if pos < len(raw_token):
+            suffix = raw_token[pos:]
+            if len(suffix) >= 2:
+                tokens.append(suffix)
+    return tokens
 
 
 def _bm25_scores(
