@@ -72,7 +72,13 @@ def _sanitize_session_id(session_id: str) -> str:
 
 
 def _count_human_messages(transcript_path: str) -> int:
-    """Count human messages in a JSONL transcript, skipping command-messages."""
+    """Count human messages in a JSONL transcript, skipping tool calls and command-messages.
+
+    Supports three transcript formats:
+    - Claude Code: {"type": "user", "content": "..."} (skip "tool_use", "tool_result")
+    - Legacy/other: {"message": {"role": "user", "content": ...}}
+    - Codex CLI: {"type": "event_msg", "payload": {"type": "user_message", ...}}
+    """
     path = Path(transcript_path).expanduser()
     if not path.is_file():
         return 0
@@ -82,6 +88,21 @@ def _count_human_messages(transcript_path: str) -> int:
             for line in f:
                 try:
                     entry = json.loads(line)
+
+                    # --- Claude Code transcript format ---
+                    # {"type": "user", "content": "..."} = real user message
+                    # {"type": "tool_use", ...} and {"type": "tool_result", ...} = skip
+                    entry_type = entry.get("type", "")
+                    if entry_type == "user":
+                        content = entry.get("content", "")
+                        if isinstance(content, str) and "<command-message>" in content:
+                            continue
+                        count += 1
+                        continue
+                    if entry_type in ("tool_use", "tool_result", "assistant"):
+                        continue
+
+                    # --- Legacy format: {"message": {"role": "user"}} ---
                     msg = entry.get("message", {})
                     if isinstance(msg, dict) and msg.get("role") == "user":
                         content = msg.get("content", "")
@@ -95,14 +116,17 @@ def _count_human_messages(transcript_path: str) -> int:
                             if "<command-message>" in text:
                                 continue
                         count += 1
-                    # Also handle Codex CLI transcript format
-                    # {"type": "event_msg", "payload": {"type": "user_message", "message": "..."}}
-                    elif entry.get("type") == "event_msg":
+                        continue
+
+                    # --- Codex CLI transcript format ---
+                    # {"type": "event_msg", "payload": {"type": "user_message", ...}}
+                    if entry_type == "event_msg":
                         payload = entry.get("payload", {})
                         if isinstance(payload, dict) and payload.get("type") == "user_message":
                             msg_text = payload.get("message", "")
                             if isinstance(msg_text, str) and "<command-message>" not in msg_text:
                                 count += 1
+
                 except (json.JSONDecodeError, AttributeError):
                     pass
     except OSError:
