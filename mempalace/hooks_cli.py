@@ -259,10 +259,14 @@ def _infer_wing_from_cwd(cwd: str) -> str:
 
 
 def _truncate_snippet(text: str, max_chars: int = USERPROMPT_MAX_SNIPPET_CHARS) -> str:
-    """Truncate text to max_chars, appending ellipsis if needed."""
-    if not text or len(text) <= max_chars:
+    """Truncate text to max_chars, collapsing whitespace for readability."""
+    if not text:
         return text
-    return text[:max_chars] + "…"
+    # Collapse newlines and excessive whitespace into single spaces
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= max_chars:
+        return collapsed
+    return collapsed[:max_chars] + "…"
 
 
 def hook_userprompt(data: dict, harness: str):
