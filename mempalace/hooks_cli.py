@@ -25,14 +25,21 @@ USERPROMPT_MAX_DISTANCE = 1.5
 USERPROMPT_MIN_QUERY_LEN = 6  # skip very short prompts
 
 # Short phrases that don't need memory recall
+# Keep in sync with TRIVIAL_USER_MESSAGES in hermes-mempalace-plugin
 USERPROMPT_SKIP_PHRASES = frozenset({
+    # Greetings
     "hi", "hello", "hey", "嗨", "你好",
+    # Acknowledgement
     "ok", "okay", "好", "好的", "行", "嗯", "对",
-    "继续", "continue", "go", "go on", "next",
-    "是", "是的", "yes", "no", "不", "不是",
-    "thanks", "thank you", "谢谢", "thx",
-    "done", "完成", "搞定",
-    "stop", "quit", "exit",
+    "cool", "nice", "great", "sounds good",
+    # Affirmation / negation
+    "yes", "no", "是", "是的", "不", "不是",
+    # Continuation
+    "continue", "go", "go on", "next", "继续",
+    # Gratitude
+    "thanks", "thank you", "thx", "谢谢",
+    # Completion / exit
+    "done", "完成", "搞定", "stop", "quit", "exit",
 })
 
 STOP_BLOCK_REASON = (
