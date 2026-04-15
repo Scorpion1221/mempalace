@@ -15,7 +15,8 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "3"))
+SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "5"))
+SAVE_MIN_MESSAGES = int(os.environ.get("MEMPAL_SAVE_MIN_MESSAGES", "5"))
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 # UserPromptSubmit recall settings
@@ -211,7 +212,7 @@ def hook_stop(data: dict, harness: str):
 
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
-    if since_last >= SAVE_INTERVAL and exchange_count > 0:
+    if since_last >= SAVE_INTERVAL and exchange_count >= SAVE_MIN_MESSAGES:
         # Update last save point
         try:
             last_save_file.write_text(str(exchange_count), encoding="utf-8")
