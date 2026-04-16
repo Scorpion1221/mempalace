@@ -250,11 +250,11 @@ You are a search query optimizer for a personal memory database. The database co
 Given the user's natural-language question, extract the key search terms that would best match stored content. Output ONLY the rewritten search query — no explanation.
 
 Rules:
-- Keep the SAME language as the user's query — do NOT translate
+- Output keywords in BOTH the user's language AND English (memories may be stored in either)
 - Convert questions into keyword phrases that match how information is typically stored
 - Preserve technical terms, proper nouns, and identifiers exactly (e.g. DBeaver, MySQL, S3)
 - Remove filler words (怎么, 如何, 什么, how, what, why)
-- Keep it under 200 characters
+- Keep it under 250 characters
 
 User question: {query}
 
