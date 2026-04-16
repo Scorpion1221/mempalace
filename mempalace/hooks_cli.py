@@ -383,7 +383,7 @@ def hook_userprompt(data: dict, harness: str):
         _output({})
         return
 
-    # --- Stage 3: LLM rerank ---
+    # --- Stage 3: LLM rerank + relevance filter ---
     if llm_config and len(hits) > USERPROMPT_RECALL_LIMIT:
         try:
             reranked = rerank(
@@ -392,7 +392,11 @@ def hook_userprompt(data: dict, harness: str):
                 top_k=USERPROMPT_RECALL_LIMIT,
                 config=llm_config,
             )
-            if reranked:
+            if reranked is not None:
+                if len(reranked) == 0:
+                    _log(f"UserPrompt recall: LLM filtered all {len(hits)} hits as irrelevant")
+                    _output({})
+                    return
                 _log(f"UserPrompt recall: LLM reranked {len(hits)} → {len(reranked)}")
                 hits = reranked
         except Exception as e:

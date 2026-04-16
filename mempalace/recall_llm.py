@@ -286,30 +286,36 @@ def rewrite_query(user_prompt: str, config: dict | None = None) -> str | None:
 # =========================================================================
 
 _RERANK_PROMPT = """\
-You are a relevance judge for a personal memory search. Given a user's question and {n} candidate memory snippets, select the {k} most relevant ones.
+You are a relevance judge for a personal memory search. Given a user's question and {n} candidate memory snippets, select ONLY the ones that are actually relevant to the question. Return up to {k} results.
 
-Reply with ONLY the numbers of the {k} most relevant candidates, separated by commas, in order of relevance. Example: 3,1,7,2,5
+Rules:
+- Only include candidates that would genuinely help answer the user's question
+- If none are relevant, reply with: NONE
+- Otherwise reply with ONLY the numbers of relevant candidates, separated by commas, in order of relevance
+- Example (some relevant): 3,1,7
+- Example (none relevant): NONE
 
 User question: {query}
 
 Candidates:
 {candidates}
 
-Most relevant (top {k}):"""
+Relevant candidates:"""
 
 
 def rerank(user_prompt: str, hits: list, top_k: int = 5,
            config: dict | None = None) -> list | None:
-    """Use LLM to rerank search hits by relevance.
+    """Use LLM to rerank search hits by relevance, filtering irrelevant ones.
 
     Args:
         user_prompt: Original user question.
         hits: List of search result dicts (must have "text" key).
-        top_k: Number of results to select.
+        top_k: Maximum number of results to select.
         config: LLM config dict (from _get_llm_config).
 
     Returns:
-        Reordered hits list (top_k items), or None if LLM fails.
+        Reordered hits list (0 to top_k items), or None if LLM call fails.
+        Returns empty list if LLM determines no candidates are relevant.
     """
     if config is None:
         config = _get_llm_config()
@@ -340,6 +346,10 @@ def rerank(user_prompt: str, hits: list, top_k: int = 5,
     if not result:
         return None
 
+    # LLM says nothing is relevant
+    if "NONE" in result.upper():
+        return []
+
     # Parse comma-separated numbers
     numbers = re.findall(r"\d+", result)
     seen = set()
@@ -352,15 +362,4 @@ def rerank(user_prompt: str, hits: list, top_k: int = 5,
         if len(reranked) >= top_k:
             break
 
-    if not reranked:
-        return None
-
-    # If LLM returned fewer than top_k, pad with remaining hits in original order
-    if len(reranked) < top_k:
-        for hit in hits:
-            if hit not in reranked:
-                reranked.append(hit)
-            if len(reranked) >= top_k:
-                break
-
-    return reranked
+    return reranked if reranked else None
