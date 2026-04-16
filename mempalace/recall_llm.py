@@ -14,9 +14,9 @@ Stage 2 — Rerank/Filter:
     the most relevant subset, filtering noise from high-frequency but
     irrelevant entries (diary, task logs).
 
-Supports three API backends:
-    1. Vertex AI (CLAUDE_CODE_USE_VERTEX=1 + gcloud credentials)
-    2. OpenAI-compatible endpoint (MEMPAL_RECALL_ENDPOINT + MEMPAL_RECALL_MODEL)
+Supports three API backends (in priority order):
+    1. MEMPAL_RECALL_ENDPOINT (explicit — LiteLLM proxy, Ollama, etc.)
+    2. Vertex AI (CLAUDE_CODE_USE_VERTEX=1 + gcloud credentials)
     3. Anthropic native API (ANTHROPIC_API_KEY)
 
 All stages gracefully degrade on failure — the caller falls back to the
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-# Env var priority: Vertex AI > MEMPAL_RECALL_ENDPOINT > ANTHROPIC_API_KEY
+# Env var priority: MEMPAL_RECALL_ENDPOINT > Vertex AI > ANTHROPIC_API_KEY
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_VERTEX_MODEL = "claude-haiku-4-5"
 VERTEX_LOCATION = "us-east5"
@@ -89,29 +89,8 @@ def _get_llm_config() -> dict | None:
     Returns dict with keys: backend ("vertex" | "anthropic" | "openai_compat"),
     plus backend-specific fields, or None if no API is configured.
     """
-    # Priority 1: Vertex AI (Claude Code Vertex mode)
-    if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
-        project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
-        if project:
-            token = _get_vertex_token()
-            if token:
-                model = os.environ.get("MEMPAL_RECALL_MODEL", DEFAULT_VERTEX_MODEL)
-                location = os.environ.get("MEMPAL_VERTEX_LOCATION", "")
-                if not location:
-                    # CLOUD_ML_REGION="global" is not a valid Vertex AI region
-                    cloud_region = os.environ.get("CLOUD_ML_REGION", "")
-                    location = cloud_region if cloud_region and cloud_region != "global" else VERTEX_LOCATION
-                return {
-                    "backend": "vertex",
-                    "project": project,
-                    "location": location,
-                    "model": model,
-                    "token": token,
-                }
-
-    # Priority 2: OpenAI-compatible endpoint (LiteLLM proxy, Ollama, etc.)
-    # Uses MEMPAL_RECALL_* prefixed env vars to avoid collision with
-    # closet_llm's LLM_ENDPOINT / LLM_MODEL / LLM_KEY.
+    # Priority 1: MEMPAL_RECALL_ENDPOINT (explicit override — LiteLLM, Ollama, etc.)
+    # When set, always use this regardless of Vertex or Anthropic config.
     endpoint = os.environ.get("MEMPAL_RECALL_ENDPOINT", "")
     llm_model = os.environ.get("MEMPAL_RECALL_MODEL", "")
     if endpoint and llm_model:
@@ -121,6 +100,25 @@ def _get_llm_config() -> dict | None:
             "model": llm_model,
             "key": os.environ.get("MEMPAL_RECALL_KEY", ""),
         }
+
+    # Priority 2: Vertex AI (Claude Code Vertex mode)
+    if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
+        project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
+        if project:
+            token = _get_vertex_token()
+            if token:
+                model = os.environ.get("MEMPAL_RECALL_MODEL", DEFAULT_VERTEX_MODEL)
+                location = os.environ.get("MEMPAL_VERTEX_LOCATION", "")
+                if not location:
+                    cloud_region = os.environ.get("CLOUD_ML_REGION", "")
+                    location = cloud_region if cloud_region and cloud_region != "global" else VERTEX_LOCATION
+                return {
+                    "backend": "vertex",
+                    "project": project,
+                    "location": location,
+                    "model": model,
+                    "token": token,
+                }
 
     # Priority 3: Anthropic native API
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
