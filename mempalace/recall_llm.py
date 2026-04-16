@@ -63,9 +63,15 @@ def _get_vertex_token() -> str | None:
     try:
         # Use application-default credentials (service account key via
         # GOOGLE_APPLICATION_CREDENTIALS), not the user's gcloud login.
+        # Pass GOOGLE_APPLICATION_CREDENTIALS explicitly in env so it works
+        # even when the parent process (e.g. launchd) doesn't inherit shell vars.
+        env = dict(os.environ)
+        gac = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+        if gac:
+            env["GOOGLE_APPLICATION_CREDENTIALS"] = gac
         result = subprocess.run(
             ["gcloud", "auth", "application-default", "print-access-token"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=env,
         )
         token = result.stdout.strip()
         if token and result.returncode == 0:
@@ -103,13 +109,9 @@ def _get_llm_config() -> dict | None:
                     "token": token,
                 }
 
-    # Priority 2: Anthropic native API
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key:
-        model = os.environ.get("MEMPAL_RECALL_MODEL", DEFAULT_ANTHROPIC_MODEL)
-        return {"backend": "anthropic", "api_key": api_key, "model": model}
-
-    # Priority 3: OpenAI-compatible endpoint (reuse closet_llm env vars)
+    # Priority 2: OpenAI-compatible endpoint (LiteLLM proxy, Ollama, etc.)
+    # Checked before Anthropic API so LLM_ENDPOINT takes precedence when
+    # ANTHROPIC_API_KEY is a proxy key (e.g. sk-litellm-local).
     endpoint = os.environ.get("LLM_ENDPOINT", "")
     llm_model = os.environ.get("LLM_MODEL", "")
     if endpoint and llm_model:
@@ -119,6 +121,12 @@ def _get_llm_config() -> dict | None:
             "model": llm_model,
             "key": os.environ.get("LLM_KEY", ""),
         }
+
+    # Priority 3: Anthropic native API
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if api_key:
+        model = os.environ.get("MEMPAL_RECALL_MODEL", DEFAULT_ANTHROPIC_MODEL)
+        return {"backend": "anthropic", "api_key": api_key, "model": model}
 
     return None
 
