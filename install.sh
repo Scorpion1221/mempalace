@@ -191,15 +191,24 @@ TOML
 import json, sys
 
 hooks_path = '$CODEX_HOOKS'
+hook_cmd_userprompt = '$HOOK_CMD userprompt'
 hook_cmd_stop = '$HOOK_CMD stop'
-hook_cmd_precompact = '$HOOK_CMD precompact'
 
 with open(hooks_path) as f:
     data = json.load(f)
 
 hooks = data.setdefault('hooks', {})
 
-# Add to Stop
+# Add UserPromptSubmit (memory recall injection)
+if 'UserPromptSubmit' not in hooks:
+    hooks['UserPromptSubmit'] = [{'hooks': []}]
+hooks['UserPromptSubmit'][0].setdefault('hooks', []).append({
+    'type': 'command',
+    'command': hook_cmd_userprompt,
+    'timeout': 10
+})
+
+# Add to Stop (periodic auto-save)
 stop_hooks = hooks.setdefault('Stop', [{'hooks': []}])
 stop_hooks[0]['hooks'].append({
     'type': 'command',
@@ -207,25 +216,31 @@ stop_hooks[0]['hooks'].append({
     'timeout': 30
 })
 
-# Add PreCompact
-if 'PreCompact' not in hooks:
-    hooks['PreCompact'] = [{'hooks': []}]
-hooks['PreCompact'][0].setdefault('hooks', []).append({
-    'type': 'command',
-    'command': hook_cmd_precompact,
-    'timeout': 30
-})
-
 with open(hooks_path, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
 "
-      ok "Hooks added (Stop + PreCompact)"
+      ok "Hooks added (UserPromptSubmit + Stop)"
     else
       ok "Hooks already configured"
     fi
   else
     warn "Codex hooks.json not found at $CODEX_HOOKS"
+  fi
+
+  # ── Ensure [features] codex_hooks = true ──
+  if [[ -f "$CODEX_CONFIG" ]]; then
+    if ! grep -q 'codex_hooks' "$CODEX_CONFIG" 2>/dev/null; then
+      info "Enabling codex_hooks feature flag..."
+      cat >> "$CODEX_CONFIG" <<'TOML'
+
+[features]
+codex_hooks = true
+TOML
+      ok "Feature flag codex_hooks = true added to config.toml"
+    else
+      ok "codex_hooks feature flag already set"
+    fi
   fi
 
   ok "Codex CLI setup complete"
