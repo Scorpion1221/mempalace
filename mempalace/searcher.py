@@ -353,6 +353,7 @@ def search_memories(
     n_results: int = 5,
     max_distance: float = 0.0,
     preferred_wing: str = None,
+    after: str = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -368,6 +369,8 @@ def search_memories(
             cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
             Results with distance > this value are filtered out. A value of
             0.0 disables filtering. Typical useful range: 0.3–1.0.
+        after: ISO date string (e.g. "2026-04-16"). Post-filter results
+            to only include memories filed on or after this date.
     """
     try:
         drawers_col = get_collection(palace_path, create=False)
@@ -387,10 +390,13 @@ def search_memories(
     # This avoids the "weak-closets regression" where narrative content
     # produces low-signal closets (regex extraction matches few topics)
     # and closet-first routing hides drawers that direct search would find.
+    # When time-filtering, over-fetch more aggressively since most results
+    # will be filtered out by the post-search date check.
+    over_fetch = n_results * 10 if after else n_results * 3
     try:
         dkwargs = {
             "query_texts": [query],
-            "n_results": n_results * 3,  # over-fetch for re-ranking
+            "n_results": over_fetch,
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
@@ -439,6 +445,12 @@ def search_memories(
         # Filter on raw distance before rounding to avoid precision loss.
         if max_distance > 0.0 and dist > max_distance:
             continue
+
+        # Time filter: skip drawers filed before the requested date.
+        if after:
+            filed_at = meta.get("filed_at", "") or ""
+            if filed_at < after:
+                continue
 
         source = meta.get("source_file", "") or ""
         boost = 0.0

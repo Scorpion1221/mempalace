@@ -373,6 +373,7 @@ def hook_userprompt(data: dict, harness: str):
             preferred_wing=preferred_wing,
             n_results=pool_size,
             max_distance=USERPROMPT_MAX_DISTANCE,
+            after=time_after,
         )
     except Exception as e:
         _log(f"WARNING: search_memories failed: {e}")
@@ -380,13 +381,6 @@ def hook_userprompt(data: dict, harness: str):
         return
 
     hits = result.get("results", []) if isinstance(result, dict) else []
-
-    # Time filter: keep only hits filed after the extracted date
-    if time_after and hits:
-        before_count = len(hits)
-        hits = [h for h in hits if (h.get("filed_at") or "") >= time_after]
-        if len(hits) < before_count:
-            _log(f"UserPrompt recall: time filter (after={time_after}) {before_count} → {len(hits)}")
 
     if not hits:
         _log("UserPrompt recall: no hits")
