@@ -348,15 +348,17 @@ def hook_userprompt(data: dict, harness: str):
     # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
     llm_config = None
     search_query = user_prompt
+    time_after = None
     try:
         from .recall_llm import is_enabled, _get_llm_config, rewrite_query, rerank
         if is_enabled():
             llm_config = _get_llm_config()
         if llm_config:
-            rewritten = rewrite_query(user_prompt, config=llm_config)
-            if rewritten:
-                _log(f"UserPrompt recall: query rewritten to {rewritten[:80]!r}")
-                search_query = rewritten
+            rewrite_result = rewrite_query(user_prompt, config=llm_config)
+            if rewrite_result:
+                search_query = rewrite_result["query"]
+                time_after = rewrite_result.get("after")
+                _log(f"UserPrompt recall: query rewritten to {search_query[:80]!r}, after={time_after}")
     except Exception as e:
         _log(f"UserPrompt recall: query rewrite failed ({e}), using original")
 
@@ -378,6 +380,14 @@ def hook_userprompt(data: dict, harness: str):
         return
 
     hits = result.get("results", []) if isinstance(result, dict) else []
+
+    # Time filter: keep only hits filed after the extracted date
+    if time_after and hits:
+        before_count = len(hits)
+        hits = [h for h in hits if (h.get("filed_at") or "") >= time_after]
+        if len(hits) < before_count:
+            _log(f"UserPrompt recall: time filter (after={time_after}) {before_count} → {len(hits)}")
+
     if not hits:
         _log("UserPrompt recall: no hits")
         _output({})

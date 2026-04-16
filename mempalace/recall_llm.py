@@ -245,46 +245,75 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
 # =========================================================================
 
 _REWRITE_PROMPT = """\
-You are a search query optimizer for a personal memory database. The database contains notes, configuration details, decisions, and conversation logs stored as text chunks.
+You are a search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
 
-Given the user's natural-language question, extract the key search terms that would best match stored content. Output ONLY the rewritten search query — no explanation.
+Given the user's question and today's date, extract search keywords and any time constraint.
+
+Output JSON only — no explanation:
+{{"query": "english keywords here", "after": "YYYY-MM-DD or null"}}
 
 Rules:
-- ALWAYS output in English — translate non-English queries to English keywords
-- Convert questions into keyword phrases that match how information is typically stored
-- Preserve technical terms, proper nouns, and identifiers exactly (e.g. DBeaver, MySQL, S3)
-- Remove filler words
-- Keep it under 200 characters
+- "query": ALWAYS English keywords, translate if needed. Preserve proper nouns exactly. Remove filler words. Max 200 chars.
+- "after": extract temporal intent if present. "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null (no time filter).
+
+Today is {today}.
 
 User question: {query}
 
-Rewritten search query:"""
+JSON:"""
 
 
-def rewrite_query(user_prompt: str, config: dict | None = None) -> str | None:
+def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
     """Use LLM to rewrite a user prompt into an optimized search query.
 
-    Returns the rewritten query string, or None if LLM is unavailable/fails.
+    Returns dict with keys:
+        query (str): Rewritten English keyword query.
+        after (str|None): ISO date string for time filtering, or None.
+    Returns None if LLM is unavailable/fails.
     """
     if config is None:
         config = _get_llm_config()
     if config is None:
         return None
 
-    prompt = _REWRITE_PROMPT.format(query=user_prompt)
+    from datetime import date
+    prompt = _REWRITE_PROMPT.format(query=user_prompt, today=date.today().isoformat())
     result = _call_llm(config, prompt, REWRITE_MAX_TOKENS, REWRITE_TIMEOUT_S)
 
     if not result:
         return None
 
-    # Clean up: remove quotes, leading/trailing whitespace
-    result = result.strip().strip('"\'')
+    # Parse JSON response
+    result = result.strip()
+    # Strip markdown code fences if present
+    if result.startswith("```"):
+        result = re.sub(r"^```(?:json)?\s*", "", result)
+        result = re.sub(r"\s*```$", "", result)
 
-    # Sanity check: reject if too short or suspiciously long
-    if len(result) < 3 or len(result) > 300:
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        # Fallback: treat entire result as query string
+        clean = result.strip().strip('"\'')
+        if 3 <= len(clean) <= 300:
+            return {"query": clean, "after": None}
         return None
 
-    return result
+    query = parsed.get("query", "")
+    if not query or len(query) < 3:
+        return None
+
+    after = parsed.get("after")
+    # Validate date format
+    if after and after != "null":
+        try:
+            date.fromisoformat(after)
+        except (ValueError, TypeError):
+            after = None
+    else:
+        after = None
+
+    return {"query": query, "after": after}
 
 
 # =========================================================================
