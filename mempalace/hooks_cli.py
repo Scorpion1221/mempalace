@@ -382,6 +382,11 @@ def hook_userprompt(data: dict, harness: str):
 
     hits = result.get("results", []) if isinstance(result, dict) else []
 
+    # Filter out diary entries — AAAK-compressed session logs are not
+    # human-readable and pollute auto-recall results. Agents can still
+    # find diary content via explicit mempalace_search tool calls.
+    hits = [h for h in hits if h.get("room") != "diary"]
+
     if not hits:
         _log("UserPrompt recall: no hits")
         _output({})
