@@ -16,8 +16,8 @@ Stage 2 — Rerank/Filter:
 
 Supports three API backends:
     1. Vertex AI (CLAUDE_CODE_USE_VERTEX=1 + gcloud credentials)
-    2. Anthropic native API (ANTHROPIC_API_KEY)
-    3. OpenAI-compatible endpoint (LLM_ENDPOINT + LLM_MODEL + LLM_KEY)
+    2. OpenAI-compatible endpoint (MEMPAL_RECALL_ENDPOINT + MEMPAL_RECALL_MODEL)
+    3. Anthropic native API (ANTHROPIC_API_KEY)
 
 All stages gracefully degrade on failure — the caller falls back to the
 original query / original ranking.
@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-# Env var priority: Vertex AI > ANTHROPIC_API_KEY > LLM_ENDPOINT
+# Env var priority: Vertex AI > MEMPAL_RECALL_ENDPOINT > ANTHROPIC_API_KEY
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_VERTEX_MODEL = "claude-haiku-4-5"
 VERTEX_LOCATION = "us-east5"
@@ -110,16 +110,16 @@ def _get_llm_config() -> dict | None:
                 }
 
     # Priority 2: OpenAI-compatible endpoint (LiteLLM proxy, Ollama, etc.)
-    # Checked before Anthropic API so LLM_ENDPOINT takes precedence when
-    # ANTHROPIC_API_KEY is a proxy key (e.g. sk-litellm-local).
-    endpoint = os.environ.get("LLM_ENDPOINT", "")
-    llm_model = os.environ.get("LLM_MODEL", "")
+    # Uses MEMPAL_RECALL_* prefixed env vars to avoid collision with
+    # closet_llm's LLM_ENDPOINT / LLM_MODEL / LLM_KEY.
+    endpoint = os.environ.get("MEMPAL_RECALL_ENDPOINT", "")
+    llm_model = os.environ.get("MEMPAL_RECALL_MODEL", "")
     if endpoint and llm_model:
         return {
             "backend": "openai_compat",
             "endpoint": endpoint.rstrip("/"),
             "model": llm_model,
-            "key": os.environ.get("LLM_KEY", ""),
+            "key": os.environ.get("MEMPAL_RECALL_KEY", ""),
         }
 
     # Priority 3: Anthropic native API
