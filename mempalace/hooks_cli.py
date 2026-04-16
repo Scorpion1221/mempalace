@@ -21,6 +21,7 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
 # UserPromptSubmit recall settings
 USERPROMPT_RECALL_LIMIT = 5
+USERPROMPT_RECALL_POOL = 10  # over-fetch for LLM reranking
 USERPROMPT_MAX_SNIPPET_CHARS = 400
 USERPROMPT_MAX_DISTANCE = 1.5
 USERPROMPT_MIN_QUERY_LEN = 6  # skip very short prompts
@@ -298,7 +299,17 @@ def _truncate_snippet(text: str, max_chars: int = USERPROMPT_MAX_SNIPPET_CHARS) 
 
 
 def hook_userprompt(data: dict, harness: str):
-    """UserPromptSubmit hook: search MemPalace and inject relevant memories as additionalContext."""
+    """UserPromptSubmit hook: search MemPalace and inject relevant memories.
+
+    Pipeline (with LLM enhancement when API key is available):
+      1. LLM query rewrite — transform user prompt into optimized search terms
+      2. Vector search — fetch candidate pool (RECALL_POOL size)
+      3. BM25 hybrid rank — initial ranking
+      4. LLM rerank — select top RECALL_LIMIT from the pool
+
+    Each LLM stage degrades gracefully: if no API key or call fails,
+    falls back to the original query / BM25-only ranking.
+    """
     user_prompt = data.get("user_prompt", "") or data.get("prompt", "")
     cwd = data.get("cwd", "")
 
@@ -334,13 +345,31 @@ def hook_userprompt(data: dict, harness: str):
     preferred_wing = _infer_wing_from_cwd(cwd)
     _log(f"UserPrompt recall: query={user_prompt[:80]!r}, wing={preferred_wing}")
 
+    # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
+    llm_config = None
+    search_query = user_prompt
+    try:
+        from .recall_llm import is_enabled, _get_llm_config, rewrite_query, rerank
+        if is_enabled():
+            llm_config = _get_llm_config()
+        if llm_config:
+            rewritten = rewrite_query(user_prompt, config=llm_config)
+            if rewritten:
+                _log(f"UserPrompt recall: query rewritten to {rewritten[:80]!r}")
+                search_query = rewritten
+    except Exception as e:
+        _log(f"UserPrompt recall: query rewrite failed ({e}), using original")
+
+    # --- Stage 2: Vector search + BM25 hybrid rank ---
+    # Fetch a larger pool when LLM rerank is available
+    pool_size = USERPROMPT_RECALL_POOL if llm_config else USERPROMPT_RECALL_LIMIT
     try:
         result = search_memories(
-            query=user_prompt,
+            query=search_query,
             palace_path=palace_path,
             wing=None,  # search all wings
             preferred_wing=preferred_wing,
-            n_results=USERPROMPT_RECALL_LIMIT,
+            n_results=pool_size,
             max_distance=USERPROMPT_MAX_DISTANCE,
         )
     except Exception as e:
@@ -353,6 +382,21 @@ def hook_userprompt(data: dict, harness: str):
         _log("UserPrompt recall: no hits")
         _output({})
         return
+
+    # --- Stage 3: LLM rerank ---
+    if llm_config and len(hits) > USERPROMPT_RECALL_LIMIT:
+        try:
+            reranked = rerank(
+                user_prompt,  # use original prompt for relevance judgment
+                hits,
+                top_k=USERPROMPT_RECALL_LIMIT,
+                config=llm_config,
+            )
+            if reranked:
+                _log(f"UserPrompt recall: LLM reranked {len(hits)} → {len(reranked)}")
+                hits = reranked
+        except Exception as e:
+            _log(f"UserPrompt recall: LLM rerank failed ({e}), using BM25 order")
 
     # Format recall block
     lines = []
@@ -372,7 +416,7 @@ def hook_userprompt(data: dict, harness: str):
         f"{memories_body}\n"
         "</mempalace-recall>"
     )
-    _log(f"UserPrompt recall: injecting {len(hits)} hits")
+    _log(f"UserPrompt recall: injecting {len(hits[:USERPROMPT_RECALL_LIMIT])} hits")
 
     _output({
         "continue": True,
