@@ -42,10 +42,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_VERTEX_MODEL = "claude-haiku-4-5"
 VERTEX_LOCATION = "us-east5"
-REWRITE_TIMEOUT_S = 10
-RERANK_TIMEOUT_S = 10
+REWRITE_TIMEOUT_S = 8
+RERANK_TIMEOUT_S = 8
 REWRITE_MAX_TOKENS = 100
-RERANK_MAX_TOKENS = 30
+RERANK_MAX_TOKENS = 50
 
 def is_enabled() -> bool:
     """Check if LLM-enhanced recall is enabled. Opt-in via MEMPAL_RECALL_LLM=1."""
@@ -397,4 +397,9 @@ def rerank(user_prompt: str, hits: list, top_k: int = 5,
         if len(reranked) >= top_k:
             break
 
-    return reranked if reranked else None
+    # Empty list after parsing = LLM returned numbers but all were invalid.
+    # Treat as LLM failure (return None → caller falls back to BM25 order),
+    # distinct from explicit "NONE" response (return [] → no relevant results).
+    if not reranked:
+        return None
+    return reranked
