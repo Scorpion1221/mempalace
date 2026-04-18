@@ -266,17 +266,30 @@ def rebuild_index(palace_path=None):
     # Rebuild with correct HNSW settings
     print("  Rebuilding collection with hnsw:space=cosine...")
     backend.delete_collection(palace_path, COLLECTION_NAME)
+    ef = get_embedding_function()
     new_col = backend.create_collection(palace_path, COLLECTION_NAME,
-                                        embedding_function=get_embedding_function())
+                                        embedding_function=ef)
 
     filed = 0
-    for i in range(0, len(all_ids), batch_size):
-        batch_ids = all_ids[i : i + batch_size]
-        batch_docs = all_docs[i : i + batch_size]
-        batch_metas = all_metas[i : i + batch_size]
-        new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+    insert_batch = 100 if ef is not None else batch_size
+    for i in range(0, len(all_ids), insert_batch):
+        batch_ids = all_ids[i : i + insert_batch]
+        batch_docs = all_docs[i : i + insert_batch]
+        batch_metas = all_metas[i : i + insert_batch]
+        try:
+            new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+        except Exception as exc:
+            print(f"  ERROR at batch {i}: {exc}")
+            print("  Retrying one-by-one...")
+            for j, (did, doc, meta) in enumerate(zip(batch_ids, batch_docs, batch_metas)):
+                try:
+                    new_col.upsert(documents=[doc], ids=[did], metadatas=[meta])
+                except Exception as e2:
+                    print(f"    SKIP {did}: {e2}")
+                    continue
         filed += len(batch_ids)
-        print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
+        if filed % 500 == 0 or filed == len(all_ids):
+            print(f"  Re-filed {filed}/{len(all_ids)} drawers...")
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
     print("  HNSW index is now clean with cosine distance metric.")
