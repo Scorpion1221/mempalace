@@ -453,16 +453,21 @@ Decide whether memory recall is needed for this turn.
 Output JSON only — no explanation:
 {{"should_recall": true, "reason": "short_machine_label", "query": "english keywords here or null", "after": "YYYY-MM-DD or null"}}
 
-Rules:
-- Set "should_recall" to false for turns that can be handled without memory recall, such as:
-  - direct local execution / inspection tasks
-  - pure text transformation, formatting, translation, or summarization requests
-  - mechanical edits or simple acknowledgements / greetings
-  - current-thread execution-control messages whose intent is simply to keep working on the task already in progress, such as "继续推进", "keep going", or "finish it", unless they explicitly reference earlier decisions or historical state
-- Set "should_recall" to true for:
-  - short follow-up questions that depend on previous assistant context
-  - past decisions / prior state / preferences / project-history questions
-  - ambiguous messages that need the previous assistant message to determine what the user means
+The key question: does the user need information from MEMORY (past sessions) to handle this turn, or is the current conversation thread sufficient?
+
+Rules (in priority order — earlier rules override later ones):
+- RULE 1 (highest priority) — "should_recall": false for session-local messages:
+  - Continuation / execution-control: any form of "继续" + optional verb (继续, 继续补, 继续做, 继续搞, etc.), "keep going", "go ahead", "finish it", "continue", "proceed", confirmations like "好的/ok/行/可以/做吧/是的/yes/嗯"
+  - These refer to the CURRENT conversation thread, not to memory. A short or ambiguous message is NOT a reason to recall — shortness means the user expects the assistant to use in-thread context.
+  - EXCEPTION: override to should_recall=true ONLY if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "earlier", "last time", "previous", "remember", "prior"
+- RULE 2 — "should_recall": false for self-contained tasks:
+  - direct code execution, inspection, file operations
+  - text transformation, formatting, translation, summarization
+  - mechanical edits, simple acknowledgements, greetings
+- RULE 3 — "should_recall": true ONLY when the answer requires information from PAST SESSIONS that is not in the current thread:
+  - past decisions, prior configurations, historical preferences
+  - references to work done in earlier conversations
+  - The test: if the assistant can handle this turn using ONLY the current conversation + codebase, recall is NOT needed. Recall is for cross-session memory only.
 - "reason" must be a short snake_case label.
 - "query": if should_recall is true, ALWAYS output English keywords, translate if needed, preserve proper nouns exactly, remove filler words, max 200 chars.
 - "query": if should_recall is false, output null.
