@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Offline fact checker against the entity registry and knowledge graph (#829)
 - LLM-based closet regeneration — optional, bring-your-own endpoint, no mandatory API key (#793)
 - Hall detection — routes drawer content to `emotions` / `technical` / `family` / `memory` / `identity` / `consciousness` / `creative` halls, enabling hall-based graph connectivity within wings (#835)
+- Previous-assistant-context recall for Codex and Claude Code hooks — `Stop` caches the latest assistant reply per session and `UserPromptSubmit` uses its tail (500 chars) for recall query rewrite and LLM rerank, improving short follow-up prompts like “why?” and “continue”
 
 ### Bug Fixes
 - Set `hnsw:space=cosine` metadata on all collection creation sites — fixes broken similarity scoring under ChromaDB's default L2 distance (#807, #218)
@@ -32,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Sync `version.py` to match `pyproject.toml` (#820)
 - Remove unused `main` import from `mempalace/__init__.py` (#827)
 - README audit — fix 7 stale claims (tool count, version badge, wake-up token cost, `dialect.py` lossless disclaimer, `pyproject.toml` version) with 42 regression-guard tests (#835)
+- Rerank now uses the same previous-assistant context as query rewrite, keeping short follow-up recall behavior consistent across the whole LLM-assisted pipeline
 
 ### Improvements
 - Optimize entity detection with regex caching and pre-compilation (#828)
@@ -41,6 +43,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Add `docs/CLOSETS.md` — closet layer overview
 - Fix stale `milla-jovovich/*` org URLs in website and plugin manifests (#787)
 - Fix remaining stale org URLs in contributor docs (#808)
+- Rewrite `README.md` and `mempalaceofficial.com` benchmark pages to remove category-error cross-system comparisons (R@5 retrieval recall had been listed next to competitor QA accuracy under one column), remove the retracted "+34% palace boost" claim from the surfaces where it had remained, replace the `100%` Haiku-rerank headline with the honest held-out `98.4%` R@5, drop the LoCoMo `100%` top-50 row (retrieval-bypass artefact), and fix the broken `aya-thekeeper/mempal` reproduction URL (#875)
+- Add `docs/HISTORY.md` as the canonical home for corrections, retractions, and public notices; move the 2026-04-07 "Note from Milla & Ben" and the 2026-04-11 impostor-domain notice out of `README.md`
+- Add v3.3.0 reproduction result JSONLs and the deterministic `seed=42` 50/450 LongMemEval split under `benchmarks/` — every BENCHMARKS.md claim reproduces exactly
 
 ### Internal
 - Add test coverage for `mine_lock`, closets, entity metadata, BM25, and diary

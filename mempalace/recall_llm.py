@@ -26,6 +26,8 @@ Opt-in via environment variable:
     MEMPAL_RECALL_LLM=1   — enable LLM-enhanced recall (default: off)
 """
 
+from collections.abc import Mapping
+from datetime import date, timedelta
 import json
 import logging
 import os
@@ -46,6 +48,67 @@ REWRITE_TIMEOUT_S = 8
 RERANK_TIMEOUT_S = 8
 REWRITE_MAX_TOKENS = 200
 RERANK_MAX_TOKENS = 50
+PREVIOUS_ASSISTANT_TAIL_MAX_CHARS = 1200
+_PREVIOUS_ASSISTANT_TAIL_KEYS = (
+    "previous_assistant_message_tail",
+    "assistant_message_tail",
+    "previous_assistant_tail",
+    "assistant_tail",
+    "message_tail",
+    "tail",
+    "text",
+    "content",
+)
+_PREVIOUS_ASSISTANT_CONTAINER_KEYS = (
+    "previous_assistant_message",
+    "previous_assistant",
+    "assistant_message",
+    "assistant",
+)
+_SESSION_LOCAL_CONTINUE_PREFIXES = (
+    "继续",
+    "继续推进",
+    "继续做",
+    "继续修",
+    "继续改",
+    "继续处理",
+    "继续完成",
+    "接着做",
+    "接着推进",
+    "往下做",
+    "往下推进",
+    "把剩下的做完",
+    "把剩下的修完",
+    "推进下去",
+    "go ahead",
+    "keep going",
+    "keep working",
+    "finish it",
+    "finish this",
+    "continue",
+    "continue fixing",
+    "continue implementing",
+    "continue working",
+    "proceed",
+)
+_HISTORY_REFERENCE_HINTS = (
+    "之前",
+    "上次",
+    "上回",
+    " earlier ",
+    " last time",
+    " before ",
+    " previous ",
+    " prior ",
+    " history ",
+    " remember ",
+    " earlier",
+    "last time",
+    "before",
+    "previous",
+    "prior",
+)
+
 
 def is_enabled() -> bool:
     """Check if LLM-enhanced recall is enabled. Opt-in via MEMPAL_RECALL_LLM=1."""
@@ -71,7 +134,10 @@ def _get_vertex_token() -> str | None:
             env["GOOGLE_APPLICATION_CREDENTIALS"] = gac
         result = subprocess.run(
             ["gcloud", "auth", "application-default", "print-access-token"],
-            capture_output=True, text=True, timeout=5, env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
         )
         token = result.stdout.strip()
         if token and result.returncode == 0:
@@ -111,7 +177,11 @@ def _get_llm_config() -> dict | None:
                 location = os.environ.get("MEMPAL_VERTEX_LOCATION", "")
                 if not location:
                     cloud_region = os.environ.get("CLOUD_ML_REGION", "")
-                    location = cloud_region if cloud_region and cloud_region != "global" else VERTEX_LOCATION
+                    location = (
+                        cloud_region
+                        if cloud_region and cloud_region != "global"
+                        else VERTEX_LOCATION
+                    )
                 return {
                     "backend": "vertex",
                     "project": project,
@@ -129,8 +199,15 @@ def _get_llm_config() -> dict | None:
     return None
 
 
-def _call_vertex(project: str, location: str, model: str, token: str,
-                 prompt: str, max_tokens: int, timeout: int) -> str | None:
+def _call_vertex(
+    project: str,
+    location: str,
+    model: str,
+    token: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+) -> str | None:
     """Call Vertex AI Claude endpoint. Returns response text or None."""
     # Vertex AI uses the Anthropic Messages API format
     url = (
@@ -138,11 +215,13 @@ def _call_vertex(project: str, location: str, model: str, token: str,
         f"projects/{project}/locations/{location}/"
         f"publishers/anthropic/models/{model}:rawPredict"
     )
-    payload = json.dumps({
-        "anthropic_version": "vertex-2023-10-16",
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "anthropic_version": "vertex-2023-10-16",
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -163,14 +242,21 @@ def _call_vertex(project: str, location: str, model: str, token: str,
         return None
 
 
-def _call_anthropic(api_key: str, model: str, prompt: str,
-                    max_tokens: int, timeout: int) -> str | None:
+def _call_anthropic(
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+) -> str | None:
     """Call Anthropic Messages API. Returns response text or None."""
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -192,14 +278,22 @@ def _call_anthropic(api_key: str, model: str, prompt: str,
         return None
 
 
-def _call_openai_compat(endpoint: str, model: str, key: str, prompt: str,
-                        max_tokens: int, timeout: int) -> str | None:
+def _call_openai_compat(
+    endpoint: str,
+    model: str,
+    key: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+) -> str | None:
     """Call OpenAI-compatible /chat/completions. Returns response text or None."""
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
     if key:
@@ -226,47 +320,352 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
     backend = config["backend"]
     if backend == "vertex":
         return _call_vertex(
-            config["project"], config["location"], config["model"],
-            config["token"], prompt, max_tokens, timeout,
+            config["project"],
+            config["location"],
+            config["model"],
+            config["token"],
+            prompt,
+            max_tokens,
+            timeout,
         )
-    elif backend == "anthropic":
+    if backend == "anthropic":
         return _call_anthropic(
-            config["api_key"], config["model"], prompt, max_tokens, timeout,
+            config["api_key"],
+            config["model"],
+            prompt,
+            max_tokens,
+            timeout,
         )
-    else:
-        return _call_openai_compat(
-            config["endpoint"], config["model"], config.get("key", ""),
-            prompt, max_tokens, timeout,
-        )
+    return _call_openai_compat(
+        config["endpoint"],
+        config["model"],
+        config.get("key", ""),
+        prompt,
+        max_tokens,
+        timeout,
+    )
 
 
 # =========================================================================
-# Stage 1: Query Rewrite
+# Shared prompt helpers
 # =========================================================================
 
-_REWRITE_PROMPT = """\
-You are a search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
 
-Given the user's question and today's date, extract search keywords and any time constraint.
+def _extract_previous_assistant_tail(previous_assistant_context: str | Mapping | None) -> str | None:
+    """Extract the previous assistant reply tail from a string or structured payload."""
+    if previous_assistant_context is None:
+        return None
+
+    if isinstance(previous_assistant_context, str):
+        tail = previous_assistant_context.strip()
+        if not tail:
+            return None
+        if len(tail) > PREVIOUS_ASSISTANT_TAIL_MAX_CHARS:
+            tail = tail[-PREVIOUS_ASSISTANT_TAIL_MAX_CHARS :]
+        return tail
+
+    if not isinstance(previous_assistant_context, Mapping):
+        return None
+
+    for key in _PREVIOUS_ASSISTANT_TAIL_KEYS:
+        value = previous_assistant_context.get(key)
+        if isinstance(value, str) and value.strip():
+            return _extract_previous_assistant_tail(value)
+
+    for key in _PREVIOUS_ASSISTANT_CONTAINER_KEYS:
+        value = previous_assistant_context.get(key)
+        if isinstance(value, Mapping):
+            tail = _extract_previous_assistant_tail(value)
+            if tail:
+                return tail
+
+    return None
+
+
+def _render_previous_assistant_tail(previous_assistant_context: str | Mapping | None) -> str:
+    """Render previous assistant context for prompts."""
+    tail = _extract_previous_assistant_tail(previous_assistant_context)
+    return tail if tail else "(none provided)"
+
+
+def _normalize_message(text: str) -> str:
+    """Normalize a user message for local rule checks."""
+    return " ".join((text or "").strip().lower().split())
+
+
+def _starts_with_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    """Check whether normalized text starts with any continuation phrase."""
+    for phrase in phrases:
+        if (
+            text == phrase
+            or text.startswith(f"{phrase} ")
+            or text.startswith(f"{phrase},")
+            or text.startswith(f"{phrase}:")
+            or text.startswith(f"{phrase}，")
+            or text.startswith(f"{phrase}：")
+        ):
+            return True
+    return False
+
+
+def local_recall_decision(
+    user_prompt: str,
+    previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
+) -> dict | None:
+    """Return a local no-recall decision for obvious session-local cases."""
+    del previous_assistant_context, active_context  # reserved for future tuning
+
+    normalized = _normalize_message(user_prompt)
+    if not normalized:
+        return None
+
+    # Keep recall enabled when the user explicitly references past state.
+    for hint in _HISTORY_REFERENCE_HINTS:
+        if hint in normalized:
+            return None
+
+    if _starts_with_any_phrase(normalized, _SESSION_LOCAL_CONTINUE_PREFIXES):
+        return {
+            "should_recall": False,
+            "reason": "session_local_continue_no_memory_needed",
+            "query": None,
+            "after": None,
+        }
+
+    return None
+
+
+# =========================================================================
+# Stage 1: Decide whether recall is needed + rewrite query
+# =========================================================================
+
+_DECIDE_RECALL_PROMPT = """\
+You are a recall gate and search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
+
+You will receive:
+- CURRENT USER MESSAGE — this is the primary signal.
+- PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
+- ACTIVE CONTEXT — optional project/workdir hint.
+
+Decide whether memory recall is needed for this turn.
 
 Output JSON only — no explanation:
-{{"query": "english keywords here", "after": "YYYY-MM-DD or null"}}
+{{"should_recall": true, "reason": "short_machine_label", "query": "english keywords here or null", "after": "YYYY-MM-DD or null"}}
 
-Rules:
-- "query": ALWAYS English keywords, translate if needed. Preserve proper nouns exactly. Remove filler words. Max 200 chars.
-- "after": extract temporal intent if present. "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null (no time filter).
+The key question: does the user need information from MEMORY (past sessions) to handle this turn, or is the current conversation thread sufficient?
+
+Rules (in priority order — earlier rules override later ones):
+- RULE 1 (highest priority) — "should_recall": false for session-local messages:
+  - 1a. Continuation / execution-control: any form of "继续" + optional verb/clause (继续, 继续补, 继续做, 继续推进 直到完成, etc.), "keep going", "go ahead", "finish it", "continue", "proceed". Includes continuations with conditions or goals ("继续推进，直到完全修复完成").
+  - 1b. Confirmations and acknowledgements: "好的/ok/行/可以/做吧/是的/yes/嗯/got it/sounds good"
+  - 1c. Session-local topic redirects: "先不管这个，帮我看看X" / "换个方向" / "skip that, do X instead" — the user is redirecting within the current thread, not asking for memory.
+  - 1d. Proximal references to current-thread content: "这个报错怎么修", "那个函数怎么改" — when there is no history keyword, "这个/那个/this/that" refers to something in the current thread.
+  - These ALL refer to the CURRENT conversation thread. Shortness or ambiguity is NOT a reason to recall — it means the user expects the assistant to use in-thread context.
+  - EXCEPTION: override to should_recall=true if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "以前", "当时", "那时候", "还记得", "earlier", "last time", "previous", "remember", "prior", "history", "historically"
+- RULE 2 — "should_recall": false for self-contained tasks:
+  - direct code execution, inspection, file operations ("run the tests", "帮我把这个函数改成async")
+  - text transformation, formatting, translation, summarization ("翻译成英文")
+  - mechanical edits, greetings
+- RULE 3 — "should_recall": true ONLY when the answer requires information from PAST SESSIONS or OTHER PROJECTS that is not in the current thread or current codebase:
+  - 3a. Explicit history references: messages containing any of the history-referencing words listed in RULE 1 EXCEPTION.
+  - 3b. Cross-project queries: asking about a project/system NOT in the current working directory. Infer the current project name from the last segment of ACTIVE CONTEXT path. If the user names a different project/system, recall is likely needed.
+  - 3c. Past decisions or preferences: "我们怎么决定的", "用什么方案", deployment procedures, architectural choices from earlier conversations.
+  - 3d. Temporal queries about past work: "昨天那个bug", "上周的进展"
+  - The test: if the assistant can handle this turn using ONLY the current conversation + current codebase, recall is NOT needed.
+
+Query rewrite rules (only when should_recall is true):
+- "query": rewrite into a SHORT PHRASE that captures the search intent. Keep the SAME LANGUAGE as the user's message — if the user writes Chinese, output Chinese; if English, output English. The downstream search uses vector embeddings that work best with same-language matching.
+- Preserve proper nouns EXACTLY (project names, tool names, people names) in their original form.
+- For mixed-language content, keep the dominant language and preserve technical terms as-is (e.g. "recall gate 中文继续消息误判" is fine — don't translate to pure English or pure Chinese).
+- If the PREVIOUS ASSISTANT MESSAGE TAIL contains entity names or specifics that the user's message references implicitly, include them in the query. E.g. user says "那个bug修了吗", assistant tail mentions "auth middleware session leak" → query should be "auth middleware session leak bug修复状态", mixing languages as needed for best retrieval.
+- Max 200 chars. Remove filler words but keep semantic structure.
+- "query": if should_recall is false, output null.
+
+Other fields:
+- "reason" must be a short snake_case label.
+- "after": extract temporal intent if present. Prefer the current user message. Use the previous assistant message tail only for disambiguation when clearly relevant.
+- Time reference mapping: "今天/today" → {today}, "昨天/yesterday" → {yesterday}, "上周/last week" → 7 days before today, "之前/before" → null (too vague for date filter).
+
+Examples (user message → expected output):
+
+"继续补" → {{"should_recall":false,"reason":"continuation_directive","query":null,"after":null}}
+"继续推进，直到完全修复完成" → {{"should_recall":false,"reason":"continuation_with_goal","query":null,"after":null}}
+"好的，做吧" → {{"should_recall":false,"reason":"confirmation","query":null,"after":null}}
+"帮我把这个函数改成async" → {{"should_recall":false,"reason":"direct_code_task","query":null,"after":null}}
+"run the tests" → {{"should_recall":false,"reason":"direct_execution","query":null,"after":null}}
+"这个报错怎么修" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
+"那个文件有什么问题" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
+"翻译成英文" → {{"should_recall":false,"reason":"text_transformation","query":null,"after":null}}
+"先不管这个，帮我看看那个文件" → {{"should_recall":false,"reason":"session_local_redirect","query":null,"after":null}}
+"上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"上次部署脚本位置","after":null}}
+"我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"之前缓存方案决策","after":null}}
+"昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"昨天bug修复状态","after":"{yesterday}"}}
+"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes飞书网关实现","after":null}}
+"按之前那个方案继续推进" → {{"should_recall":true,"reason":"continuation_referencing_past_decision","query":"之前的实现方案","after":null}}
+"where did we put the deploy script last time" → {{"should_recall":true,"reason":"past_session_reference","query":"deploy script location last time","after":null}}
 
 Today is {today}.
 
-User question: {query}
+Current user message:
+{user_message}
+
+Previous assistant message tail (optional context only):
+{previous_assistant_tail}
+
+Active context:
+{active_context}
 
 JSON:"""
 
 
-def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
-    """Use LLM to rewrite a user prompt into an optimized search query.
+def _render_active_context(active_context: str | Mapping | None) -> str:
+    """Render optional active context for prompts."""
+    if active_context is None:
+        return "(none provided)"
+    if isinstance(active_context, str):
+        text = active_context.strip()
+        return text if text else "(none provided)"
+    if isinstance(active_context, Mapping):
+        try:
+            rendered = json.dumps(active_context, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            rendered = str(active_context)
+        return rendered if rendered else "(none provided)"
+    return str(active_context)
+
+
+def _build_decide_recall_prompt(
+    user_prompt: str,
+    previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
+    *,
+    today: str | None = None,
+) -> str:
+    """Build the decide+rewrite prompt with optional previous assistant context."""
+    today_str = today or date.today().isoformat()
+    yesterday_str = (date.fromisoformat(today_str) - timedelta(days=1)).isoformat()
+    return _DECIDE_RECALL_PROMPT.format(
+        today=today_str,
+        yesterday=yesterday_str,
+        user_message=user_prompt,
+        previous_assistant_tail=_render_previous_assistant_tail(previous_assistant_context),
+        active_context=_render_active_context(active_context),
+    )
+
+
+def _parse_bool(value: object) -> bool | None:
+    """Parse a bool or bool-like string, returning None when invalid."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _normalize_after(after: object) -> str | None:
+    """Validate and normalize an ISO date or null-like value."""
+    if after and after != "null":
+        try:
+            date.fromisoformat(str(after))
+            return str(after)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _parse_decide_recall_result(result: str) -> dict | None:
+    """Parse the LLM decide+rewrite response into a normalized dict."""
+    if not result:
+        return None
+
+    result = result.strip()
+    if result.startswith("```"):
+        result = re.sub(r"^```(?:json)?\s*", "", result)
+        result = re.sub(r"\s*```$", "", result)
+
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        clean = result.strip().strip('"\'')
+        if 3 <= len(clean) <= 300:
+            return {
+                "should_recall": True,
+                "reason": "query_string_fallback",
+                "query": clean,
+                "after": None,
+            }
+        return None
+
+    if isinstance(parsed, str):
+        clean = parsed.strip().strip("\"'")
+        if 3 <= len(clean) <= 300:
+            return {
+                "should_recall": True,
+                "reason": "query_string_fallback",
+                "query": clean,
+                "after": None,
+            }
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    should_recall = _parse_bool(parsed.get("should_recall"))
+    query = parsed.get("query")
+    if query == "null":
+        query = None
+    if isinstance(query, str):
+        query = query.strip() or None
+    elif query is not None:
+        query = str(query).strip() or None
+
+    # Backward compatibility: older rewrite-only responses may omit should_recall.
+    if should_recall is None:
+        should_recall = bool(query)
+
+    if not should_recall:
+        return {
+            "should_recall": False,
+            "reason": str(parsed.get("reason") or "llm_decided_no_recall"),
+            "query": None,
+            "after": None,
+        }
+
+    if not query or len(query) < 3:
+        return None
+
+    return {
+        "should_recall": True,
+        "reason": str(parsed.get("reason") or "llm_decided_recall"),
+        "query": query,
+        "after": _normalize_after(parsed.get("after")),
+    }
+
+
+def decide_recall(
+    user_prompt: str,
+    config: dict | None = None,
+    previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
+) -> dict | None:
+    """Use one LLM call to decide whether recall is needed and rewrite query.
+
+    Args:
+        user_prompt: Current user message.
+        config: LLM config dict (from _get_llm_config).
+        previous_assistant_context: Optional previous assistant reply tail,
+            either as a raw string or structured mapping (for example
+            ``{"tail": "..."}``). This is context-only and ignored when absent.
+        active_context: Optional current project/workdir or other local context.
 
     Returns dict with keys:
+        should_recall (bool): Whether memory recall should be attempted.
+        reason (str): Short machine label describing the decision.
         query (str): Rewritten English keyword query.
         after (str|None): ISO date string for time filtering, or None.
     Returns None if LLM is unavailable/fails.
@@ -276,44 +675,34 @@ def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
     if config is None:
         return None
 
-    from datetime import date
-    prompt = _REWRITE_PROMPT.format(query=user_prompt, today=date.today().isoformat())
+    prompt = _build_decide_recall_prompt(
+        user_prompt,
+        previous_assistant_context,
+        active_context,
+    )
     result = _call_llm(config, prompt, REWRITE_MAX_TOKENS, REWRITE_TIMEOUT_S)
+    return _parse_decide_recall_result(result)
 
-    if not result:
+
+def rewrite_query(
+    user_prompt: str,
+    config: dict | None = None,
+    previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
+) -> dict | None:
+    """Backward-compatible wrapper returning only rewrite fields when recall is needed."""
+    decision = decide_recall(
+        user_prompt,
+        config=config,
+        previous_assistant_context=previous_assistant_context,
+        active_context=active_context,
+    )
+    if not decision or not decision.get("should_recall"):
         return None
-
-    # Parse JSON response
-    result = result.strip()
-    # Strip markdown code fences if present
-    if result.startswith("```"):
-        result = re.sub(r"^```(?:json)?\s*", "", result)
-        result = re.sub(r"\s*```$", "", result)
-
-    try:
-        parsed = json.loads(result)
-    except json.JSONDecodeError:
-        # Fallback: treat entire result as query string
-        clean = result.strip().strip('"\'')
-        if 3 <= len(clean) <= 300:
-            return {"query": clean, "after": None}
-        return None
-
-    query = parsed.get("query", "")
-    if not query or len(query) < 3:
-        return None
-
-    after = parsed.get("after")
-    # Validate date format
-    if after and after != "null":
-        try:
-            date.fromisoformat(after)
-        except (ValueError, TypeError):
-            after = None
-    else:
-        after = None
-
-    return {"query": query, "after": after}
+    return {
+        "query": decision["query"],
+        "after": decision.get("after"),
+    }
 
 
 # =========================================================================
@@ -321,16 +710,28 @@ def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
 # =========================================================================
 
 _RERANK_PROMPT = """\
-You are a relevance judge for a personal memory search. Given a user's question and {n} candidate memory snippets, select ONLY the ones that are actually relevant to the question. Return up to {k} results.
+You are a relevance judge for a personal memory search.
+
+You will receive:
+- CURRENT USER MESSAGE — this is the primary signal and should drive the relevance decision.
+- PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
+- {n} candidate memory snippets.
+
+Select ONLY the candidate memories that are actually relevant to the current user message. Return up to {k} results.
 
 Rules:
-- Only include candidates that would genuinely help answer the user's question
+- Only include candidates that would genuinely help answer the current user message.
+- Use the previous assistant message tail only when it materially clarifies the current user message.
 - If none are relevant, reply with: NONE
 - Otherwise reply with ONLY the numbers of relevant candidates, separated by commas, in order of relevance
 - Example (some relevant): 3,1,7
 - Example (none relevant): NONE
 
-User question: {query}
+Current user message:
+{user_message}
+
+Previous assistant message tail (optional context only):
+{previous_assistant_tail}
 
 Candidates:
 {candidates}
@@ -338,15 +739,46 @@ Candidates:
 Relevant candidates:"""
 
 
-def rerank(user_prompt: str, hits: list, top_k: int = 5,
-           config: dict | None = None) -> list | None:
+def _build_rerank_prompt(
+    user_prompt: str,
+    hits: list,
+    top_k: int,
+    previous_assistant_context: str | Mapping | None = None,
+) -> str:
+    """Build the rerank prompt with optional previous assistant context."""
+    candidate_blocks = []
+    for i, hit in enumerate(hits):
+        text = hit.get("text", "")[:400].replace("\n", " ").strip()
+        wing = hit.get("wing", "?")
+        room = hit.get("room", "?")
+        candidate_blocks.append(f"{i + 1}. [{wing}/{room}] {text}")
+
+    return _RERANK_PROMPT.format(
+        n=len(hits),
+        k=top_k,
+        user_message=user_prompt,
+        previous_assistant_tail=_render_previous_assistant_tail(previous_assistant_context),
+        candidates="\n\n".join(candidate_blocks),
+    )
+
+
+def rerank(
+    user_prompt: str,
+    hits: list,
+    top_k: int = 5,
+    config: dict | None = None,
+    previous_assistant_context: str | Mapping | None = None,
+) -> list | None:
     """Use LLM to rerank search hits by relevance, filtering irrelevant ones.
 
     Args:
-        user_prompt: Original user question.
+        user_prompt: Current user message.
         hits: List of search result dicts (must have "text" key).
         top_k: Maximum number of results to select.
         config: LLM config dict (from _get_llm_config).
+        previous_assistant_context: Optional previous assistant reply tail,
+            either as a raw string or structured mapping (for example
+            ``{"tail": "..."}``). This is context-only and ignored when absent.
 
     Returns:
         Reordered hits list (0 to top_k items), or None if LLM call fails.
@@ -360,21 +792,11 @@ def rerank(user_prompt: str, hits: list, top_k: int = 5,
     if len(hits) <= top_k:
         return hits
 
-    # Format candidates — show enough context for relevance judgment
-    candidate_blocks = []
-    for i, hit in enumerate(hits):
-        text = hit.get("text", "")[:400].replace("\n", " ").strip()
-        wing = hit.get("wing", "?")
-        room = hit.get("room", "?")
-        candidate_blocks.append(f"{i + 1}. [{wing}/{room}] {text}")
-
-    candidates_text = "\n\n".join(candidate_blocks)
-
-    prompt = _RERANK_PROMPT.format(
-        n=len(hits),
-        k=top_k,
-        query=user_prompt,
-        candidates=candidates_text,
+    prompt = _build_rerank_prompt(
+        user_prompt,
+        hits,
+        top_k,
+        previous_assistant_context=previous_assistant_context,
     )
 
     result = _call_llm(config, prompt, RERANK_MAX_TOKENS, RERANK_TIMEOUT_S)

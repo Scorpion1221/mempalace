@@ -7,6 +7,7 @@ Consolidates collection access patterns used by both miners and the MCP server.
 import contextlib
 import hashlib
 import os
+import re
 
 from .backends.chroma import ChromaBackend
 
@@ -38,6 +39,25 @@ SKIP_DIRS = {
 
 _DEFAULT_BACKEND = ChromaBackend()
 
+_embedding_fn_cache: object = "UNSET"
+
+
+def _get_embedding_fn():
+    """Lazily resolve and cache the configured embedding function."""
+    global _embedding_fn_cache
+    if _embedding_fn_cache != "UNSET":
+        return _embedding_fn_cache
+    from .embedding import get_embedding_function
+
+    _embedding_fn_cache = get_embedding_function()
+    return _embedding_fn_cache
+
+
+def _reset_embedding_cache():
+    """Reset the embedding function cache. Used in tests."""
+    global _embedding_fn_cache
+    _embedding_fn_cache = "UNSET"
+
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
 # (e.g., new noise-stripping rules). `file_already_mined` treats drawers with
@@ -59,6 +79,7 @@ def get_collection(
         palace_path,
         collection_name=collection_name,
         create=create,
+        embedding_function=_get_embedding_fn(),
     )
 
 
@@ -130,6 +151,35 @@ _ENTITY_STOPLIST = frozenset(
 )
 
 
+_CANDIDATE_RX_CACHE = None
+
+
+def _candidate_entity_words(text: str) -> list:
+    """Find entity candidate words using i18n-aware patterns.
+
+    Uses the same candidate_patterns as entity_detector (loaded from locale
+    JSON files via get_entity_patterns), so non-Latin names (Cyrillic,
+    accented Latin, etc.) are detected alongside ASCII names.
+    """
+    global _CANDIDATE_RX_CACHE
+    if _CANDIDATE_RX_CACHE is None:
+        from .config import MempalaceConfig
+        from .i18n import get_entity_patterns
+
+        patterns = get_entity_patterns(MempalaceConfig().entity_languages)
+        rxs = []
+        for pat in patterns["candidate_patterns"]:
+            try:
+                rxs.append(re.compile(pat))
+            except re.error:
+                continue
+        _CANDIDATE_RX_CACHE = rxs
+    words = []
+    for rx in _CANDIDATE_RX_CACHE:
+        words.extend(rx.findall(text))
+    return words
+
+
 def build_closet_lines(source_file, drawer_ids, content, wing, room):
     """Build compact closet pointer lines from drawer content.
 
@@ -144,9 +194,9 @@ def build_closet_lines(source_file, drawer_ids, content, wing, room):
     drawer_ref = ",".join(drawer_ids[:3])
     window = content[:CLOSET_EXTRACT_WINDOW]
 
-    # Extract proper nouns (capitalized words, 2+ occurrences). Filter out
-    # common sentence-starters that aren't real entities.
-    words = re.findall(r"\b[A-Z][a-z]{2,}\b", window)
+    # Extract proper nouns (2+ occurrences). Uses i18n-aware patterns so
+    # non-Latin names (Cyrillic, accented Latin, etc.) are also detected.
+    words = _candidate_entity_words(window)
     word_freq = {}
     for w in words:
         if w in _ENTITY_STOPLIST:

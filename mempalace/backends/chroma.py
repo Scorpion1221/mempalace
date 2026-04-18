@@ -112,7 +112,10 @@ class ChromaBackend:
     # Collection lifecycle
     # ------------------------------------------------------------------
 
-    def get_collection(self, palace_path: str, collection_name: str, create: bool = False):
+    def get_collection(
+        self, palace_path: str, collection_name: str, create: bool = False,
+        embedding_function=None,
+    ):
         if not create and not os.path.isdir(palace_path):
             raise FileNotFoundError(palace_path)
 
@@ -123,30 +126,42 @@ class ChromaBackend:
             except (OSError, NotImplementedError):
                 pass
 
+        ef_kwargs = {}
+        if embedding_function is not None:
+            ef_kwargs["embedding_function"] = embedding_function
+
         client = self._client(palace_path)
         if create:
             collection = client.get_or_create_collection(
-                collection_name, metadata={"hnsw:space": "cosine"}
+                collection_name, metadata={"hnsw:space": "cosine"}, **ef_kwargs
             )
         else:
-            collection = client.get_collection(collection_name)
+            collection = client.get_collection(collection_name, **ef_kwargs)
         return ChromaCollection(collection)
 
     def get_or_create_collection(
-        self, palace_path: str, collection_name: str
+        self, palace_path: str, collection_name: str,
+        embedding_function=None,
     ) -> "ChromaCollection":
         """Shorthand for get_collection(..., create=True)."""
-        return self.get_collection(palace_path, collection_name, create=True)
+        return self.get_collection(
+            palace_path, collection_name, create=True,
+            embedding_function=embedding_function,
+        )
 
     def delete_collection(self, palace_path: str, collection_name: str) -> None:
         """Delete *collection_name* from the palace at *palace_path*."""
         self._client(palace_path).delete_collection(collection_name)
 
     def create_collection(
-        self, palace_path: str, collection_name: str, hnsw_space: str = "cosine"
+        self, palace_path: str, collection_name: str, hnsw_space: str = "cosine",
+        embedding_function=None,
     ) -> "ChromaCollection":
         """Create (not get-or-create) *collection_name* with cosine HNSW space."""
+        ef_kwargs = {}
+        if embedding_function is not None:
+            ef_kwargs["embedding_function"] = embedding_function
         collection = self._client(palace_path).create_collection(
-            collection_name, metadata={"hnsw:space": hnsw_space}
+            collection_name, metadata={"hnsw:space": hnsw_space}, **ef_kwargs
         )
         return ChromaCollection(collection)
