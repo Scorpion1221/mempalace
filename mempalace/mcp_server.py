@@ -1487,7 +1487,7 @@ TOOLS = {
         "handler": tool_update_drawer,
     },
     "mempalace_diary_write": {
-        "description": "Write to your personal agent diary. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in plain natural language for best search recall — e.g. 'Worked on recall gate prompt for mempalace. Fixed false positives on CJK continuation messages. Key decision: prioritized rules instead of flat list.'",
+        "description": "Write to your personal agent diary. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in plain natural language for best search recall. IMPORTANT: write in the SAME LANGUAGE the user used during the session — if the conversation was in Chinese, write the diary in Chinese; if English, write in English. Examples: '修复了 recall gate prompt 的误判问题，中文继续消息不再触发召回。关键决策：用优先级规则替代扁平规则。' or 'Worked on recall gate prompt. Fixed false positives on CJK continuation messages.'",
         "input_schema": {
             "type": "object",
             "properties": {

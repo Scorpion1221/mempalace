@@ -53,7 +53,8 @@ USERPROMPT_HARD_SKIP_PHRASES = USERPROMPT_SKIP_PHRASES - USERPROMPT_CONTEXTUAL_F
 
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
-    "1. mempalace_diary_write — natural language session summary (what you worked on, key decisions, outcomes)\n"
+    "1. mempalace_diary_write — natural language session summary "
+    "(write in the SAME LANGUAGE the user used during this session)\n"
     "2. mempalace_add_drawer — verbatim quotes, decisions, code snippets "
     "(params: wing=project name, room=topic, content=verbatim text)\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
@@ -64,7 +65,8 @@ STOP_BLOCK_REASON = (
 
 PRECOMPACT_BLOCK_REASON = (
     "COMPACTION IMMINENT (MemPalace). Save ALL session content before context is lost:\n"
-    "1. mempalace_diary_write — thorough natural language session summary\n"
+    "1. mempalace_diary_write — thorough natural language session summary "
+    "(write in the SAME LANGUAGE the user used during this session)\n"
     "2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context "
     "(params: wing=project name, room=topic, content=verbatim text)\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
