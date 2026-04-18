@@ -65,6 +65,49 @@ _PREVIOUS_ASSISTANT_CONTAINER_KEYS = (
     "assistant_message",
     "assistant",
 )
+_SESSION_LOCAL_CONTINUE_PREFIXES = (
+    "继续",
+    "继续推进",
+    "继续做",
+    "继续修",
+    "继续改",
+    "继续处理",
+    "继续完成",
+    "接着做",
+    "接着推进",
+    "往下做",
+    "往下推进",
+    "把剩下的做完",
+    "把剩下的修完",
+    "推进下去",
+    "go ahead",
+    "keep going",
+    "keep working",
+    "finish it",
+    "finish this",
+    "continue",
+    "continue fixing",
+    "continue implementing",
+    "continue working",
+    "proceed",
+)
+_HISTORY_REFERENCE_HINTS = (
+    "之前",
+    "上次",
+    "上回",
+    " earlier ",
+    " last time",
+    " before ",
+    " previous ",
+    " prior ",
+    " history ",
+    " remember ",
+    " earlier",
+    "last time",
+    "before",
+    "previous",
+    "prior",
+)
 
 
 def is_enabled() -> bool:
@@ -345,6 +388,54 @@ def _render_previous_assistant_tail(previous_assistant_context: str | Mapping | 
     return tail if tail else "(none provided)"
 
 
+def _normalize_message(text: str) -> str:
+    """Normalize a user message for local rule checks."""
+    return " ".join((text or "").strip().lower().split())
+
+
+def _starts_with_any_phrase(text: str, phrases: tuple[str, ...]) -> bool:
+    """Check whether normalized text starts with any continuation phrase."""
+    for phrase in phrases:
+        if (
+            text == phrase
+            or text.startswith(f"{phrase} ")
+            or text.startswith(f"{phrase},")
+            or text.startswith(f"{phrase}:")
+            or text.startswith(f"{phrase}，")
+            or text.startswith(f"{phrase}：")
+        ):
+            return True
+    return False
+
+
+def local_recall_decision(
+    user_prompt: str,
+    previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
+) -> dict | None:
+    """Return a local no-recall decision for obvious session-local cases."""
+    del previous_assistant_context, active_context  # reserved for future tuning
+
+    normalized = _normalize_message(user_prompt)
+    if not normalized:
+        return None
+
+    # Keep recall enabled when the user explicitly references past state.
+    for hint in _HISTORY_REFERENCE_HINTS:
+        if hint in normalized:
+            return None
+
+    if _starts_with_any_phrase(normalized, _SESSION_LOCAL_CONTINUE_PREFIXES):
+        return {
+            "should_recall": False,
+            "reason": "session_local_continue_no_memory_needed",
+            "query": None,
+            "after": None,
+        }
+
+    return None
+
+
 # =========================================================================
 # Stage 1: Decide whether recall is needed + rewrite query
 # =========================================================================
@@ -367,6 +458,7 @@ Rules:
   - direct local execution / inspection tasks
   - pure text transformation, formatting, translation, or summarization requests
   - mechanical edits or simple acknowledgements / greetings
+  - current-thread execution-control messages whose intent is simply to keep working on the task already in progress, such as "继续推进", "keep going", or "finish it", unless they explicitly reference earlier decisions or historical state
 - Set "should_recall" to true for:
   - short follow-up questions that depend on previous assistant context
   - past decisions / prior state / preferences / project-history questions

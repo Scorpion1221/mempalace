@@ -547,6 +547,24 @@ def hook_userprompt(data: dict, harness: str):
         _output({})
         return
 
+    try:
+        from .recall_llm import local_recall_decision
+
+        local_decision = local_recall_decision(
+            prompt_stripped,
+            previous_assistant_context={"tail": previous_assistant_tail},
+            active_context=cwd,
+        )
+        if local_decision and not local_decision.get("should_recall"):
+            _log(
+                "UserPrompt recall: local skip "
+                f"reason={local_decision.get('reason', 'unknown')}"
+            )
+            _output({})
+            return
+    except Exception as e:
+        _log(f"UserPrompt recall: local gate failed ({e}), continuing")
+
     # Lazy import to avoid startup cost when other hooks run
     try:
         from .config import MempalaceConfig

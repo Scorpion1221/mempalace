@@ -116,6 +116,39 @@ class TestDecideRecall:
         assert recall_llm.rewrite_query("Format this JSON", config={"backend": "stub"}) is None
 
 
+class TestLocalRecallDecision:
+    def test_session_local_continue_is_skipped(self):
+        result = recall_llm.local_recall_decision(
+            "继续推进，直到完全修复完成",
+            previous_assistant_context={"tail": "Earlier I outlined the task plan."},
+        )
+        assert result == {
+            "should_recall": False,
+            "reason": "session_local_continue_no_memory_needed",
+            "query": None,
+            "after": None,
+        }
+
+    def test_history_referencing_continue_is_not_skipped(self):
+        result = recall_llm.local_recall_decision(
+            "按之前那个方案继续推进",
+            previous_assistant_context={"tail": "Earlier I outlined the task plan."},
+        )
+        assert result is None
+
+    def test_english_continue_is_skipped(self):
+        result = recall_llm.local_recall_decision(
+            "keep going until it's fixed",
+            previous_assistant_context={"tail": "Earlier I outlined the task plan."},
+        )
+        assert result == {
+            "should_recall": False,
+            "reason": "session_local_continue_no_memory_needed",
+            "query": None,
+            "after": None,
+        }
+
+
 class TestRerank:
     def test_rerank_uses_optional_previous_assistant_tail_and_preserves_order(self, monkeypatch):
         hits = [

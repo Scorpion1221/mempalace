@@ -743,6 +743,67 @@ def test_userprompt_llm_can_skip_recall_entirely(tmp_path):
     mock_search.assert_not_called()
 
 
+def test_userprompt_session_local_continue_skips_before_search(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text(
+        "Earlier I explained the remaining work plan.",
+        encoding="utf-8",
+    )
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {
+                            "session_id": "session-a",
+                            "prompt": "继续推进，直到完全修复完成",
+                            "cwd": "/tmp/project",
+                        },
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+    mock_search.assert_not_called()
+
+
+def test_userprompt_history_continue_can_still_recall(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text(
+        "Earlier I explained the previous migration plan.",
+        encoding="utf-8",
+    )
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    mock_search.return_value = {
+                        "results": [
+                            {"wing": "mempalace", "room": "decisions", "text": "Remembered context"}
+                        ]
+                    }
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {
+                            "session_id": "session-a",
+                            "prompt": "按之前那个方案继续推进",
+                            "cwd": "/tmp/project",
+                        },
+                        state_dir=tmp_path,
+                    )
+
+    assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    mock_search.assert_called_once()
+
+
 # --- run_hook ---
 
 
