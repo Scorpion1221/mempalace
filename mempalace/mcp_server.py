@@ -1477,7 +1477,7 @@ TOOLS = {
         "handler": tool_update_drawer,
     },
     "mempalace_diary_write": {
-        "description": "Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression — e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|★★★'. Use entity codes from the AAAK spec.",
+        "description": "Write to your personal agent diary. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in plain natural language for best search recall — e.g. 'Worked on recall gate prompt for mempalace. Fixed false positives on CJK continuation messages. Key decision: prioritized rules instead of flat list.'",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1487,7 +1487,7 @@ TOOLS = {
                 },
                 "entry": {
                     "type": "string",
-                    "description": "Your diary entry in AAAK format — compressed, entity-coded, emotion-marked",
+                    "description": "Your diary entry — plain natural language summary of what happened, decisions made, and outcomes",
                 },
                 "topic": {
                     "type": "string",
@@ -1499,7 +1499,7 @@ TOOLS = {
         "handler": tool_diary_write,
     },
     "mempalace_diary_read": {
-        "description": "Read your recent diary entries (in AAAK). See what past versions of yourself recorded — your journal across sessions.",
+        "description": "Read your recent diary entries. See what past versions of yourself recorded — your journal across sessions.",
         "input_schema": {
             "type": "object",
             "properties": {

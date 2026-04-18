@@ -53,7 +53,7 @@ USERPROMPT_HARD_SKIP_PHRASES = USERPROMPT_SKIP_PHRASES - USERPROMPT_CONTEXTUAL_F
 
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
-    "1. mempalace_diary_write — AAAK-compressed session summary\n"
+    "1. mempalace_diary_write — natural language session summary (what you worked on, key decisions, outcomes)\n"
     "2. mempalace_add_drawer — verbatim quotes, decisions, code snippets "
     "(params: wing=project name, room=topic, content=verbatim text)\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
@@ -64,7 +64,7 @@ STOP_BLOCK_REASON = (
 
 PRECOMPACT_BLOCK_REASON = (
     "COMPACTION IMMINENT (MemPalace). Save ALL session content before context is lost:\n"
-    "1. mempalace_diary_write — thorough AAAK-compressed session summary\n"
+    "1. mempalace_diary_write — thorough natural language session summary\n"
     "2. mempalace_add_drawer — ALL verbatim quotes, decisions, code, context "
     "(params: wing=project name, room=topic, content=verbatim text)\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
@@ -645,9 +645,9 @@ def hook_userprompt(data: dict, harness: str):
 
     hits = result.get("results", []) if isinstance(result, dict) else []
 
-    # Filter out diary entries — AAAK-compressed session logs are not
-    # human-readable and pollute auto-recall results. Agents can still
-    # find diary content via explicit mempalace_search tool calls.
+    # Filter out diary entries — session logs are compact summaries that
+    # pollute auto-recall results. Agents can still find diary content
+    # via explicit mempalace_search tool calls.
     hits = [h for h in hits if h.get("room") != "diary"]
 
     if not hits:
