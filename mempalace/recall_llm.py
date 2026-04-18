@@ -27,7 +27,7 @@ Opt-in via environment variable:
 """
 
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 import json
 import logging
 import os
@@ -457,22 +457,52 @@ The key question: does the user need information from MEMORY (past sessions) to 
 
 Rules (in priority order — earlier rules override later ones):
 - RULE 1 (highest priority) — "should_recall": false for session-local messages:
-  - Continuation / execution-control: any form of "继续" + optional verb (继续, 继续补, 继续做, 继续搞, etc.), "keep going", "go ahead", "finish it", "continue", "proceed", confirmations like "好的/ok/行/可以/做吧/是的/yes/嗯"
-  - These refer to the CURRENT conversation thread, not to memory. A short or ambiguous message is NOT a reason to recall — shortness means the user expects the assistant to use in-thread context.
-  - EXCEPTION: override to should_recall=true ONLY if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "earlier", "last time", "previous", "remember", "prior"
+  - 1a. Continuation / execution-control: any form of "继续" + optional verb/clause (继续, 继续补, 继续做, 继续推进 直到完成, etc.), "keep going", "go ahead", "finish it", "continue", "proceed". Includes continuations with conditions or goals ("继续推进，直到完全修复完成").
+  - 1b. Confirmations and acknowledgements: "好的/ok/行/可以/做吧/是的/yes/嗯/got it/sounds good"
+  - 1c. Session-local topic redirects: "先不管这个，帮我看看X" / "换个方向" / "skip that, do X instead" — the user is redirecting within the current thread, not asking for memory.
+  - 1d. Proximal references to current-thread content: "这个报错怎么修", "那个函数怎么改" — when there is no history keyword, "这个/那个/this/that" refers to something in the current thread.
+  - These ALL refer to the CURRENT conversation thread. Shortness or ambiguity is NOT a reason to recall — it means the user expects the assistant to use in-thread context.
+  - EXCEPTION: override to should_recall=true if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "以前", "当时", "那时候", "还记得", "earlier", "last time", "previous", "remember", "prior", "history", "historically"
 - RULE 2 — "should_recall": false for self-contained tasks:
-  - direct code execution, inspection, file operations
-  - text transformation, formatting, translation, summarization
-  - mechanical edits, simple acknowledgements, greetings
-- RULE 3 — "should_recall": true ONLY when the answer requires information from PAST SESSIONS that is not in the current thread:
-  - past decisions, prior configurations, historical preferences
-  - references to work done in earlier conversations
-  - The test: if the assistant can handle this turn using ONLY the current conversation + codebase, recall is NOT needed. Recall is for cross-session memory only.
-- "reason" must be a short snake_case label.
-- "query": if should_recall is true, ALWAYS output English keywords, translate if needed, preserve proper nouns exactly, remove filler words, max 200 chars.
+  - direct code execution, inspection, file operations ("run the tests", "帮我把这个函数改成async")
+  - text transformation, formatting, translation, summarization ("翻译成英文")
+  - mechanical edits, greetings
+- RULE 3 — "should_recall": true ONLY when the answer requires information from PAST SESSIONS or OTHER PROJECTS that is not in the current thread or current codebase:
+  - 3a. Explicit history references: messages containing any of the history-referencing words listed in RULE 1 EXCEPTION.
+  - 3b. Cross-project queries: asking about a project/system NOT in the current working directory. Infer the current project name from the last segment of ACTIVE CONTEXT path. If the user names a different project/system, recall is likely needed.
+  - 3c. Past decisions or preferences: "我们怎么决定的", "用什么方案", deployment procedures, architectural choices from earlier conversations.
+  - 3d. Temporal queries about past work: "昨天那个bug", "上周的进展"
+  - The test: if the assistant can handle this turn using ONLY the current conversation + current codebase, recall is NOT needed.
+
+Query rewrite rules (only when should_recall is true):
+- "query": rewrite into a SHORT ENGLISH PHRASE (not just keywords) that captures the search intent. The downstream search uses hybrid vector + BM25 ranking, so a coherent phrase works better than keyword soup.
+- Preserve proper nouns EXACTLY (project names, tool names, people names).
+- Translate non-English terms to English, but keep proper nouns in original form if they are used as identifiers (e.g. "飞书" → "feishu/lark", "Hermes" stays "Hermes").
+- If the PREVIOUS ASSISTANT MESSAGE TAIL contains entity names or specifics that the user's message references implicitly, include them in the query. E.g. user says "那个bug修了吗", assistant tail mentions "auth middleware session leak" → query should be "auth middleware session leak bug fix status", not just "bug fix status".
+- Max 200 chars. Remove filler words but keep semantic structure.
 - "query": if should_recall is false, output null.
+
+Other fields:
+- "reason" must be a short snake_case label.
 - "after": extract temporal intent if present. Prefer the current user message. Use the previous assistant message tail only for disambiguation when clearly relevant.
-- Time examples: "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null.
+- Time reference mapping: "今天/today" → {today}, "昨天/yesterday" → {yesterday}, "上周/last week" → 7 days before today, "之前/before" → null (too vague for date filter).
+
+Examples (user message → expected output):
+
+"继续补" → {{"should_recall":false,"reason":"continuation_directive","query":null,"after":null}}
+"继续推进，直到完全修复完成" → {{"should_recall":false,"reason":"continuation_with_goal","query":null,"after":null}}
+"好的，做吧" → {{"should_recall":false,"reason":"confirmation","query":null,"after":null}}
+"帮我把这个函数改成async" → {{"should_recall":false,"reason":"direct_code_task","query":null,"after":null}}
+"run the tests" → {{"should_recall":false,"reason":"direct_execution","query":null,"after":null}}
+"这个报错怎么修" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
+"那个文件有什么问题" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
+"翻译成英文" → {{"should_recall":false,"reason":"text_transformation","query":null,"after":null}}
+"先不管这个，帮我看看那个文件" → {{"should_recall":false,"reason":"session_local_redirect","query":null,"after":null}}
+"上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"deployment script location","after":null}}
+"我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"caching solution decision","after":null}}
+"昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"bug fix status","after":"{yesterday}"}}
+"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes feishu lark gateway implementation","after":null}}
+"按之前那个方案继续推进" → {{"should_recall":true,"reason":"continuation_referencing_past_decision","query":"previous implementation plan approach","after":null}}
 
 Today is {today}.
 
@@ -512,8 +542,11 @@ def _build_decide_recall_prompt(
     today: str | None = None,
 ) -> str:
     """Build the decide+rewrite prompt with optional previous assistant context."""
+    today_str = today or date.today().isoformat()
+    yesterday_str = (date.fromisoformat(today_str) - timedelta(days=1)).isoformat()
     return _DECIDE_RECALL_PROMPT.format(
-        today=today or date.today().isoformat(),
+        today=today_str,
+        yesterday=yesterday_str,
         user_message=user_prompt,
         previous_assistant_tail=_render_previous_assistant_tail(previous_assistant_context),
         active_context=_render_active_context(active_context),
