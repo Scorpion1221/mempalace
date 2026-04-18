@@ -49,6 +49,7 @@ USERPROMPT_SKIP_PHRASES = frozenset({
 USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES = frozenset({
     "continue", "go", "go on", "next", "继续",
 })
+USERPROMPT_HARD_SKIP_PHRASES = USERPROMPT_SKIP_PHRASES - USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES
 
 STOP_BLOCK_REASON = (
     "AUTO-SAVE checkpoint (MemPalace). Save this session's key content:\n"
@@ -536,14 +537,10 @@ def hook_userprompt(data: dict, harness: str):
     prompt_normalized = prompt_stripped.lower()
 
     # Skip trivial prompts: too short or common filler phrases
-    if prompt_normalized in USERPROMPT_SKIP_PHRASES:
-        if not (
-            previous_assistant_tail
-            and prompt_normalized in USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES
-        ):
-            _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
-            _output({})
-            return
+    if prompt_normalized in USERPROMPT_HARD_SKIP_PHRASES:
+        _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
+        _output({})
+        return
 
     if len(prompt_stripped) < USERPROMPT_MIN_QUERY_LEN and not previous_assistant_tail:
         _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
@@ -582,21 +579,33 @@ def hook_userprompt(data: dict, harness: str):
     llm_config = None
     time_after = None
     try:
-        from .recall_llm import is_enabled, _get_llm_config, rewrite_query, rerank
+        from .recall_llm import is_enabled, _get_llm_config, decide_recall, rerank
         if is_enabled():
             llm_config = _get_llm_config()
         if llm_config:
-            rewrite_result = rewrite_query(
+            recall_decision = decide_recall(
                 user_prompt,
                 config=llm_config,
                 previous_assistant_context={"tail": previous_assistant_tail},
+                active_context=cwd,
             )
-            if rewrite_result:
-                search_query = rewrite_result["query"]
-                time_after = rewrite_result.get("after")
-                _log(f"UserPrompt recall: query rewritten to {search_query[:80]!r}, after={time_after}")
+            if recall_decision:
+                if not recall_decision.get("should_recall"):
+                    _log(
+                        "UserPrompt recall: LLM skipped recall "
+                        f"reason={recall_decision.get('reason', 'unknown')}"
+                    )
+                    _output({})
+                    return
+                search_query = recall_decision["query"]
+                time_after = recall_decision.get("after")
+                _log(
+                    "UserPrompt recall: "
+                    f"LLM decided recall reason={recall_decision.get('reason', 'unknown')}, "
+                    f"query={search_query[:80]!r}, after={time_after}"
+                )
     except Exception as e:
-        _log(f"UserPrompt recall: query rewrite failed ({e}), using original")
+        _log(f"UserPrompt recall: decide+rewrite failed ({e}), using fallback")
 
     # --- Stage 2: Vector search + BM25 hybrid rank ---
     # Fetch a larger pool when LLM rerank is available

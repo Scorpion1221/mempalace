@@ -346,23 +346,36 @@ def _render_previous_assistant_tail(previous_assistant_context: str | Mapping | 
 
 
 # =========================================================================
-# Stage 1: Query Rewrite
+# Stage 1: Decide whether recall is needed + rewrite query
 # =========================================================================
 
-_REWRITE_PROMPT = """\
-You are a search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
+_DECIDE_RECALL_PROMPT = """\
+You are a recall gate and search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
 
 You will receive:
-- CURRENT USER MESSAGE — this is the primary signal and should drive the query rewrite.
+- CURRENT USER MESSAGE — this is the primary signal.
 - PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
+- ACTIVE CONTEXT — optional project/workdir hint.
+
+Decide whether memory recall is needed for this turn.
 
 Output JSON only — no explanation:
-{{"query": "english keywords here", "after": "YYYY-MM-DD or null"}}
+{{"should_recall": true, "reason": "short_machine_label", "query": "english keywords here or null", "after": "YYYY-MM-DD or null"}}
 
 Rules:
-- "query": ALWAYS English keywords, translate if needed. Preserve proper nouns exactly. Remove filler words. Max 200 chars.
+- Set "should_recall" to false for turns that can be handled without memory recall, such as:
+  - direct local execution / inspection tasks
+  - pure text transformation, formatting, translation, or summarization requests
+  - mechanical edits or simple acknowledgements / greetings
+- Set "should_recall" to true for:
+  - short follow-up questions that depend on previous assistant context
+  - past decisions / prior state / preferences / project-history questions
+  - ambiguous messages that need the previous assistant message to determine what the user means
+- "reason" must be a short snake_case label.
+- "query": if should_recall is true, ALWAYS output English keywords, translate if needed, preserve proper nouns exactly, remove filler words, max 200 chars.
+- "query": if should_recall is false, output null.
 - "after": extract temporal intent if present. Prefer the current user message. Use the previous assistant message tail only for disambiguation when clearly relevant.
-- Time examples: "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null (no time filter).
+- Time examples: "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null.
 
 Today is {today}.
 
@@ -372,29 +385,144 @@ Current user message:
 Previous assistant message tail (optional context only):
 {previous_assistant_tail}
 
+Active context:
+{active_context}
+
 JSON:"""
 
 
-def _build_rewrite_prompt(
+def _render_active_context(active_context: str | Mapping | None) -> str:
+    """Render optional active context for prompts."""
+    if active_context is None:
+        return "(none provided)"
+    if isinstance(active_context, str):
+        text = active_context.strip()
+        return text if text else "(none provided)"
+    if isinstance(active_context, Mapping):
+        try:
+            rendered = json.dumps(active_context, ensure_ascii=False, sort_keys=True)
+        except TypeError:
+            rendered = str(active_context)
+        return rendered if rendered else "(none provided)"
+    return str(active_context)
+
+
+def _build_decide_recall_prompt(
     user_prompt: str,
     previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
     *,
     today: str | None = None,
 ) -> str:
-    """Build the rewrite prompt with optional previous assistant context."""
-    return _REWRITE_PROMPT.format(
+    """Build the decide+rewrite prompt with optional previous assistant context."""
+    return _DECIDE_RECALL_PROMPT.format(
         today=today or date.today().isoformat(),
         user_message=user_prompt,
         previous_assistant_tail=_render_previous_assistant_tail(previous_assistant_context),
+        active_context=_render_active_context(active_context),
     )
 
 
-def rewrite_query(
+def _parse_bool(value: object) -> bool | None:
+    """Parse a bool or bool-like string, returning None when invalid."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "1"}:
+            return True
+        if normalized in {"false", "no", "0"}:
+            return False
+    return None
+
+
+def _normalize_after(after: object) -> str | None:
+    """Validate and normalize an ISO date or null-like value."""
+    if after and after != "null":
+        try:
+            date.fromisoformat(str(after))
+            return str(after)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def _parse_decide_recall_result(result: str) -> dict | None:
+    """Parse the LLM decide+rewrite response into a normalized dict."""
+    if not result:
+        return None
+
+    result = result.strip()
+    if result.startswith("```"):
+        result = re.sub(r"^```(?:json)?\s*", "", result)
+        result = re.sub(r"\s*```$", "", result)
+
+    try:
+        parsed = json.loads(result)
+    except json.JSONDecodeError:
+        clean = result.strip().strip('"\'')
+        if 3 <= len(clean) <= 300:
+            return {
+                "should_recall": True,
+                "reason": "query_string_fallback",
+                "query": clean,
+                "after": None,
+            }
+        return None
+
+    if isinstance(parsed, str):
+        clean = parsed.strip().strip("\"'")
+        if 3 <= len(clean) <= 300:
+            return {
+                "should_recall": True,
+                "reason": "query_string_fallback",
+                "query": clean,
+                "after": None,
+            }
+        return None
+
+    if not isinstance(parsed, dict):
+        return None
+
+    should_recall = _parse_bool(parsed.get("should_recall"))
+    query = parsed.get("query")
+    if query == "null":
+        query = None
+    if isinstance(query, str):
+        query = query.strip() or None
+    elif query is not None:
+        query = str(query).strip() or None
+
+    # Backward compatibility: older rewrite-only responses may omit should_recall.
+    if should_recall is None:
+        should_recall = bool(query)
+
+    if not should_recall:
+        return {
+            "should_recall": False,
+            "reason": str(parsed.get("reason") or "llm_decided_no_recall"),
+            "query": None,
+            "after": None,
+        }
+
+    if not query or len(query) < 3:
+        return None
+
+    return {
+        "should_recall": True,
+        "reason": str(parsed.get("reason") or "llm_decided_recall"),
+        "query": query,
+        "after": _normalize_after(parsed.get("after")),
+    }
+
+
+def decide_recall(
     user_prompt: str,
     config: dict | None = None,
     previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
 ) -> dict | None:
-    """Use LLM to rewrite a user prompt into an optimized search query.
+    """Use one LLM call to decide whether recall is needed and rewrite query.
 
     Args:
         user_prompt: Current user message.
@@ -402,8 +530,11 @@ def rewrite_query(
         previous_assistant_context: Optional previous assistant reply tail,
             either as a raw string or structured mapping (for example
             ``{"tail": "..."}``). This is context-only and ignored when absent.
+        active_context: Optional current project/workdir or other local context.
 
     Returns dict with keys:
+        should_recall (bool): Whether memory recall should be attempted.
+        reason (str): Short machine label describing the decision.
         query (str): Rewritten English keyword query.
         after (str|None): ISO date string for time filtering, or None.
     Returns None if LLM is unavailable/fails.
@@ -413,52 +544,34 @@ def rewrite_query(
     if config is None:
         return None
 
-    prompt = _build_rewrite_prompt(user_prompt, previous_assistant_context)
+    prompt = _build_decide_recall_prompt(
+        user_prompt,
+        previous_assistant_context,
+        active_context,
+    )
     result = _call_llm(config, prompt, REWRITE_MAX_TOKENS, REWRITE_TIMEOUT_S)
+    return _parse_decide_recall_result(result)
 
-    if not result:
+
+def rewrite_query(
+    user_prompt: str,
+    config: dict | None = None,
+    previous_assistant_context: str | Mapping | None = None,
+    active_context: str | Mapping | None = None,
+) -> dict | None:
+    """Backward-compatible wrapper returning only rewrite fields when recall is needed."""
+    decision = decide_recall(
+        user_prompt,
+        config=config,
+        previous_assistant_context=previous_assistant_context,
+        active_context=active_context,
+    )
+    if not decision or not decision.get("should_recall"):
         return None
-
-    # Parse JSON response
-    result = result.strip()
-    # Strip markdown code fences if present
-    if result.startswith("```"):
-        result = re.sub(r"^```(?:json)?\s*", "", result)
-        result = re.sub(r"\s*```$", "", result)
-
-    try:
-        parsed = json.loads(result)
-    except json.JSONDecodeError:
-        # Fallback: treat entire result as query string
-        clean = result.strip().strip('"\'')
-        if 3 <= len(clean) <= 300:
-            return {"query": clean, "after": None}
-        return None
-
-    if isinstance(parsed, str):
-        clean = parsed.strip().strip("\"'")
-        if 3 <= len(clean) <= 300:
-            return {"query": clean, "after": None}
-        return None
-
-    if not isinstance(parsed, dict):
-        return None
-
-    query = parsed.get("query", "")
-    if not query or len(query) < 3:
-        return None
-
-    after = parsed.get("after")
-    # Validate date format
-    if after and after != "null":
-        try:
-            date.fromisoformat(after)
-        except (ValueError, TypeError):
-            after = None
-    else:
-        after = None
-
-    return {"query": query, "after": after}
+    return {
+        "query": decision["query"],
+        "after": decision.get("after"),
+    }
 
 
 # =========================================================================

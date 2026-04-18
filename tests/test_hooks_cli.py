@@ -653,8 +653,13 @@ def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
             ]
         }
 
-    def fake_rewrite_query(*args, **kwargs):
-        return {"query": "codex hooks", "after": None}
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": True,
+            "reason": "short_followup_depends_on_previous_assistant",
+            "query": "codex hooks",
+            "after": None,
+        }
 
     def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
         rerank_calls["user_prompt"] = user_prompt
@@ -671,8 +676,8 @@ def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
                             return_value={"backend": "stub"},
                         ):
                             with patch(
-                                "mempalace.recall_llm.rewrite_query",
-                                side_effect=fake_rewrite_query,
+                                "mempalace.recall_llm.decide_recall",
+                                side_effect=fake_decide_recall,
                             ):
                                 with patch(
                                     "mempalace.recall_llm.rerank",
@@ -693,6 +698,49 @@ def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
     assert rerank_calls["previous_assistant_context"] == {
         "tail": previous_assistant[-USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS:]
     }
+
+
+def test_userprompt_llm_can_skip_recall_entirely(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    previous_assistant = "Earlier I explained the Codex hook behavior."
+    (tmp_path / "session-a_last_assistant").write_text(previous_assistant, encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": False,
+            "reason": "direct_local_task_no_memory_needed",
+            "query": None,
+            "after": None,
+        }
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                side_effect=fake_decide_recall,
+                            ):
+                                result = _capture_hook_output(
+                                    hook_userprompt,
+                                    {
+                                        "session_id": "session-a",
+                                        "prompt": "format this json",
+                                        "cwd": "/tmp/project",
+                                    },
+                                    state_dir=tmp_path,
+                                )
+
+    assert result == {}
+    mock_search.assert_not_called()
 
 
 # --- run_hook ---
