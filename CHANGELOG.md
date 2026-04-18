@@ -6,6 +6,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ---
 
+## [Unreleased — Fork: Scorpion1221/mempalace dev branch]
+
+This section documents changes in the fork that are not yet in upstream.
+Based on upstream `3.3.1`.
+
+### New Features
+
+**Pluggable embedding model with Gemini support** — Switch from ChromaDB's default all-MiniLM-L6-v2 (384d, MTEB multilingual ~56) to Google's gemini-embedding-2-preview (3072d, MTEB multilingual ~68) via a single environment variable. Real benchmark improvement: Chinese→Chinese similarity 0.76→0.85 (+12%), English→Chinese 0.56→0.73 (+30%).
+
+- New module `mempalace/embedding.py` — `GeminiEmbeddingFunction` implements ChromaDB's `EmbeddingFunction` protocol via raw HTTP (no SDK dependency)
+- Handles batching (100 texts/call), retry with exponential backoff
+- Config: `MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview` + `GEMINI_API_KEY`
+- Threaded through all 10 collection creation points: `backends/chroma.py`, `palace.py`, `mcp_server.py`, `cli.py`, `repair.py`, `dedup.py`, `migrate.py`
+- Backward compatible: unset env var → default local MiniLM, zero API calls
+
+**LLM-powered recall gate (opt-in)** — Two-stage pipeline that decides whether memory recall is needed and rewrites queries for better retrieval. Enabled via `MEMPAL_RECALL_LLM=1`.
+
+- Stage 1: `decide_recall()` — LLM judges whether the turn needs memory recall at all, with prioritized rules and 14 few-shot examples covering CJK and English edge cases
+- Stage 2: `rerank()` — LLM selects the most relevant results from a larger candidate pool
+- Previous assistant context (last 500 chars) passed to both stages for better disambiguation
+- Local fast-path (`local_recall_decision()`) skips LLM for obvious cases (continuations, confirmations, self-contained tasks)
+- Supports Vertex AI, Anthropic API, and any OpenAI-compatible endpoint
+
+**CJK hybrid search** — Bigram tokenizer for BM25 ranking, preferred-wing boost, and temporal filtering in the searcher.
+
+**Auto-recall hooks for Claude Code and Codex** — `UserPromptSubmit` hook automatically searches the palace and injects relevant memories into the conversation context.
+
+### Improvements
+
+- **Query rewrite preserves user's language** — Previously forced English translation, causing 20% retrieval penalty for Chinese content. Now keeps the same language as the user's message.
+- **Diary and hooks use natural language instead of AAAK** — AAAK compressed format scored 84.2% vs raw 96.6% on LongMemEval. All prompts now guide plain natural language for better search recall.
+- **Diary and hooks write in user's language** — Stop hook and `diary_write` tool description now instruct the model to write in the same language the user used during the session, preventing language mismatch with search queries.
+- **Smaller batch size for API-based repair** — `repair rebuild` uses batch=100 (matching Gemini API limit) when a custom embedding function is configured, with per-item retry fallback.
+- **Test isolation from embedding env vars** — `conftest.py` strips `MEMPAL_EMBEDDING_MODEL` and resets singleton caches so tests always use the default local model.
+
+### Migration
+
+After setting `MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview`:
+
+```bash
+# Re-embed all existing drawers (required — can't mix 384d and 3072d)
+mempalace repair --yes
+
+# Or use the migration script for large palaces:
+python3 /tmp/reembed_palace.py  # reads from palace.backup, writes to palace
+```
+
+---
+
 ## [3.3.1] — 2026-04-16
 
 ### New Features
