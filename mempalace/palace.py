@@ -39,6 +39,25 @@ SKIP_DIRS = {
 
 _DEFAULT_BACKEND = ChromaBackend()
 
+_embedding_fn_cache: object = "UNSET"
+
+
+def _get_embedding_fn():
+    """Lazily resolve and cache the configured embedding function."""
+    global _embedding_fn_cache
+    if _embedding_fn_cache != "UNSET":
+        return _embedding_fn_cache
+    from .embedding import get_embedding_function
+
+    _embedding_fn_cache = get_embedding_function()
+    return _embedding_fn_cache
+
+
+def _reset_embedding_cache():
+    """Reset the embedding function cache. Used in tests."""
+    global _embedding_fn_cache
+    _embedding_fn_cache = "UNSET"
+
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
 # (e.g., new noise-stripping rules). `file_already_mined` treats drawers with
@@ -60,6 +79,7 @@ def get_collection(
         palace_path,
         collection_name=collection_name,
         create=create,
+        embedding_function=_get_embedding_fn(),
     )
 
 

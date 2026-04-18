@@ -135,6 +135,7 @@ def confirm_destructive_action(
 def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     """Migrate a palace to the currently installed ChromaDB version."""
     from .backends.chroma import ChromaBackend
+    from .embedding import get_embedding_function
 
     palace_path = os.path.abspath(os.path.expanduser(palace_path))
     db_path = os.path.join(palace_path, "chroma.sqlite3")
@@ -158,7 +159,8 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
 
     # Try reading with current chromadb first
     try:
-        col = ChromaBackend().get_collection(palace_path, "mempalace_drawers")
+        col = ChromaBackend().get_collection(palace_path, "mempalace_drawers",
+                                             embedding_function=get_embedding_function())
         count = col.count()
         print(f"\n  Palace is already readable by chromadb {target_version}.")
         print(f"  {count} drawers found. No migration needed.")
@@ -209,7 +211,8 @@ def migrate(palace_path: str, dry_run: bool = False, confirm: bool = False):
     temp_palace = tempfile.mkdtemp(prefix="mempalace_migrate_")
     print(f"  Creating fresh palace in {temp_palace}...")
     fresh_backend = ChromaBackend()
-    col = fresh_backend.get_or_create_collection(temp_palace, "mempalace_drawers")
+    col = fresh_backend.get_or_create_collection(temp_palace, "mempalace_drawers",
+                                                  embedding_function=get_embedding_function())
 
     # Re-import in batches
     batch_size = 500

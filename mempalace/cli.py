@@ -222,6 +222,7 @@ def cmd_repair(args):
     """Rebuild palace vector index from SQLite metadata."""
     import shutil
     from .backends.chroma import ChromaBackend
+    from .embedding import get_embedding_function
     from .migrate import confirm_destructive_action, contains_palace_database
 
     palace_path = os.path.abspath(
@@ -244,8 +245,10 @@ def cmd_repair(args):
     backend = ChromaBackend()
 
     # Try to read existing drawers
+    ef = get_embedding_function()
     try:
-        col = backend.get_collection(palace_path, "mempalace_drawers")
+        col = backend.get_collection(palace_path, "mempalace_drawers",
+                                      embedding_function=ef)
         total = col.count()
         print(f"  Drawers found: {total}")
     except Exception as e:
@@ -293,7 +296,8 @@ def cmd_repair(args):
 
     print("  Rebuilding collection...")
     backend.delete_collection(palace_path, "mempalace_drawers")
-    new_col = backend.create_collection(palace_path, "mempalace_drawers")
+    new_col = backend.create_collection(palace_path, "mempalace_drawers",
+                                        embedding_function=ef)
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -348,6 +352,7 @@ def cmd_compress(args):
     """Compress drawers in a wing using AAAK Dialect."""
     from .backends.chroma import ChromaBackend
     from .dialect import Dialect
+    from .embedding import get_embedding_function
 
     palace_path = os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
 
@@ -367,8 +372,10 @@ def cmd_compress(args):
 
     # Connect to palace
     backend = ChromaBackend()
+    ef = get_embedding_function()
     try:
-        col = backend.get_collection(palace_path, "mempalace_drawers")
+        col = backend.get_collection(palace_path, "mempalace_drawers",
+                                      embedding_function=ef)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -443,7 +450,8 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = backend.get_or_create_collection(palace_path, "mempalace_compressed")
+            comp_col = backend.get_or_create_collection(palace_path, "mempalace_compressed",
+                                                        embedding_function=ef)
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["size_ratio"], 1)

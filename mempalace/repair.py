@@ -33,6 +33,7 @@ import shutil
 import time
 
 from .backends.chroma import ChromaBackend
+from .embedding import get_embedding_function
 
 
 COLLECTION_NAME = "mempalace_drawers"
@@ -90,7 +91,8 @@ def scan_palace(palace_path=None, only_wing=None):
     print(f"\n  Palace: {palace_path}")
     print("  Loading...")
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME,
+                                         embedding_function=get_embedding_function())
 
     where = {"wing": only_wing} if only_wing else None
     total = col.count()
@@ -173,7 +175,8 @@ def prune_corrupt(palace_path=None, confirm=False):
         print("  Re-run with --confirm to actually delete.")
         return
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME)
+    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME,
+                                         embedding_function=get_embedding_function())
     before = col.count()
     print(f"  Collection size before: {before:,}")
 
@@ -263,7 +266,8 @@ def rebuild_index(palace_path=None):
     # Rebuild with correct HNSW settings
     print("  Rebuilding collection with hnsw:space=cosine...")
     backend.delete_collection(palace_path, COLLECTION_NAME)
-    new_col = backend.create_collection(palace_path, COLLECTION_NAME)
+    new_col = backend.create_collection(palace_path, COLLECTION_NAME,
+                                        embedding_function=get_embedding_function())
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):

@@ -215,17 +215,27 @@ def _get_collection(create=False):
     """Return the ChromaDB collection, caching the client between calls."""
     global _collection_cache, _metadata_cache, _metadata_cache_time
     try:
+        from .embedding import get_embedding_function
+
+        ef = get_embedding_function()
+        ef_kwargs = {}
+        if ef is not None:
+            ef_kwargs["embedding_function"] = ef
+
         client = _get_client()
         if create:
             _collection_cache = ChromaCollection(
                 client.get_or_create_collection(
-                    _config.collection_name, metadata={"hnsw:space": "cosine"}
+                    _config.collection_name, metadata={"hnsw:space": "cosine"},
+                    **ef_kwargs,
                 )
             )
             _metadata_cache = None
             _metadata_cache_time = 0
         elif _collection_cache is None:
-            _collection_cache = ChromaCollection(client.get_collection(_config.collection_name))
+            _collection_cache = ChromaCollection(
+                client.get_collection(_config.collection_name, **ef_kwargs)
+            )
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache
