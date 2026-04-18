@@ -475,10 +475,10 @@ Rules (in priority order — earlier rules override later ones):
   - The test: if the assistant can handle this turn using ONLY the current conversation + current codebase, recall is NOT needed.
 
 Query rewrite rules (only when should_recall is true):
-- "query": rewrite into a SHORT ENGLISH PHRASE (not just keywords) that captures the search intent. The downstream search uses hybrid vector + BM25 ranking, so a coherent phrase works better than keyword soup.
-- Preserve proper nouns EXACTLY (project names, tool names, people names).
-- Translate non-English terms to English, but keep proper nouns in original form if they are used as identifiers (e.g. "飞书" → "feishu/lark", "Hermes" stays "Hermes").
-- If the PREVIOUS ASSISTANT MESSAGE TAIL contains entity names or specifics that the user's message references implicitly, include them in the query. E.g. user says "那个bug修了吗", assistant tail mentions "auth middleware session leak" → query should be "auth middleware session leak bug fix status", not just "bug fix status".
+- "query": rewrite into a SHORT PHRASE that captures the search intent. Keep the SAME LANGUAGE as the user's message — if the user writes Chinese, output Chinese; if English, output English. The downstream search uses vector embeddings that work best with same-language matching.
+- Preserve proper nouns EXACTLY (project names, tool names, people names) in their original form.
+- For mixed-language content, keep the dominant language and preserve technical terms as-is (e.g. "recall gate 中文继续消息误判" is fine — don't translate to pure English or pure Chinese).
+- If the PREVIOUS ASSISTANT MESSAGE TAIL contains entity names or specifics that the user's message references implicitly, include them in the query. E.g. user says "那个bug修了吗", assistant tail mentions "auth middleware session leak" → query should be "auth middleware session leak bug修复状态", mixing languages as needed for best retrieval.
 - Max 200 chars. Remove filler words but keep semantic structure.
 - "query": if should_recall is false, output null.
 
@@ -498,11 +498,12 @@ Examples (user message → expected output):
 "那个文件有什么问题" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
 "翻译成英文" → {{"should_recall":false,"reason":"text_transformation","query":null,"after":null}}
 "先不管这个，帮我看看那个文件" → {{"should_recall":false,"reason":"session_local_redirect","query":null,"after":null}}
-"上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"deployment script location","after":null}}
-"我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"caching solution decision","after":null}}
-"昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"bug fix status","after":"{yesterday}"}}
-"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes feishu lark gateway implementation","after":null}}
-"按之前那个方案继续推进" → {{"should_recall":true,"reason":"continuation_referencing_past_decision","query":"previous implementation plan approach","after":null}}
+"上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"上次部署脚本位置","after":null}}
+"我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"之前缓存方案决策","after":null}}
+"昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"昨天bug修复状态","after":"{yesterday}"}}
+"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes飞书网关实现","after":null}}
+"按之前那个方案继续推进" → {{"should_recall":true,"reason":"continuation_referencing_past_decision","query":"之前的实现方案","after":null}}
+"where did we put the deploy script last time" → {{"should_recall":true,"reason":"past_session_reference","query":"deploy script location last time","after":null}}
 
 Today is {today}.
 
