@@ -10,8 +10,10 @@ import pytest
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
     STOP_BLOCK_REASON,
+    USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS,
     _count_human_messages,
     _get_mine_dir,
+    _get_last_assistant_message,
     _log,
     _maybe_auto_ingest,
     _parse_harness_input,
@@ -21,6 +23,7 @@ from mempalace.hooks_cli import (
     hook_session_start,
     hook_precompact,
     run_hook,
+    hook_userprompt,
 )
 
 
@@ -107,6 +110,47 @@ def test_count_malformed_json_lines(tmp_path):
     assert _count_human_messages(str(transcript)) == 1
 
 
+def test_get_last_assistant_message_extracts_claude_text_and_ignores_tool_blocks(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Explained the database setup."},
+                        {"type": "tool_use", "name": "Read", "input": {"file_path": "x"}},
+                        {"type": "tool_result", "tool_use_id": "1", "content": "ignored"},
+                        {"type": "text", "text": "Use the staging credentials."},
+                    ]
+                },
+            },
+            {
+                "type": "assistant",
+                "message": {"content": [{"type": "tool_use", "name": "Read"}]},
+            },
+        ],
+    )
+    assert _get_last_assistant_message(str(transcript)) == (
+        "Explained the database setup.\nUse the staging credentials."
+    )
+
+
+def test_get_last_assistant_message_extracts_codex_agent_message(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"type": "session_meta", "payload": {}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "Q"}},
+            {"type": "response_item", "payload": {"type": "agent_message", "message": "skip me"}},
+            {"type": "event_msg", "payload": {"type": "agent_message", "message": "Real answer"}},
+        ],
+    )
+    assert _get_last_assistant_message(str(transcript)) == "Real answer"
+
+
 # --- hook_stop ---
 
 
@@ -189,6 +233,82 @@ def test_stop_hook_tracks_save_point(tmp_path):
     # Second call with same count passes through (already saved)
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
     assert result == {}
+
+
+def test_stop_hook_caches_last_assistant_reply_by_session_id(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {"message": {"role": "user", "content": "How do I connect?"}},
+            {
+                "type": "assistant",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "Use host db.internal."},
+                        {"type": "tool_use", "name": "Read", "input": {"file_path": "README.md"}},
+                        {"type": "tool_result", "tool_use_id": "t1", "content": "ignored"},
+                        {"type": "text", "text": "Port is 5432."},
+                    ]
+                },
+            },
+        ],
+    )
+
+    result = _capture_hook_output(
+        hook_stop,
+        {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
+        state_dir=tmp_path,
+    )
+
+    assert result == {}
+    assert (tmp_path / "test_last_assistant").read_text(encoding="utf-8") == (
+        "Use host db.internal.\nPort is 5432."
+    )
+
+
+def test_stop_hook_does_not_cache_last_assistant_when_active(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {
+                "type": "assistant",
+                "message": {"content": "This should not be cached during a save cycle."},
+            },
+        ],
+    )
+
+    result = _capture_hook_output(
+        hook_stop,
+        {"session_id": "test", "stop_hook_active": True, "transcript_path": str(transcript)},
+        state_dir=tmp_path,
+    )
+
+    assert result == {}
+    assert not (tmp_path / "test_last_assistant").exists()
+
+
+def test_stop_hook_unknown_session_id_does_not_cache_assistant(tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [
+            {
+                "type": "assistant",
+                "message": {"content": "Unknown sessions should not persist assistant state."},
+            },
+        ],
+    )
+
+    result = _capture_hook_output(
+        hook_stop,
+        {"session_id": "!!!", "stop_hook_active": False, "transcript_path": str(transcript)},
+        state_dir=tmp_path,
+    )
+
+    assert result == {}
+    assert not (tmp_path / "unknown_last_assistant").exists()
 
 
 # --- hook_session_start ---
@@ -432,6 +552,149 @@ def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
     assert str(tmp_path) in call_args[-1]
 
 
+# --- hook_userprompt ---
+
+
+def test_userprompt_uses_cached_previous_assistant_tail_for_short_followup(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    previous_assistant = "A" * 550 + "TAIL"
+    (tmp_path / "session-a_last_assistant").write_text(previous_assistant, encoding="utf-8")
+
+    captured = {}
+
+    def fake_search_memories(**kwargs):
+        captured.update(kwargs)
+        return {
+            "results": [
+                {
+                    "wing": "mempalace",
+                    "room": "decisions",
+                    "text": "Remembered context",
+                }
+            ]
+        }
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {"session_id": "session-a", "prompt": "why?", "cwd": "/tmp/project"},
+                        state_dir=tmp_path,
+                    )
+
+    expected_tail = previous_assistant[-USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS:]
+    assert captured["query"] == f"{expected_tail}\n\nwhy?"
+    assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "Remembered context" in result["hookSpecificOutput"]["additionalContext"]
+
+
+def test_userprompt_skips_acknowledgement_even_with_cached_assistant_context(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text("Previous assistant reply", encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {"session_id": "session-a", "prompt": "ok", "cwd": "/tmp/project"},
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+    mock_search.assert_not_called()
+
+
+def test_userprompt_does_not_reuse_cached_assistant_from_other_session(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text("Previous assistant reply", encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {"session_id": "session-b", "prompt": "why?", "cwd": "/tmp/project"},
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+    mock_search.assert_not_called()
+
+
+def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    previous_assistant = "Earlier I explained the Codex hook behavior."
+    (tmp_path / "session-a_last_assistant").write_text(previous_assistant, encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+    rerank_calls = {}
+
+    def fake_search_memories(**kwargs):
+        return {
+            "results": [
+                {"wing": "mempalace", "room": "decisions", "text": f"hit {i}"}
+                for i in range(6)
+            ]
+        }
+
+    def fake_rewrite_query(*args, **kwargs):
+        return {"query": "codex hooks", "after": None}
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        rerank_calls["user_prompt"] = user_prompt
+        rerank_calls["previous_assistant_context"] = previous_assistant_context
+        return hits[:top_k]
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.rewrite_query",
+                                side_effect=fake_rewrite_query,
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "why?",
+                                            "cwd": "/tmp/project",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert rerank_calls["user_prompt"] == "why?"
+    assert rerank_calls["previous_assistant_context"] == {
+        "tail": previous_assistant[-USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS:]
+    }
+
+
 # --- run_hook ---
 
 
@@ -448,7 +711,8 @@ def test_run_hook_dispatches_session_start(tmp_path):
 def test_run_hook_dispatches_stop(tmp_path):
     transcript = tmp_path / "t.jsonl"
     _write_transcript(
-        transcript, [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(3)]
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL - 1)],
     )
     stdin_data = json.dumps(
         {

@@ -26,6 +26,8 @@ Opt-in via environment variable:
     MEMPAL_RECALL_LLM=1   — enable LLM-enhanced recall (default: off)
 """
 
+from collections.abc import Mapping
+from datetime import date
 import json
 import logging
 import os
@@ -46,6 +48,24 @@ REWRITE_TIMEOUT_S = 8
 RERANK_TIMEOUT_S = 8
 REWRITE_MAX_TOKENS = 200
 RERANK_MAX_TOKENS = 50
+PREVIOUS_ASSISTANT_TAIL_MAX_CHARS = 1200
+_PREVIOUS_ASSISTANT_TAIL_KEYS = (
+    "previous_assistant_message_tail",
+    "assistant_message_tail",
+    "previous_assistant_tail",
+    "assistant_tail",
+    "message_tail",
+    "tail",
+    "text",
+    "content",
+)
+_PREVIOUS_ASSISTANT_CONTAINER_KEYS = (
+    "previous_assistant_message",
+    "previous_assistant",
+    "assistant_message",
+    "assistant",
+)
+
 
 def is_enabled() -> bool:
     """Check if LLM-enhanced recall is enabled. Opt-in via MEMPAL_RECALL_LLM=1."""
@@ -71,7 +91,10 @@ def _get_vertex_token() -> str | None:
             env["GOOGLE_APPLICATION_CREDENTIALS"] = gac
         result = subprocess.run(
             ["gcloud", "auth", "application-default", "print-access-token"],
-            capture_output=True, text=True, timeout=5, env=env,
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=env,
         )
         token = result.stdout.strip()
         if token and result.returncode == 0:
@@ -111,7 +134,11 @@ def _get_llm_config() -> dict | None:
                 location = os.environ.get("MEMPAL_VERTEX_LOCATION", "")
                 if not location:
                     cloud_region = os.environ.get("CLOUD_ML_REGION", "")
-                    location = cloud_region if cloud_region and cloud_region != "global" else VERTEX_LOCATION
+                    location = (
+                        cloud_region
+                        if cloud_region and cloud_region != "global"
+                        else VERTEX_LOCATION
+                    )
                 return {
                     "backend": "vertex",
                     "project": project,
@@ -129,8 +156,15 @@ def _get_llm_config() -> dict | None:
     return None
 
 
-def _call_vertex(project: str, location: str, model: str, token: str,
-                 prompt: str, max_tokens: int, timeout: int) -> str | None:
+def _call_vertex(
+    project: str,
+    location: str,
+    model: str,
+    token: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+) -> str | None:
     """Call Vertex AI Claude endpoint. Returns response text or None."""
     # Vertex AI uses the Anthropic Messages API format
     url = (
@@ -138,11 +172,13 @@ def _call_vertex(project: str, location: str, model: str, token: str,
         f"projects/{project}/locations/{location}/"
         f"publishers/anthropic/models/{model}:rawPredict"
     )
-    payload = json.dumps({
-        "anthropic_version": "vertex-2023-10-16",
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "anthropic_version": "vertex-2023-10-16",
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         url,
@@ -163,14 +199,21 @@ def _call_vertex(project: str, location: str, model: str, token: str,
         return None
 
 
-def _call_anthropic(api_key: str, model: str, prompt: str,
-                    max_tokens: int, timeout: int) -> str | None:
+def _call_anthropic(
+    api_key: str,
+    model: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+) -> str | None:
     """Call Anthropic Messages API. Returns response text or None."""
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     req = urllib.request.Request(
         "https://api.anthropic.com/v1/messages",
@@ -192,14 +235,22 @@ def _call_anthropic(api_key: str, model: str, prompt: str,
         return None
 
 
-def _call_openai_compat(endpoint: str, model: str, key: str, prompt: str,
-                        max_tokens: int, timeout: int) -> str | None:
+def _call_openai_compat(
+    endpoint: str,
+    model: str,
+    key: str,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+) -> str | None:
     """Call OpenAI-compatible /chat/completions. Returns response text or None."""
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode("utf-8")
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+    ).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
     if key:
@@ -226,18 +277,72 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
     backend = config["backend"]
     if backend == "vertex":
         return _call_vertex(
-            config["project"], config["location"], config["model"],
-            config["token"], prompt, max_tokens, timeout,
+            config["project"],
+            config["location"],
+            config["model"],
+            config["token"],
+            prompt,
+            max_tokens,
+            timeout,
         )
-    elif backend == "anthropic":
+    if backend == "anthropic":
         return _call_anthropic(
-            config["api_key"], config["model"], prompt, max_tokens, timeout,
+            config["api_key"],
+            config["model"],
+            prompt,
+            max_tokens,
+            timeout,
         )
-    else:
-        return _call_openai_compat(
-            config["endpoint"], config["model"], config.get("key", ""),
-            prompt, max_tokens, timeout,
-        )
+    return _call_openai_compat(
+        config["endpoint"],
+        config["model"],
+        config.get("key", ""),
+        prompt,
+        max_tokens,
+        timeout,
+    )
+
+
+# =========================================================================
+# Shared prompt helpers
+# =========================================================================
+
+
+def _extract_previous_assistant_tail(previous_assistant_context: str | Mapping | None) -> str | None:
+    """Extract the previous assistant reply tail from a string or structured payload."""
+    if previous_assistant_context is None:
+        return None
+
+    if isinstance(previous_assistant_context, str):
+        tail = previous_assistant_context.strip()
+        if not tail:
+            return None
+        if len(tail) > PREVIOUS_ASSISTANT_TAIL_MAX_CHARS:
+            tail = tail[-PREVIOUS_ASSISTANT_TAIL_MAX_CHARS :]
+        return tail
+
+    if not isinstance(previous_assistant_context, Mapping):
+        return None
+
+    for key in _PREVIOUS_ASSISTANT_TAIL_KEYS:
+        value = previous_assistant_context.get(key)
+        if isinstance(value, str) and value.strip():
+            return _extract_previous_assistant_tail(value)
+
+    for key in _PREVIOUS_ASSISTANT_CONTAINER_KEYS:
+        value = previous_assistant_context.get(key)
+        if isinstance(value, Mapping):
+            tail = _extract_previous_assistant_tail(value)
+            if tail:
+                return tail
+
+    return None
+
+
+def _render_previous_assistant_tail(previous_assistant_context: str | Mapping | None) -> str:
+    """Render previous assistant context for prompts."""
+    tail = _extract_previous_assistant_tail(previous_assistant_context)
+    return tail if tail else "(none provided)"
 
 
 # =========================================================================
@@ -247,24 +352,56 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
 _REWRITE_PROMPT = """\
 You are a search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
 
-Given the user's question and today's date, extract search keywords and any time constraint.
+You will receive:
+- CURRENT USER MESSAGE — this is the primary signal and should drive the query rewrite.
+- PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
 
 Output JSON only — no explanation:
 {{"query": "english keywords here", "after": "YYYY-MM-DD or null"}}
 
 Rules:
 - "query": ALWAYS English keywords, translate if needed. Preserve proper nouns exactly. Remove filler words. Max 200 chars.
-- "after": extract temporal intent if present. "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null (no time filter).
+- "after": extract temporal intent if present. Prefer the current user message. Use the previous assistant message tail only for disambiguation when clearly relevant.
+- Time examples: "今天/today" → today's date, "昨天/yesterday" → yesterday, "上周/last week" → 7 days ago, "之前/before" → null (no time filter).
 
 Today is {today}.
 
-User question: {query}
+Current user message:
+{user_message}
+
+Previous assistant message tail (optional context only):
+{previous_assistant_tail}
 
 JSON:"""
 
 
-def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
+def _build_rewrite_prompt(
+    user_prompt: str,
+    previous_assistant_context: str | Mapping | None = None,
+    *,
+    today: str | None = None,
+) -> str:
+    """Build the rewrite prompt with optional previous assistant context."""
+    return _REWRITE_PROMPT.format(
+        today=today or date.today().isoformat(),
+        user_message=user_prompt,
+        previous_assistant_tail=_render_previous_assistant_tail(previous_assistant_context),
+    )
+
+
+def rewrite_query(
+    user_prompt: str,
+    config: dict | None = None,
+    previous_assistant_context: str | Mapping | None = None,
+) -> dict | None:
     """Use LLM to rewrite a user prompt into an optimized search query.
+
+    Args:
+        user_prompt: Current user message.
+        config: LLM config dict (from _get_llm_config).
+        previous_assistant_context: Optional previous assistant reply tail,
+            either as a raw string or structured mapping (for example
+            ``{"tail": "..."}``). This is context-only and ignored when absent.
 
     Returns dict with keys:
         query (str): Rewritten English keyword query.
@@ -276,8 +413,7 @@ def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
     if config is None:
         return None
 
-    from datetime import date
-    prompt = _REWRITE_PROMPT.format(query=user_prompt, today=date.today().isoformat())
+    prompt = _build_rewrite_prompt(user_prompt, previous_assistant_context)
     result = _call_llm(config, prompt, REWRITE_MAX_TOKENS, REWRITE_TIMEOUT_S)
 
     if not result:
@@ -297,6 +433,15 @@ def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
         clean = result.strip().strip('"\'')
         if 3 <= len(clean) <= 300:
             return {"query": clean, "after": None}
+        return None
+
+    if isinstance(parsed, str):
+        clean = parsed.strip().strip("\"'")
+        if 3 <= len(clean) <= 300:
+            return {"query": clean, "after": None}
+        return None
+
+    if not isinstance(parsed, dict):
         return None
 
     query = parsed.get("query", "")
@@ -321,16 +466,28 @@ def rewrite_query(user_prompt: str, config: dict | None = None) -> dict | None:
 # =========================================================================
 
 _RERANK_PROMPT = """\
-You are a relevance judge for a personal memory search. Given a user's question and {n} candidate memory snippets, select ONLY the ones that are actually relevant to the question. Return up to {k} results.
+You are a relevance judge for a personal memory search.
+
+You will receive:
+- CURRENT USER MESSAGE — this is the primary signal and should drive the relevance decision.
+- PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
+- {n} candidate memory snippets.
+
+Select ONLY the candidate memories that are actually relevant to the current user message. Return up to {k} results.
 
 Rules:
-- Only include candidates that would genuinely help answer the user's question
+- Only include candidates that would genuinely help answer the current user message.
+- Use the previous assistant message tail only when it materially clarifies the current user message.
 - If none are relevant, reply with: NONE
 - Otherwise reply with ONLY the numbers of relevant candidates, separated by commas, in order of relevance
 - Example (some relevant): 3,1,7
 - Example (none relevant): NONE
 
-User question: {query}
+Current user message:
+{user_message}
+
+Previous assistant message tail (optional context only):
+{previous_assistant_tail}
 
 Candidates:
 {candidates}
@@ -338,15 +495,46 @@ Candidates:
 Relevant candidates:"""
 
 
-def rerank(user_prompt: str, hits: list, top_k: int = 5,
-           config: dict | None = None) -> list | None:
+def _build_rerank_prompt(
+    user_prompt: str,
+    hits: list,
+    top_k: int,
+    previous_assistant_context: str | Mapping | None = None,
+) -> str:
+    """Build the rerank prompt with optional previous assistant context."""
+    candidate_blocks = []
+    for i, hit in enumerate(hits):
+        text = hit.get("text", "")[:400].replace("\n", " ").strip()
+        wing = hit.get("wing", "?")
+        room = hit.get("room", "?")
+        candidate_blocks.append(f"{i + 1}. [{wing}/{room}] {text}")
+
+    return _RERANK_PROMPT.format(
+        n=len(hits),
+        k=top_k,
+        user_message=user_prompt,
+        previous_assistant_tail=_render_previous_assistant_tail(previous_assistant_context),
+        candidates="\n\n".join(candidate_blocks),
+    )
+
+
+def rerank(
+    user_prompt: str,
+    hits: list,
+    top_k: int = 5,
+    config: dict | None = None,
+    previous_assistant_context: str | Mapping | None = None,
+) -> list | None:
     """Use LLM to rerank search hits by relevance, filtering irrelevant ones.
 
     Args:
-        user_prompt: Original user question.
+        user_prompt: Current user message.
         hits: List of search result dicts (must have "text" key).
         top_k: Maximum number of results to select.
         config: LLM config dict (from _get_llm_config).
+        previous_assistant_context: Optional previous assistant reply tail,
+            either as a raw string or structured mapping (for example
+            ``{"tail": "..."}``). This is context-only and ignored when absent.
 
     Returns:
         Reordered hits list (0 to top_k items), or None if LLM call fails.
@@ -360,21 +548,11 @@ def rerank(user_prompt: str, hits: list, top_k: int = 5,
     if len(hits) <= top_k:
         return hits
 
-    # Format candidates — show enough context for relevance judgment
-    candidate_blocks = []
-    for i, hit in enumerate(hits):
-        text = hit.get("text", "")[:400].replace("\n", " ").strip()
-        wing = hit.get("wing", "?")
-        room = hit.get("room", "?")
-        candidate_blocks.append(f"{i + 1}. [{wing}/{room}] {text}")
-
-    candidates_text = "\n\n".join(candidate_blocks)
-
-    prompt = _RERANK_PROMPT.format(
-        n=len(hits),
-        k=top_k,
-        query=user_prompt,
-        candidates=candidates_text,
+    prompt = _build_rerank_prompt(
+        user_prompt,
+        hits,
+        top_k,
+        previous_assistant_context=previous_assistant_context,
     )
 
     result = _call_llm(config, prompt, RERANK_MAX_TOKENS, RERANK_TIMEOUT_S)

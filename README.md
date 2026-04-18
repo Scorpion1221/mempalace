@@ -149,6 +149,15 @@ system prompt:
 Two Claude Code hooks save periodically and before context compression:
 [mempalaceofficial.com/guide/hooks](https://mempalaceofficial.com/guide/hooks.html).
 
+`UserPromptSubmit` recall also carries forward the **previous assistant
+reply**, not just the current user message. For Codex and Claude Code,
+the stop hook extracts the latest assistant/agent reply from the session
+transcript, stores it under `~/.mempalace/hook_state/`, and the next
+recall uses the tail of that reply (500 chars) as structured context for
+query rewrite and reranking. Short follow-ups like “why?” or “continue”
+can therefore recall the right memories without pulling in unrelated
+older sessions.
+
 ---
 
 ## Requirements

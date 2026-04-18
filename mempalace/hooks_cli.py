@@ -25,6 +25,7 @@ USERPROMPT_RECALL_POOL = 10  # over-fetch for LLM reranking
 USERPROMPT_MAX_SNIPPET_CHARS = 400
 USERPROMPT_MAX_DISTANCE = 1.5
 USERPROMPT_MIN_QUERY_LEN = 6  # skip very short prompts
+USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS = 500
 
 # Short phrases that don't need memory recall
 # Keep in sync with TRIVIAL_USER_MESSAGES in hermes-mempalace-plugin
@@ -42,6 +43,11 @@ USERPROMPT_SKIP_PHRASES = frozenset({
     "thanks", "thank you", "thx", "谢谢",
     # Completion / exit
     "done", "完成", "搞定", "stop", "quit", "exit",
+})
+
+# Short prompts that are only meaningful with prior assistant context.
+USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES = frozenset({
+    "continue", "go", "go on", "next", "继续",
 })
 
 STOP_BLOCK_REASON = (
@@ -90,6 +96,11 @@ def _validate_transcript_path(transcript_path: str) -> Path:
     if ".." in Path(transcript_path).parts:
         return None
     return path
+
+
+def _get_session_state_path(session_id: str, key: str) -> Path:
+    """Return the state file path for a session-scoped hook cache entry."""
+    return STATE_DIR / f"{session_id}_{key}"
 
 
 def _count_human_messages(transcript_path: str) -> int:
@@ -164,6 +175,134 @@ def _count_human_messages(transcript_path: str) -> int:
     except OSError:
         return 0
     return count
+
+
+def _extract_assistant_text(content) -> str:
+    """Extract plain assistant text, ignoring tool blocks."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, str):
+                text = item.strip()
+                if text:
+                    parts.append(text)
+                continue
+            if not isinstance(item, dict):
+                continue
+            block_type = item.get("type")
+            if block_type in ("tool_use", "tool_result"):
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                text = text.strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    if isinstance(content, dict):
+        text = content.get("text", "")
+        return text.strip() if isinstance(text, str) else ""
+    return ""
+
+
+def _get_last_assistant_message(transcript_path: str) -> str:
+    """Return the last assistant/agent reply from a transcript."""
+    path = _validate_transcript_path(transcript_path)
+    if path is None or not path.is_file():
+        return ""
+
+    last_message = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if not isinstance(entry, dict):
+                    continue
+
+                entry_type = entry.get("type", "")
+
+                # Claude Code JSONL: {"type": "assistant", "message": {"content": ...}}
+                if entry_type == "assistant":
+                    message = entry.get("message", {})
+                    content = message.get("content") if isinstance(message, dict) else entry.get("content")
+                    text = _extract_assistant_text(content)
+                    if text:
+                        last_message = text
+                    continue
+
+                # Codex JSONL: {"type": "event_msg", "payload": {"type": "agent_message", ...}}
+                if entry_type == "event_msg":
+                    payload = entry.get("payload", {})
+                    if (
+                        isinstance(payload, dict)
+                        and payload.get("type") == "agent_message"
+                        and isinstance(payload.get("message"), str)
+                    ):
+                        text = payload["message"].strip()
+                        if text:
+                            last_message = text
+                    continue
+
+                # Legacy fallback: {"message": {"role": "assistant", "content": ...}}
+                message = entry.get("message", {})
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    text = _extract_assistant_text(message.get("content", ""))
+                    if text:
+                        last_message = text
+    except OSError:
+        return ""
+
+    return last_message
+
+
+def _write_session_state_text(session_id: str, key: str, value: str):
+    """Persist session-scoped hook state as plaintext."""
+    if value is None or session_id == "unknown":
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        path = _get_session_state_path(session_id, key)
+        path.write_text(value, encoding="utf-8")
+    except OSError:
+        pass
+
+
+def _read_session_state_text(session_id: str, key: str) -> str:
+    """Read plaintext session-scoped hook state."""
+    if session_id == "unknown":
+        return ""
+    path = _get_session_state_path(session_id, key)
+    if not path.is_file():
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _clear_session_state_text(session_id: str, key: str):
+    """Remove plaintext session-scoped hook state."""
+    if session_id == "unknown":
+        return
+    path = _get_session_state_path(session_id, key)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _tail_chars(text: str, limit: int) -> str:
+    """Return the last ``limit`` characters from text."""
+    if not text or limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
 
 
 _state_dir_initialized = False
@@ -275,6 +414,16 @@ def hook_stop(data: dict, harness: str):
         _output({})
         return
 
+    last_assistant_message = _get_last_assistant_message(transcript_path)
+    if last_assistant_message:
+        _write_session_state_text(session_id, "last_assistant", last_assistant_message)
+        _log(
+            f"Session {session_id}: cached last assistant reply "
+            f"({len(last_assistant_message)} chars)"
+        )
+    else:
+        _clear_session_state_text(session_id, "last_assistant")
+
     # Count human messages
     exchange_count = _count_human_messages(transcript_path)
 
@@ -370,17 +519,33 @@ def hook_userprompt(data: dict, harness: str):
     Each LLM stage degrades gracefully: if no API key or call fails,
     falls back to the original query / BM25-only ranking.
     """
+    parsed = _parse_harness_input(data, harness)
+    session_id = parsed["session_id"]
     user_prompt = data.get("user_prompt", "") or data.get("prompt", "")
     cwd = data.get("cwd", "")
+    previous_assistant_message = _read_session_state_text(session_id, "last_assistant")
+    previous_assistant_tail = _tail_chars(
+        previous_assistant_message, USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS
+    )
 
     prompt_stripped = user_prompt.strip() if user_prompt else ""
     if not prompt_stripped:
         _output({})
         return
 
+    prompt_normalized = prompt_stripped.lower()
+
     # Skip trivial prompts: too short or common filler phrases
-    if (len(prompt_stripped) < USERPROMPT_MIN_QUERY_LEN
-            or prompt_stripped.lower() in USERPROMPT_SKIP_PHRASES):
+    if prompt_normalized in USERPROMPT_SKIP_PHRASES:
+        if not (
+            previous_assistant_tail
+            and prompt_normalized in USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES
+        ):
+            _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
+            _output({})
+            return
+
+    if len(prompt_stripped) < USERPROMPT_MIN_QUERY_LEN and not previous_assistant_tail:
         _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
         _output({})
         return
@@ -403,18 +568,29 @@ def hook_userprompt(data: dict, harness: str):
         return
 
     preferred_wing = _infer_wing_from_cwd(cwd)
-    _log(f"UserPrompt recall: query={user_prompt[:80]!r}, wing={preferred_wing}")
+    _log(
+        "UserPrompt recall: "
+        f"query={user_prompt[:80]!r}, wing={preferred_wing}, "
+        f"session={session_id}, prev_assistant_chars={len(previous_assistant_tail)}"
+    )
+
+    search_query = user_prompt
+    if previous_assistant_tail:
+        search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
 
     # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
     llm_config = None
-    search_query = user_prompt
     time_after = None
     try:
         from .recall_llm import is_enabled, _get_llm_config, rewrite_query, rerank
         if is_enabled():
             llm_config = _get_llm_config()
         if llm_config:
-            rewrite_result = rewrite_query(user_prompt, config=llm_config)
+            rewrite_result = rewrite_query(
+                user_prompt,
+                config=llm_config,
+                previous_assistant_context={"tail": previous_assistant_tail},
+            )
             if rewrite_result:
                 search_query = rewrite_result["query"]
                 time_after = rewrite_result.get("after")
@@ -460,6 +636,7 @@ def hook_userprompt(data: dict, harness: str):
                 hits,
                 top_k=USERPROMPT_RECALL_LIMIT,
                 config=llm_config,
+                previous_assistant_context={"tail": previous_assistant_tail},
             )
             if reranked is not None:
                 if len(reranked) == 0:

@@ -18,6 +18,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Offline fact checker against the entity registry and knowledge graph (#829)
 - LLM-based closet regeneration — optional, bring-your-own endpoint, no mandatory API key (#793)
 - Hall detection — routes drawer content to `emotions` / `technical` / `family` / `memory` / `identity` / `consciousness` / `creative` halls, enabling hall-based graph connectivity within wings (#835)
+- Previous-assistant-context recall for Codex and Claude Code hooks — `Stop` caches the latest assistant reply per session and `UserPromptSubmit` uses its tail (500 chars) for recall query rewrite and LLM rerank, improving short follow-up prompts like “why?” and “continue”
 
 ### Bug Fixes
 - Set `hnsw:space=cosine` metadata on all collection creation sites — fixes broken similarity scoring under ChromaDB's default L2 distance (#807, #218)
@@ -32,6 +33,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Sync `version.py` to match `pyproject.toml` (#820)
 - Remove unused `main` import from `mempalace/__init__.py` (#827)
 - README audit — fix 7 stale claims (tool count, version badge, wake-up token cost, `dialect.py` lossless disclaimer, `pyproject.toml` version) with 42 regression-guard tests (#835)
+- Rerank now uses the same previous-assistant context as query rewrite, keeping short follow-up recall behavior consistent across the whole LLM-assisted pipeline
 
 ### Improvements
 - Optimize entity detection with regex caching and pre-compilation (#828)
