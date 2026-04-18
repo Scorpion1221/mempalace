@@ -52,6 +52,45 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 # Requires ANTHROPIC_API_KEY (uses claude-haiku-4-5-20251001 by default)
 ```
 
+### Important: Multi-Agent Environment Setup
+
+`~/.zshrc` alone is **not enough** — MCP servers and launchd services don't read shell profiles. You must configure environment variables in each agent's native config:
+
+| Agent | Where to set env vars | Config file |
+|---|---|---|
+| **Claude Code** | `settings.json` → `env` section | `~/.claude/settings.json` |
+| **Codex** | `config.toml` → `[mcp_servers.mempalace]` → `env` | `~/.codex/config.toml` |
+| **Hermes** | launchd plist → `EnvironmentVariables` | `~/Library/LaunchAgents/ai.hermes.gateway.plist` |
+
+**Claude Code** — add to `~/.claude/settings.json`:
+```json
+{
+  "env": {
+    "MEMPAL_EMBEDDING_MODEL": "gemini-embedding-2-preview",
+    "MEMPAL_RECALL_LLM": "1"
+  }
+}
+```
+
+**Codex** — add `env` to the MCP server entry in `~/.codex/config.toml`:
+```toml
+[mcp_servers.mempalace]
+command = "python3"
+args = ["-m", "mempalace.mcp_server"]
+env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", GEMINI_API_KEY = "your-key" }
+```
+
+**Hermes** — add to `~/Library/LaunchAgents/ai.hermes.gateway.plist` inside `<dict>` under `EnvironmentVariables`:
+```xml
+<key>MEMPAL_EMBEDDING_MODEL</key>
+<string>gemini-embedding-2-preview</string>
+<key>GEMINI_API_KEY</key>
+<string>your-key</string>
+```
+Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist && launchctl load ~/Library/LaunchAgents/ai.hermes.gateway.plist`
+
+> **Why not just `~/.zshrc`?** Shell profile env vars are only inherited by processes started from a login shell (e.g. terminal commands, `mempalace repair`). MCP servers are spawned as child processes by the agent harness without a login shell. launchd services have their own isolated environment. Each agent needs its own config.
+
 ### How the LLM Recall Gate Works
 
 When `MEMPAL_RECALL_LLM=1` is set, every `UserPromptSubmit` hook goes through:
@@ -95,15 +134,20 @@ Turns that don't need recall (continuations, code tasks, etc.) cost zero — the
 
 ### Migration
 
-After setting `MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview`:
+After enabling Gemini embedding, you **must** re-embed existing drawers — ChromaDB cannot mix 384-dim (MiniLM) and 3072-dim (Gemini) vectors in the same collection. Attempting to write or search without migrating will fail with `Embedding dimension 384 does not match collection dimensionality 3072`.
 
 ```bash
-# Re-embed all existing drawers (required — can't mix 384d and 3072d)
-mempalace repair --yes
+# 1. Back up your palace first
+cp -r ~/.mempalace/palace ~/.mempalace/palace.backup
 
-# Or use the migration script for large palaces:
-python3 /tmp/reembed_palace.py  # reads from palace.backup, writes to palace
+# 2. Set the env var
+export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
+
+# 3. Re-embed all drawers (uses Gemini API, ~35min for 45K drawers)
+mempalace repair --yes
 ```
+
+> **Note on repair batch size**: When a custom embedding function is configured, repair uses batch=100 (matching the Gemini API limit) instead of the default 5000. This avoids API timeouts but takes longer. For very large palaces (>50K drawers), consider running repair overnight.
 
 ---
 
