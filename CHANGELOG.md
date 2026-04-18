@@ -11,23 +11,75 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 This section documents changes in the fork that are not yet in upstream.
 Based on upstream `3.3.1`.
 
+### Installation
+
+```bash
+# Clone the fork
+git clone git@github.com:Scorpion1221/mempalace.git
+cd mempalace && git checkout dev
+
+# Install in editable mode (all 3 agents share the same code)
+pip install -e ".[dev]"
+
+# Initialize palace (first time only)
+mempalace init ~/your-project-dir
+```
+
+### Configuration — Environment Variables
+
+All enhancements are **opt-in** via environment variables. Without them, behavior is identical to upstream 3.3.1.
+
+Add to `~/.zshrc` (or equivalent) for all agents, or to `~/.claude/settings.json` `env` section for Claude Code only:
+
+```bash
+# ── Gemini Embedding (replaces default MiniLM, +12% Chinese search quality) ──
+export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview   # or "default" to disable
+export GEMINI_API_KEY=your-gemini-api-key                  # required for Gemini
+# export MEMPAL_EMBEDDING_DIMS=3072                        # optional, default 3072
+
+# ── LLM Recall Gate (smart recall + query rewrite, uses Claude Haiku) ──
+export MEMPAL_RECALL_LLM=1                                 # enable LLM-enhanced recall
+
+# Pick ONE backend for the recall LLM (in priority order):
+# Option A: Any OpenAI-compatible endpoint (LiteLLM, Ollama, etc.)
+export MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000        # your proxy URL
+export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the endpoint
+
+# Option B: Vertex AI (when using Claude Code in Vertex mode)
+# Requires CLAUDE_CODE_USE_VERTEX=1 + ANTHROPIC_VERTEX_PROJECT_ID + gcloud ADC credentials
+
+# Option C: Anthropic API direct
+# Requires ANTHROPIC_API_KEY (uses claude-haiku-4-5-20251001 by default)
+```
+
+### How the LLM Recall Gate Works
+
+When `MEMPAL_RECALL_LLM=1` is set, every `UserPromptSubmit` hook goes through:
+
+1. **Local fast-path** — Instant skip for obvious cases (continuations like "继续补", confirmations like "好的", execution commands like "run tests"). Zero API cost.
+2. **LLM decide + rewrite** (Claude Haiku, ~200 tokens) — Decides whether memory recall is needed. If yes, rewrites the query in the user's language for optimal vector search. Uses 3 prioritized rules + 14 few-shot examples.
+3. **Vector search + BM25 hybrid ranking** — Searches the palace with the rewritten query.
+4. **LLM rerank** (Claude Haiku, ~50 tokens) — Selects the most relevant results from the candidate pool, filtering noise.
+
+Total LLM cost per user turn (when recall is triggered): ~250 Haiku tokens ≈ $0.00006.
+Turns that don't need recall (continuations, code tasks, etc.) cost zero — the local fast-path or LLM gate skips them.
+
 ### New Features
 
 **Pluggable embedding model with Gemini support** — Switch from ChromaDB's default all-MiniLM-L6-v2 (384d, MTEB multilingual ~56) to Google's gemini-embedding-2-preview (3072d, MTEB multilingual ~68) via a single environment variable. Real benchmark improvement: Chinese→Chinese similarity 0.76→0.85 (+12%), English→Chinese 0.56→0.73 (+30%).
 
 - New module `mempalace/embedding.py` — `GeminiEmbeddingFunction` implements ChromaDB's `EmbeddingFunction` protocol via raw HTTP (no SDK dependency)
 - Handles batching (100 texts/call), retry with exponential backoff
-- Config: `MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview` + `GEMINI_API_KEY`
-- Threaded through all 10 collection creation points: `backends/chroma.py`, `palace.py`, `mcp_server.py`, `cli.py`, `repair.py`, `dedup.py`, `migrate.py`
 - Backward compatible: unset env var → default local MiniLM, zero API calls
 
-**LLM-powered recall gate (opt-in)** — Two-stage pipeline that decides whether memory recall is needed and rewrites queries for better retrieval. Enabled via `MEMPAL_RECALL_LLM=1`.
+**LLM-powered recall gate (opt-in)** — Two-stage pipeline that decides whether memory recall is needed and rewrites queries for better retrieval.
 
 - Stage 1: `decide_recall()` — LLM judges whether the turn needs memory recall at all, with prioritized rules and 14 few-shot examples covering CJK and English edge cases
 - Stage 2: `rerank()` — LLM selects the most relevant results from a larger candidate pool
 - Previous assistant context (last 500 chars) passed to both stages for better disambiguation
 - Local fast-path (`local_recall_decision()`) skips LLM for obvious cases (continuations, confirmations, self-contained tasks)
-- Supports Vertex AI, Anthropic API, and any OpenAI-compatible endpoint
+- Default model: `claude-haiku-4-5-20251001` (fast, cheap, sufficient for classification tasks)
+- Supports 3 backends: Vertex AI, Anthropic API, any OpenAI-compatible endpoint (LiteLLM, Ollama, etc.)
 
 **CJK hybrid search** — Bigram tokenizer for BM25 ranking, preferred-wing boost, and temporal filtering in the searcher.
 
