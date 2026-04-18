@@ -21,6 +21,11 @@ _session_tmp = tempfile.mkdtemp(prefix="mempalace_session_")
 for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
     _original_env[_var] = os.environ.get(_var)
 
+# Ensure tests use the default (local) embedding, not any API-based model
+# that may be configured in the user's shell environment.
+for _embed_var in ("MEMPAL_EMBEDDING_MODEL", "MEMPALACE_EMBEDDING_MODEL"):
+    _original_env[_embed_var] = os.environ.pop(_embed_var, None)
+
 os.environ["HOME"] = _session_tmp
 os.environ["USERPROFILE"] = _session_tmp
 os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
@@ -29,6 +34,13 @@ os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
 import pytest  # noqa: E402
+
+# Reset embedding caches so they pick up the cleaned env vars above.
+from mempalace.embedding import reset_cache as _reset_embedding_cache  # noqa: E402
+from mempalace.palace import _reset_embedding_cache as _reset_palace_cache  # noqa: E402
+
+_reset_embedding_cache()
+_reset_palace_cache()
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
