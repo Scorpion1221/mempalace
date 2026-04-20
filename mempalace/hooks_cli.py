@@ -649,15 +649,30 @@ def hook_userprompt(data: dict, harness: str):
                     f"query={search_query[:80]!r}, after={time_after}"
                 )
             else:
-                # LLM returned None (API failure / parse error) — fail closed
-                # in auto-recall context, don't waste time on fallback search
-                _log("UserPrompt recall: LLM decide returned None, fail closed")
-                _output({})
-                return
+                # LLM returned None (API failure / parse error).
+                # If the user explicitly references history, fallback to search.
+                # Otherwise fail closed — don't waste time on generic queries.
+                from .recall_llm import _HISTORY_REFERENCE_HINTS
+
+                prompt_lower = user_prompt.lower()
+                has_history_ref = any(h in prompt_lower for h in _HISTORY_REFERENCE_HINTS)
+                if has_history_ref:
+                    _log("UserPrompt recall: LLM decide returned None, but history ref detected — fallback to search")
+                else:
+                    _log("UserPrompt recall: LLM decide returned None, fail closed")
+                    _output({})
+                    return
     except Exception as e:
-        _log(f"UserPrompt recall: decide+rewrite failed ({e}), fail closed")
-        _output({})
-        return
+        from .recall_llm import _HISTORY_REFERENCE_HINTS
+
+        prompt_lower = user_prompt.lower()
+        has_history_ref = any(h in prompt_lower for h in _HISTORY_REFERENCE_HINTS)
+        if has_history_ref:
+            _log(f"UserPrompt recall: decide+rewrite failed ({e}), but history ref detected — fallback to search")
+        else:
+            _log(f"UserPrompt recall: decide+rewrite failed ({e}), fail closed")
+            _output({})
+            return
 
     # Check budget before search
     if _budget_exceeded():
