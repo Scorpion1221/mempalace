@@ -51,6 +51,25 @@ class GeminiEmbeddingFunction:
             f"{GEMINI_API_BASE}/models/{model}:batchEmbedContents"
             f"?key={api_key}"
         )
+        self._opener = self._build_opener()
+
+    @staticmethod
+    def _build_opener():
+        """Build a urllib opener with proxy support if configured."""
+        proxy = (
+            os.environ.get("HTTPS_PROXY")
+            or os.environ.get("https_proxy")
+            or os.environ.get("ALL_PROXY")
+            or os.environ.get("all_proxy")
+            or ""
+        )
+        if proxy:
+            proxy_handler = urllib.request.ProxyHandler({
+                "https": proxy,
+                "http": proxy,
+            })
+            return urllib.request.build_opener(proxy_handler)
+        return None
 
     def __call__(self, input: list[str]) -> list[list[float]]:
         """Embed a list of texts. Handles batching for large inputs."""
@@ -89,19 +108,29 @@ class GeminiEmbeddingFunction:
 
         for attempt in range(MAX_RETRIES):
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    result = json.loads(resp.read())
+                if self._opener:
+                    with self._opener.open(req, timeout=30) as resp:
+                        result = json.loads(resp.read())
+                else:
+                    with urllib.request.urlopen(req, timeout=30) as resp:
+                        result = json.loads(resp.read())
                 return [e["values"] for e in result["embeddings"]]
             except urllib.error.HTTPError as e:
-                if e.code in (429, 500, 503) and attempt < MAX_RETRIES - 1:
+                code = getattr(e, "code", 0)
+                body = ""
+                try:
+                    body = e.read().decode("utf-8", errors="replace")[:200]
+                except Exception:
+                    pass
+                if code in (429, 500, 503) and attempt < MAX_RETRIES - 1:
                     backoff = INITIAL_BACKOFF_S * (2 ** attempt)
                     logger.warning(
                         "Gemini embedding API %d, retry %d/%d in %.1fs",
-                        e.code, attempt + 1, MAX_RETRIES, backoff,
+                        code, attempt + 1, MAX_RETRIES, backoff,
                     )
                     time.sleep(backoff)
                     continue
-                logger.error("Gemini embedding API failed: %s", e)
+                logger.error("Gemini embedding API failed (HTTP %d): %s", code, body)
                 raise
             except Exception as e:
                 if attempt < MAX_RETRIES - 1:

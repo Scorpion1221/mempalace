@@ -67,7 +67,6 @@ STOP_BLOCK_REASON = (
     "Do not compress — store verbatim text.\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
     "Use mempalace_list_wings first if unsure which wing to use. "
-    "Do NOT write to Claude Code's native auto-memory (.md files). "
     "Continue conversation after saving."
 )
 
@@ -85,7 +84,6 @@ PRECOMPACT_BLOCK_REASON = (
     "   This is your LAST CHANCE — after compaction, detailed context is gone forever. "
     "Save as many drawers as needed. Do not compress — store verbatim.\n"
     "3. mempalace_kg_add — entity relationships (optional)\n"
-    "Do NOT write to Claude Code's native auto-memory (.md files). "
     "Save everything to MemPalace, then allow compaction to proceed."
 )
 
