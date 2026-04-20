@@ -211,10 +211,25 @@ def _extract_assistant_text(content) -> str:
 
 
 def _get_last_assistant_message(transcript_path: str) -> str:
-    """Return the last assistant/agent reply from a transcript."""
+    """Return the last assistant/agent reply from a transcript.
+
+    Skips save-checkpoint responses (diary_write, add_drawer confirmations)
+    to avoid polluting the previous-assistant cache with MCP bookkeeping noise.
+    """
     path = _validate_transcript_path(transcript_path)
     if path is None or not path.is_file():
         return ""
+
+    _SAVE_NOISE_MARKERS = (
+        "checkpoint",
+        "diary_write",
+        "add_drawer",
+        "mempalace_diary_write",
+        "mempalace_add_drawer",
+        "mempalace_kg_add",
+        "已保存",
+        "saved",
+    )
 
     last_message = ""
     try:
@@ -236,7 +251,9 @@ def _get_last_assistant_message(transcript_path: str) -> str:
                     content = message.get("content") if isinstance(message, dict) else entry.get("content")
                     text = _extract_assistant_text(content)
                     if text:
-                        last_message = text
+                        text_lower = text[:200].lower()
+                        if not any(m in text_lower for m in _SAVE_NOISE_MARKERS):
+                            last_message = text
                     continue
 
                 # Codex JSONL: {"type": "event_msg", "payload": {"type": "agent_message", ...}}
@@ -249,7 +266,9 @@ def _get_last_assistant_message(transcript_path: str) -> str:
                     ):
                         text = payload["message"].strip()
                         if text:
-                            last_message = text
+                            text_lower = text[:200].lower()
+                            if not any(m in text_lower for m in _SAVE_NOISE_MARKERS):
+                                last_message = text
                     continue
 
                 # Legacy fallback: {"message": {"role": "assistant", "content": ...}}
@@ -257,7 +276,9 @@ def _get_last_assistant_message(transcript_path: str) -> str:
                 if isinstance(message, dict) and message.get("role") == "assistant":
                     text = _extract_assistant_text(message.get("content", ""))
                     if text:
-                        last_message = text
+                        text_lower = text[:200].lower()
+                        if not any(m in text_lower for m in _SAVE_NOISE_MARKERS):
+                            last_message = text
     except OSError:
         return ""
 
