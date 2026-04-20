@@ -26,6 +26,7 @@ USERPROMPT_MAX_SNIPPET_CHARS = 400
 USERPROMPT_MAX_DISTANCE = 1.5
 USERPROMPT_MIN_QUERY_LEN = 6  # skip very short prompts
 USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS = 500
+USERPROMPT_BUDGET_SECONDS = 15  # internal timeout — bail before harness kills us
 
 # Short phrases that don't need memory recall
 # Keep in sync with TRIVIAL_USER_MESSAGES in hermes-mempalace-plugin
@@ -538,6 +539,22 @@ def hook_userprompt(data: dict, harness: str):
 
     prompt_normalized = prompt_stripped.lower()
 
+    # Skip system/internal prompts (e.g. Codex title generation, hook errors)
+    _SYSTEM_PROMPT_MARKERS = (
+        "you are a helpful assistant",
+        "you will be presented with a user prompt",
+        "generate a short title",
+        "hook timed out",
+        "hook (failed)",
+        "hook (completed)",
+    )
+    prompt_lower_head = prompt_normalized[:200]
+    for marker in _SYSTEM_PROMPT_MARKERS:
+        if marker in prompt_lower_head:
+            _log(f"UserPrompt recall: skipped system/internal prompt ({marker!r})")
+            _output({})
+            return
+
     # Skip trivial prompts: too short or common filler phrases
     if prompt_normalized in USERPROMPT_HARD_SKIP_PHRASES:
         _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
@@ -591,6 +608,13 @@ def hook_userprompt(data: dict, harness: str):
         f"session={session_id}, prev_assistant_chars={len(previous_assistant_tail)}"
     )
 
+    import time as _time
+
+    _budget_start = _time.monotonic()
+
+    def _budget_exceeded():
+        return (_time.monotonic() - _budget_start) > USERPROMPT_BUDGET_SECONDS
+
     search_query = user_prompt
     if previous_assistant_tail:
         search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
@@ -624,8 +648,22 @@ def hook_userprompt(data: dict, harness: str):
                     f"LLM decided recall reason={recall_decision.get('reason', 'unknown')}, "
                     f"query={search_query[:80]!r}, after={time_after}"
                 )
+            else:
+                # LLM returned None (API failure / parse error) — fail closed
+                # in auto-recall context, don't waste time on fallback search
+                _log("UserPrompt recall: LLM decide returned None, fail closed")
+                _output({})
+                return
     except Exception as e:
-        _log(f"UserPrompt recall: decide+rewrite failed ({e}), using fallback")
+        _log(f"UserPrompt recall: decide+rewrite failed ({e}), fail closed")
+        _output({})
+        return
+
+    # Check budget before search
+    if _budget_exceeded():
+        _log("UserPrompt recall: budget exceeded after LLM decide, bailing")
+        _output({})
+        return
 
     # --- Stage 2: Vector search + BM25 hybrid rank ---
     # Fetch a larger pool when LLM rerank is available
@@ -658,7 +696,7 @@ def hook_userprompt(data: dict, harness: str):
         return
 
     # --- Stage 3: LLM rerank + relevance filter ---
-    if llm_config and len(hits) > USERPROMPT_RECALL_LIMIT:
+    if llm_config and len(hits) > USERPROMPT_RECALL_LIMIT and not _budget_exceeded():
         try:
             reranked = rerank(
                 user_prompt,  # use original prompt for relevance judgment
