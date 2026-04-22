@@ -19,6 +19,8 @@ import time
 import urllib.error
 import urllib.request
 
+import chromadb
+
 logger = logging.getLogger(__name__)
 
 GEMINI_BATCH_LIMIT = 100
@@ -29,11 +31,13 @@ MAX_RETRIES = 3
 INITIAL_BACKOFF_S = 0.5
 
 
-class GeminiEmbeddingFunction:
-    """ChromaDB-compatible embedding function using Google's Gemini API.
+class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
+    """ChromaDB embedding function using Google's Gemini API.
 
-    Implements the ChromaDB EmbeddingFunction protocol: __call__ takes a
-    list of strings, returns a list of float lists.
+    Inherits from chromadb.EmbeddingFunction to ensure full interface
+    compatibility across ChromaDB versions. The base class provides
+    embed_query, embed_documents, embed_with_retries, default_space, etc.
+    We only need to override __call__ (the core embedding logic).
 
     Uses raw urllib (no SDK dependency), consistent with recall_llm.py.
     """
@@ -71,12 +75,14 @@ class GeminiEmbeddingFunction:
             return urllib.request.build_opener(proxy_handler)
         return None
 
-    def __call__(self, input: list[str]) -> list[list[float]]:
+    def __call__(self, input):
         """Embed a list of texts. Handles batching for large inputs."""
+        if isinstance(input, str):
+            input = [input]
         if not input:
             return []
 
-        all_embeddings: list[list[float]] = []
+        all_embeddings = []
         n_batches = math.ceil(len(input) / GEMINI_BATCH_LIMIT)
 
         for i in range(n_batches):
@@ -86,19 +92,14 @@ class GeminiEmbeddingFunction:
 
         return all_embeddings
 
-    def embed_query(self, input) -> list:
-        """ChromaDB calls this for query embedding."""
-        if isinstance(input, str):
-            return self([input])[0]
-        return self(input)
+    @staticmethod
+    def name() -> str:
+        return "gemini"
 
-    def embed_documents(self, input) -> list[list[float]]:
-        """ChromaDB calls this for batch document embedding."""
-        if isinstance(input, str):
-            return self([input])
-        return self(input)
+    def default_space(self):
+        return "cosine"
 
-    def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+    def _embed_batch(self, texts):
         """Embed a single batch (up to GEMINI_BATCH_LIMIT texts)."""
         payload = json.dumps({
             "requests": [
@@ -216,8 +217,9 @@ def get_embedding_function():
         ef = GeminiEmbeddingFunction(
             api_key=api_key, model=model, dimensions=dims,
         )
+        # Startup probe: full round-trip through ChromaDB's embed_query path
         try:
-            ef(["mempalace startup probe"])
+            ef.embed_query(input=["mempalace startup probe"])
             logger.info("Gemini embedding probe OK")
         except Exception as e:
             err_str = str(e)

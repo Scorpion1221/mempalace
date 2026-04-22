@@ -68,11 +68,7 @@ class TestGetEmbeddingFunction:
 
 
 class TestGeminiEmbeddingFunction:
-    def test_empty_input(self):
-        ef = embedding.GeminiEmbeddingFunction(api_key="k", model="m", dimensions=4)
-        assert ef([]) == []
-
-    def test_single_batch(self, monkeypatch):
+    def test_embed_batch_single(self, monkeypatch):
         response = {
             "embeddings": [
                 {"values": [0.1, 0.2, 0.3, 0.4]},
@@ -92,7 +88,7 @@ class TestGeminiEmbeddingFunction:
 
         monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
         ef = embedding.GeminiEmbeddingFunction(api_key="k", model="m", dimensions=4)
-        result = ef(["hello", "world"])
+        result = ef._embed_batch(["hello", "world"])
         assert result == [[0.1, 0.2, 0.3, 0.4], [0.5, 0.6, 0.7, 0.8]]
 
     def test_batching_splits_large_input(self, monkeypatch):

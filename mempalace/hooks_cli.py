@@ -780,6 +780,12 @@ def hook_userprompt(data: dict, harness: str):
         _output({})
         return
 
+    # Distinguish "no results" from "search error" (e.g. embedding failure)
+    if isinstance(result, dict) and "error" in result:
+        _log(f"WARNING: search returned error: {result['error']}")
+        _output({})
+        return
+
     hits = result.get("results", []) if isinstance(result, dict) else []
 
     # Filter out diary entries — session logs are compact summaries that

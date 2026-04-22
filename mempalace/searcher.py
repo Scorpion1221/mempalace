@@ -418,6 +418,9 @@ def search_memories(
             dkwargs["where"] = where
         drawer_results = drawers_col.query(**dkwargs)
     except Exception as e:
+        err_str = str(e)
+        if "embed" in err_str.lower() or "SSL" in err_str or "CERTIFICATE" in err_str:
+            return {"error": f"Embedding error (check MEMPAL_EMBEDDING_MODEL config): {e}"}
         return {"error": f"Search error: {e}"}
 
     # Gather closet hits (best-per-source) to build a boost lookup.
