@@ -65,8 +65,11 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 | Agent | Where to set env vars | Config file |
 |---|---|---|
 | **Claude Code** | `settings.json` → `env` section | `~/.claude/settings.json` |
-| **Codex** | `config.toml` → `[mcp_servers.mempalace]` → `env` | `~/.codex/config.toml` |
+| **Codex** (MCP) | `config.toml` → `[mcp_servers.mempalace]` → `env` | `~/.codex/config.toml` |
+| **Codex** (hooks) | `config.toml` → `[shell_environment_policy.set]` | `~/.codex/config.toml` |
 | **Hermes** | launchd plist → `EnvironmentVariables` | `~/Library/LaunchAgents/ai.hermes.gateway.plist` |
+
+> **Codex gotcha**: Codex has TWO separate process trees — MCP server and hook subprocesses. They read env vars from different config sections. If you only set `[mcp_servers.mempalace].env`, hooks will fail silently (SSL errors, missing API key).
 
 **Claude Code** — add to `~/.claude/settings.json`:
 ```json
@@ -79,17 +82,20 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 }
 ```
 
-**Codex** — add `env` to the MCP server entry in `~/.codex/config.toml`:
+**Codex** — needs env vars in TWO places (MCP server + hook subprocess):
 ```toml
+# 1. MCP server process:
 [mcp_servers.mempalace]
 command = "mempalace-mcp"
 args = []
 env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", GEMINI_API_KEY = "your-key", SSL_CERT_FILE = "/opt/homebrew/etc/openssl@3/cert.pem" }
 
-# Also add to shell_environment_policy for hooks:
+# 2. Hook subprocess (UserPromptSubmit recall runs here, NOT in MCP server):
 [shell_environment_policy.set]
 MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview"
 MEMPAL_RECALL_LLM = "1"
+SSL_CERT_FILE = "/opt/homebrew/etc/openssl@3/cert.pem"
+GEMINI_API_KEY = "your-key"
 ```
 
 **Hermes** — add to `~/Library/LaunchAgents/ai.hermes.gateway.plist` inside `<dict>` under `EnvironmentVariables`:
