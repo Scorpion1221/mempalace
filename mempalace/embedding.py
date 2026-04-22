@@ -133,6 +133,16 @@ class GeminiEmbeddingFunction:
                 logger.error("Gemini embedding API failed (HTTP %d): %s", code, body)
                 raise
             except Exception as e:
+                err_str = str(e)
+                is_ssl = "CERTIFICATE_VERIFY_FAILED" in err_str or "SSL" in err_str
+                if is_ssl:
+                    logger.error(
+                        "Gemini embedding SSL error: %s. "
+                        "Fix: set SSL_CERT_FILE env var to your cert.pem path. "
+                        "On macOS with homebrew: SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem",
+                        e,
+                    )
+                    raise
                 if attempt < MAX_RETRIES - 1:
                     backoff = INITIAL_BACKOFF_S * (2 ** attempt)
                     logger.warning(
@@ -191,9 +201,28 @@ def get_embedding_function():
         logger.info(
             "Using Gemini embedding: model=%s, dims=%d", model, dims,
         )
-        _cached_embedding_fn = GeminiEmbeddingFunction(
+        ef = GeminiEmbeddingFunction(
             api_key=api_key, model=model, dimensions=dims,
         )
+        try:
+            ef(["mempalace startup probe"])
+            logger.info("Gemini embedding probe OK")
+        except Exception as e:
+            err_str = str(e)
+            if "CERTIFICATE_VERIFY_FAILED" in err_str or "SSL" in err_str:
+                logger.error(
+                    "Gemini embedding FAILED: SSL certificate error. "
+                    "Set SSL_CERT_FILE env var. On macOS: "
+                    "SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem"
+                )
+            elif "location is not supported" in err_str:
+                logger.error(
+                    "Gemini embedding FAILED: region not supported. "
+                    "Set HTTPS_PROXY to a US/EU proxy."
+                )
+            else:
+                logger.warning("Gemini embedding probe failed: %s (will retry on use)", e)
+        _cached_embedding_fn = ef
         return _cached_embedding_fn
 
     logger.warning("Unknown embedding model %r, falling back to default.", model)
