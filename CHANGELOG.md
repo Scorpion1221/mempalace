@@ -53,13 +53,23 @@ Using Gemini embedding through a LiteLLM proxy avoids region restrictions, SSL i
 
 > **Note**: LiteLLM's Vertex AI embedding proxy doesn't support batch input (returns 1 embedding for N inputs). The embedding module works around this with 10-thread concurrent single-text requests (~7s for 100 texts).
 
-### Sync Script
+### Sync & Update
 
-After code changes, run one command to update all 3 agents:
+**Claude Code plugin** — update via the plugin system (requires marketplace pointed at local repo):
+```bash
+# One-time: point marketplace at local repo instead of upstream GitHub
+claude plugin marketplace add /path/to/mempalace
+
+# Update plugin to match local repo version
+claude plugin update mempalace@mempalace
+# Restart Claude Code session to apply
+```
+
+**All 3 agents** — sync hook scripts and Python package in one command:
 ```bash
 bash scripts/sync-plugins.sh
 ```
-This reinstalls the Python package, syncs hook scripts (preserving local env var customizations), updates Hermes runtime, and verifies env var configuration.
+This reinstalls the Python package, syncs hook scripts (preserving local env var customizations), updates Hermes runtime, and verifies env var configuration. The sync script dynamically resolves the Claude plugin cache path from the registry instead of hardcoding a version.
 
 ### Configuration — Environment Variables
 
@@ -183,6 +193,13 @@ Turns that don't need recall (continuations, code tasks, etc.) cost zero — the
 **CJK hybrid search** — Bigram tokenizer for BM25 ranking, preferred-wing boost, and temporal filtering in the searcher.
 
 **Auto-recall hooks for Claude Code and Codex** — `UserPromptSubmit` hook automatically searches the palace and injects relevant memories into the conversation context.
+
+### Bug Fixes
+
+- **UserPromptSubmit hook pipe error** — Replaced `INPUT=$(cat)` + `echo "$INPUT" | python3 -m mempalace hook run` pattern with `run_mempalace_hook()` wrapper that inherits stdin directly (matching stop/precompact hooks). Fixes intermittent `line 6: Done echo "$INPUT"` non-blocking errors in Claude Code hook environment.
+- **sync-plugins.sh hardcoded version** — Replaced `CLAUDE_CACHE="...3.3.0"` with dynamic resolution from `installed_plugins.json`, preventing version drift when the plugin is upgraded past the hardcoded path.
+- **Concurrent single-text calls for OpenAI-compat embedding proxy** — LiteLLM's Vertex AI embedding proxy doesn't support batch input; embedding module now uses 10-thread concurrent single-text requests as a workaround.
+- **Rebuild MCP collection cache when embedding function becomes available** — Prevents stale cache from serving results with the wrong embedding dimensions after switching models.
 
 ### Improvements
 
