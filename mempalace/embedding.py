@@ -89,15 +89,40 @@ class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
         if not input:
             return []
 
+        if self._mode == "openai":
+            return self._embed_openai_concurrent(input)
+
         all_embeddings = []
         n_batches = math.ceil(len(input) / GEMINI_BATCH_LIMIT)
-
         for i in range(n_batches):
             batch = input[i * GEMINI_BATCH_LIMIT : (i + 1) * GEMINI_BATCH_LIMIT]
             embeddings = self._embed_batch(batch)
             all_embeddings.extend(embeddings)
-
         return all_embeddings
+
+    def _embed_openai_concurrent(self, texts):
+        """Embed via OpenAI-compat endpoint with concurrent single-text calls.
+
+        LiteLLM's Vertex AI proxy doesn't support batch input — it returns
+        only 1 embedding regardless of input size. Work around by sending
+        one text per request with a thread pool for parallelism.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        results = [None] * len(texts)
+        max_workers = min(10, len(texts))
+
+        def _embed_one(idx, text):
+            emb = self._embed_batch([text])
+            return idx, emb[0]
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_embed_one, i, t): i for i, t in enumerate(texts)}
+            for future in as_completed(futures):
+                idx, embedding = future.result()
+                results[idx] = embedding
+
+        return results
 
     @staticmethod
     def name() -> str:
