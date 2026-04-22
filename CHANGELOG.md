@@ -21,9 +21,45 @@ cd mempalace && git checkout dev
 # Install in editable mode (all 3 agents share the same code)
 pip install -e ".[dev]"
 
+# IMPORTANT: verify mempalace CLI uses pyenv Python, not system Python
+which mempalace  # should be ~/.pyenv/shims/mempalace
+# If it's ~/.local/bin/mempalace, remove it: rm ~/.local/bin/mempalace
+
 # Initialize palace (first time only)
 mempalace init ~/your-project-dir
 ```
+
+### LiteLLM Proxy Setup (Recommended for Gemini Embedding)
+
+Using Gemini embedding through a LiteLLM proxy avoids region restrictions, SSL issues, and API key rate limits. All three agents connect to the same local proxy.
+
+```bash
+# ~/.litellm/config.yaml — add this model:
+#   - model_name: gemini-embedding-2-preview
+#     litellm_params:
+#       model: vertex_ai/gemini-embedding-2-preview
+#       vertex_project: your-gcp-project
+#       vertex_location: us-central1
+#       vertex_credentials: /app/your-service-account-key.json
+
+# ~/.litellm/docker-compose.yaml — mount the key:
+#   volumes:
+#     - ./your-service-account-key.json:/app/your-service-account-key.json:ro
+
+# Start: cd ~/.litellm && docker compose up -d
+# Test:  curl http://127.0.0.1:4000/v1/embeddings -H "Authorization: Bearer your-litellm-key" \
+#          -d '{"model":"gemini-embedding-2-preview","input":["test"]}'
+```
+
+> **Note**: LiteLLM's Vertex AI embedding proxy doesn't support batch input (returns 1 embedding for N inputs). The embedding module works around this with 10-thread concurrent single-text requests (~7s for 100 texts).
+
+### Sync Script
+
+After code changes, run one command to update all 3 agents:
+```bash
+bash scripts/sync-plugins.sh
+```
+This reinstalls the Python package, syncs hook scripts (preserving local env var customizations), updates Hermes runtime, and verifies env var configuration.
 
 ### Configuration — Environment Variables
 
@@ -32,13 +68,16 @@ All enhancements are **opt-in** via environment variables. Without them, behavio
 **Important**: `~/.zshrc` alone is NOT enough — see [Multi-Agent Environment Setup](#important-multi-agent-environment-setup) below.
 
 ```bash
-# ── Gemini Embedding (replaces default MiniLM, +12% Chinese search quality) ──
-export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview   # or "default" to disable
-export GEMINI_API_KEY=your-gemini-api-key                  # required for Gemini
-# export MEMPAL_EMBEDDING_DIMS=3072                        # optional, default 3072
+# ── Gemini Embedding via LiteLLM proxy (recommended) ──
+export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
+export MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000   # LiteLLM proxy
+export MEMPAL_EMBEDDING_KEY=your-litellm-key              # LiteLLM master key
+# export MEMPAL_EMBEDDING_DIMS=3072                       # optional, default 3072
 
-# ── SSL Certificate (required on macOS if using system Python) ──
-export SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem  # adjust path for your system
+# ── Gemini Embedding direct (alternative — may hit region/rate limits) ──
+# export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
+# export GEMINI_API_KEY=your-gemini-api-key
+# export SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem
 
 # ── LLM Recall Gate (smart recall + query rewrite, uses Claude Haiku) ──
 export MEMPAL_RECALL_LLM=1                                 # enable LLM-enhanced recall
@@ -76,8 +115,9 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 {
   "env": {
     "MEMPAL_EMBEDDING_MODEL": "gemini-embedding-2-preview",
-    "MEMPAL_RECALL_LLM": "1",
-    "SSL_CERT_FILE": "/opt/homebrew/etc/openssl@3/cert.pem"
+    "MEMPAL_EMBEDDING_ENDPOINT": "http://127.0.0.1:4000",
+    "MEMPAL_EMBEDDING_KEY": "your-litellm-key",
+    "MEMPAL_RECALL_LLM": "1"
   }
 }
 ```
@@ -88,24 +128,24 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 [mcp_servers.mempalace]
 command = "mempalace-mcp"
 args = []
-env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", GEMINI_API_KEY = "your-key", SSL_CERT_FILE = "/opt/homebrew/etc/openssl@3/cert.pem" }
+env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", MEMPAL_EMBEDDING_ENDPOINT = "http://127.0.0.1:4000", MEMPAL_EMBEDDING_KEY = "your-litellm-key" }
 
 # 2. Hook subprocess (UserPromptSubmit recall runs here, NOT in MCP server):
 [shell_environment_policy.set]
 MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview"
+MEMPAL_EMBEDDING_ENDPOINT = "http://127.0.0.1:4000"
+MEMPAL_EMBEDDING_KEY = "your-litellm-key"
 MEMPAL_RECALL_LLM = "1"
-SSL_CERT_FILE = "/opt/homebrew/etc/openssl@3/cert.pem"
-GEMINI_API_KEY = "your-key"
 ```
 
 **Hermes** — add to `~/Library/LaunchAgents/ai.hermes.gateway.plist` inside `<dict>` under `EnvironmentVariables`:
 ```xml
 <key>MEMPAL_EMBEDDING_MODEL</key>
 <string>gemini-embedding-2-preview</string>
-<key>GEMINI_API_KEY</key>
-<string>your-key</string>
-<key>SSL_CERT_FILE</key>
-<string>/opt/homebrew/etc/openssl@3/cert.pem</string>
+<key>MEMPAL_EMBEDDING_ENDPOINT</key>
+<string>http://127.0.0.1:4000</string>
+<key>MEMPAL_EMBEDDING_KEY</key>
+<string>your-litellm-key</string>
 ```
 Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist && launchctl load ~/Library/LaunchAgents/ai.hermes.gateway.plist`
 

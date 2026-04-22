@@ -111,7 +111,7 @@ fi
 
 # 6. Verify env var config across all agents
 echo "[6/6] Verifying env var configuration..."
-REQUIRED_VARS="MEMPAL_EMBEDDING_MODEL GEMINI_API_KEY SSL_CERT_FILE"
+REQUIRED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY"
 HAS_WARNINGS=0
 
 # Claude Code
@@ -147,7 +147,7 @@ fi
 HAS_WARNINGS=0
 HERMES_PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
 if [ -f "$HERMES_PLIST" ]; then
-    for var in MEMPAL_EMBEDDING_MODEL GEMINI_API_KEY SSL_CERT_FILE; do
+    for var in MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY; do
         if ! grep -q "$var" "$HERMES_PLIST" 2>/dev/null; then
             echo "  ⚠ Hermes: missing $var in launchd plist"
             HAS_WARNINGS=1
