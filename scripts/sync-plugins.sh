@@ -1,9 +1,53 @@
 #!/usr/bin/env bash
 # sync-mempalace-plugins.sh — One command to sync all 3 agents' plugin files
+#
+# Smart sync: updates code logic from repo but preserves local env var
+# customizations (API keys, paths) that aren't in the repo.
 set -euo pipefail
 
 REPO="$HOME/git/mempalace"
 HERMES_REPO="$HOME/git/hermes-mempalace-plugin"
+
+# Smart copy: if target has local env var customizations, preserve them after update
+smart_copy_hook() {
+    local src="$1" dst="$2"
+    if [ ! -f "$dst" ]; then
+        cp "$src" "$dst"
+        echo "  → $(basename "$dst") (new)"
+        return
+    fi
+
+    # Save local export lines that have non-empty defaults (user customized)
+    # Match: export VAR="${VAR:-SOMETHING}" where SOMETHING is not empty
+    local saved_lines=""
+    while IFS= read -r line; do
+        # Extract the default value between :- and }
+        local default_val
+        default_val=$(echo "$line" | sed -n 's/.*:-\(.*\)}.*/\1/p')
+        if [ -n "$default_val" ]; then
+            saved_lines="${saved_lines}${line}"$'\n'
+        fi
+    done < <(grep '^export ' "$dst" 2>/dev/null || true)
+
+    # Copy repo version
+    cp "$src" "$dst"
+
+    # Re-apply saved customizations
+    if [ -n "$saved_lines" ]; then
+        while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            local var_name
+            var_name=$(echo "$line" | sed 's/export \([A-Z_]*\)=.*/\1/')
+            if [ -n "$var_name" ] && grep -q "^export ${var_name}=" "$dst"; then
+                sed -i '' "s|^export ${var_name}=.*|${line}|" "$dst"
+                echo "  → preserved local $var_name"
+            fi
+        done <<< "$saved_lines"
+        echo "  → $(basename "$dst") (merged)"
+    else
+        echo "  → $(basename "$dst") (updated)"
+    fi
+}
 
 echo "=== Syncing MemPalace plugins to all 3 agents ==="
 
@@ -16,7 +60,9 @@ echo "  → $(python3 -c 'import mempalace; print(f"mempalace {mempalace.__versi
 CLAUDE_CACHE="$HOME/.claude/plugins/cache/mempalace/mempalace/3.3.0"
 if [ -d "$CLAUDE_CACHE" ]; then
     echo "[2/6] Syncing Claude Code plugin cache..."
-    cp "$REPO/.claude-plugin/hooks/"mempal-*.sh "$CLAUDE_CACHE/hooks/" 2>/dev/null && echo "  → hooks synced" || echo "  → no hooks to sync"
+    for f in "$REPO/.claude-plugin/hooks/"mempal-*.sh; do
+        [ -f "$f" ] && smart_copy_hook "$f" "$CLAUDE_CACHE/hooks/$(basename "$f")"
+    done
     cp "$REPO/.claude-plugin/plugin.json" "$CLAUDE_CACHE/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
 else
     echo "[2/6] Claude Code plugin cache not found, skipping"
@@ -26,7 +72,9 @@ fi
 CODEX_PLUGIN="$HOME/.agents/plugins/mempalace/.codex-plugin"
 if [ -d "$CODEX_PLUGIN" ]; then
     echo "[3/6] Syncing Codex plugin hooks..."
-    cp "$REPO/.codex-plugin/hooks/"*.sh "$CODEX_PLUGIN/hooks/" 2>/dev/null && echo "  → hooks synced" || echo "  → no hooks to sync"
+    for f in "$REPO/.codex-plugin/hooks/"*.sh; do
+        [ -f "$f" ] && smart_copy_hook "$f" "$CODEX_PLUGIN/hooks/$(basename "$f")"
+    done
 else
     echo "[3/6] Codex plugin dir not found, skipping"
 fi
@@ -38,7 +86,6 @@ if [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__ini
     cp "$HERMES_REPO/plugins/memory/mempalace/__init__.py" "$HERMES_RUNTIME/__init__.py"
     echo "  → __init__.py synced"
 
-    # Also reinstall in Hermes venv if it exists
     HERMES_VENV="$HOME/.hermes/hermes-agent/venv"
     if [ -f "$HERMES_VENV/bin/python" ]; then
         "$HERMES_VENV/bin/python" -m pip install -e "$REPO" -q 2>/dev/null && echo "  → Hermes venv updated" || true
@@ -81,14 +128,12 @@ fi
 # Codex — check BOTH mcp_servers.env AND shell_environment_policy.set
 HAS_WARNINGS=0
 if [ -f "$HOME/.codex/config.toml" ]; then
-    # Check mcp_servers section
     for var in $REQUIRED_VARS; do
         if ! grep -A5 '\[mcp_servers.mempalace\]' "$HOME/.codex/config.toml" | grep -q "$var" 2>/dev/null; then
             echo "  ⚠ Codex MCP: missing $var in [mcp_servers.mempalace].env"
             HAS_WARNINGS=1
         fi
     done
-    # Check shell_environment_policy.set (for hooks)
     for var in $REQUIRED_VARS MEMPAL_RECALL_LLM; do
         if ! grep -A10 '\[shell_environment_policy.set\]' "$HOME/.codex/config.toml" | grep -q "$var" 2>/dev/null; then
             echo "  ⚠ Codex hooks: missing $var in [shell_environment_policy.set]"
