@@ -47,14 +47,21 @@ class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
         api_key: str,
         model: str = GEMINI_DEFAULT_MODEL,
         dimensions: int = GEMINI_DEFAULT_DIMS,
+        endpoint: str = "",
     ):
         self._api_key = api_key
         self._model = model
         self._dimensions = dimensions
-        self._url = (
-            f"{GEMINI_API_BASE}/models/{model}:batchEmbedContents"
-            f"?key={api_key}"
-        )
+        self._endpoint = endpoint.rstrip("/") if endpoint else ""
+        if self._endpoint:
+            self._url = f"{self._endpoint}/v1/embeddings"
+            self._mode = "openai"
+        else:
+            self._url = (
+                f"{GEMINI_API_BASE}/models/{model}:batchEmbedContents"
+                f"?key={api_key}"
+            )
+            self._mode = "gemini"
         self._opener = self._build_opener()
 
     @staticmethod
@@ -101,21 +108,33 @@ class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
 
     def _embed_batch(self, texts):
         """Embed a single batch (up to GEMINI_BATCH_LIMIT texts)."""
-        payload = json.dumps({
-            "requests": [
-                {
-                    "model": f"models/{self._model}",
-                    "content": {"parts": [{"text": t}]},
-                    "outputDimensionality": self._dimensions,
-                }
-                for t in texts
-            ]
-        }).encode("utf-8")
+        if self._mode == "openai":
+            payload = json.dumps({
+                "model": self._model,
+                "input": texts,
+                "dimensions": self._dimensions,
+            }).encode("utf-8")
+            headers = {
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self._api_key}",
+            }
+        else:
+            payload = json.dumps({
+                "requests": [
+                    {
+                        "model": f"models/{self._model}",
+                        "content": {"parts": [{"text": t}]},
+                        "outputDimensionality": self._dimensions,
+                    }
+                    for t in texts
+                ]
+            }).encode("utf-8")
+            headers = {"Content-Type": "application/json"}
 
         req = urllib.request.Request(
             self._url,
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
 
@@ -127,6 +146,8 @@ class GeminiEmbeddingFunction(chromadb.EmbeddingFunction):
                 else:
                     with urllib.request.urlopen(req, timeout=30) as resp:
                         result = json.loads(resp.read())
+                if self._mode == "openai":
+                    return [item["embedding"] for item in result["data"]]
                 return [e["values"] for e in result["embeddings"]]
             except urllib.error.HTTPError as e:
                 code = getattr(e, "code", 0)
@@ -198,15 +219,31 @@ def get_embedding_function():
         return None
 
     if model.startswith("gemini"):
+        endpoint = (
+            os.environ.get("MEMPAL_EMBEDDING_ENDPOINT")
+            or os.environ.get("MEMPALACE_EMBEDDING_ENDPOINT")
+            or ""
+        ).strip()
         api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-        if not api_key:
-            logger.warning(
-                "MEMPAL_EMBEDDING_MODEL=%s but GEMINI_API_KEY is not set. "
-                "Falling back to default embedding.",
-                model,
-            )
-            _cached_embedding_fn = None
-            return None
+
+        if endpoint:
+            key = (
+                os.environ.get("MEMPAL_EMBEDDING_KEY")
+                or api_key
+                or os.environ.get("LITELLM_KEY", "")
+                or "sk-litellm-local"
+            ).strip()
+            logger.info("Using Gemini embedding via proxy: endpoint=%s, model=%s", endpoint, model)
+        else:
+            key = api_key
+            if not key:
+                logger.warning(
+                    "MEMPAL_EMBEDDING_MODEL=%s but no GEMINI_API_KEY or MEMPAL_EMBEDDING_ENDPOINT set. "
+                    "Falling back to default embedding.",
+                    model,
+                )
+                _cached_embedding_fn = None
+                return None
 
         dims_str = os.environ.get("MEMPAL_EMBEDDING_DIMS", "")
         dims = int(dims_str) if dims_str.strip().isdigit() else GEMINI_DEFAULT_DIMS
@@ -215,7 +252,7 @@ def get_embedding_function():
             "Using Gemini embedding: model=%s, dims=%d", model, dims,
         )
         ef = GeminiEmbeddingFunction(
-            api_key=api_key, model=model, dimensions=dims,
+            api_key=key, model=model, dimensions=dims, endpoint=endpoint,
         )
         # Startup probe: full round-trip through ChromaDB's embed_query path
         try:
