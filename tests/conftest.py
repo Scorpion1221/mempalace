@@ -56,6 +56,7 @@ def _reset_mcp_cache():
 
             mcp_server._client_cache = None
             mcp_server._collection_cache = None
+            mcp_server._collection_has_ef = False
         except (ImportError, AttributeError):
             pass
 

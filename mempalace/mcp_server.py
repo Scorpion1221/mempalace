@@ -211,9 +211,17 @@ def _get_client():
     return _client_cache
 
 
+_collection_has_ef = False
+
+
 def _get_collection(create=False):
-    """Return the ChromaDB collection, caching the client between calls."""
-    global _collection_cache, _metadata_cache, _metadata_cache_time
+    """Return the ChromaDB collection, caching the client between calls.
+
+    Rebuilds the cache if a custom embedding function becomes available
+    after the collection was first cached without one (e.g. MCP server
+    started before env vars were set).
+    """
+    global _collection_cache, _metadata_cache, _metadata_cache_time, _collection_has_ef
     try:
         from .embedding import get_embedding_function
 
@@ -222,20 +230,27 @@ def _get_collection(create=False):
         if ef is not None:
             ef_kwargs["embedding_function"] = ef
 
+        # Rebuild cache if: first time, explicit create, or ef appeared after initial cache
+        needs_rebuild = (
+            _collection_cache is None
+            or create
+            or (ef is not None and not _collection_has_ef)
+        )
+
         client = _get_client()
-        if create:
-            _collection_cache = ChromaCollection(
-                client.get_or_create_collection(
-                    _config.collection_name, metadata={"hnsw:space": "cosine"},
-                    **ef_kwargs,
+        if needs_rebuild:
+            if create:
+                _collection_cache = ChromaCollection(
+                    client.get_or_create_collection(
+                        _config.collection_name, metadata={"hnsw:space": "cosine"},
+                        **ef_kwargs,
+                    )
                 )
-            )
-            _metadata_cache = None
-            _metadata_cache_time = 0
-        elif _collection_cache is None:
-            _collection_cache = ChromaCollection(
-                client.get_collection(_config.collection_name, **ef_kwargs)
-            )
+            else:
+                _collection_cache = ChromaCollection(
+                    client.get_collection(_config.collection_name, **ef_kwargs)
+                )
+            _collection_has_ef = ef is not None
             _metadata_cache = None
             _metadata_cache_time = 0
         return _collection_cache
