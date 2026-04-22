@@ -86,13 +86,17 @@ class GeminiEmbeddingFunction:
 
         return all_embeddings
 
-    def embed_query(self, query: str) -> list[float]:
-        """ChromaDB calls this for single query embedding."""
-        return self([query])[0]
+    def embed_query(self, input) -> list:
+        """ChromaDB calls this for query embedding."""
+        if isinstance(input, str):
+            return self([input])[0]
+        return self(input)
 
-    def embed_documents(self, documents: list[str]) -> list[list[float]]:
+    def embed_documents(self, input) -> list[list[float]]:
         """ChromaDB calls this for batch document embedding."""
-        return self(documents)
+        if isinstance(input, str):
+            return self([input])
+        return self(input)
 
     def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         """Embed a single batch (up to GEMINI_BATCH_LIMIT texts)."""
