@@ -717,12 +717,14 @@ You will receive:
 - PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
 - {n} candidate memory snippets.
 
-Select ONLY the candidate memories that are actually relevant to the current user message. Return up to {k} results.
+Select the candidate memories that are relevant to the current user message. Return up to {k} results.
 
 Rules:
-- Only include candidates that would genuinely help answer the current user message.
+- Include candidates that contain information the user is looking for, even if only partially relevant.
+- A candidate mentioning the same project, system, or topic as the user's question is likely relevant — include it.
+- Prefer to INCLUDE borderline candidates rather than exclude them — false negatives (missing a relevant memory) are worse than false positives (including a marginally relevant one).
 - Use the previous assistant message tail only when it materially clarifies the current user message.
-- If none are relevant, reply with: NONE
+- Reply NONE only if the candidates are clearly about completely unrelated topics.
 - Otherwise reply with ONLY the numbers of relevant candidates, separated by commas, in order of relevance
 - Example (some relevant): 3,1,7
 - Example (none relevant): NONE
@@ -748,7 +750,7 @@ def _build_rerank_prompt(
     """Build the rerank prompt with optional previous assistant context."""
     candidate_blocks = []
     for i, hit in enumerate(hits):
-        text = hit.get("text", "")[:400].replace("\n", " ").strip()
+        text = hit.get("text", "")[:800].replace("\n", " ").strip()
         wing = hit.get("wing", "?")
         room = hit.get("room", "?")
         candidate_blocks.append(f"{i + 1}. [{wing}/{room}] {text}")
