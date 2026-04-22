@@ -27,15 +27,18 @@ mempalace init ~/your-project-dir
 
 ### Configuration — Environment Variables
 
-All enhancements are **opt-in** via environment variables. Without them, behavior is identical to upstream 3.3.1.
+All enhancements are **opt-in** via environment variables. Without them, behavior is identical to upstream 3.3.2.
 
-Add to `~/.zshrc` (or equivalent) for all agents, or to `~/.claude/settings.json` `env` section for Claude Code only:
+**Important**: `~/.zshrc` alone is NOT enough — see [Multi-Agent Environment Setup](#important-multi-agent-environment-setup) below.
 
 ```bash
 # ── Gemini Embedding (replaces default MiniLM, +12% Chinese search quality) ──
 export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview   # or "default" to disable
 export GEMINI_API_KEY=your-gemini-api-key                  # required for Gemini
 # export MEMPAL_EMBEDDING_DIMS=3072                        # optional, default 3072
+
+# ── SSL Certificate (required on macOS if using system Python) ──
+export SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem  # adjust path for your system
 
 # ── LLM Recall Gate (smart recall + query rewrite, uses Claude Haiku) ──
 export MEMPAL_RECALL_LLM=1                                 # enable LLM-enhanced recall
@@ -50,6 +53,9 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 
 # Option C: Anthropic API direct
 # Requires ANTHROPIC_API_KEY (uses claude-haiku-4-5-20251001 by default)
+
+# ── Proxy (if Gemini API is blocked in your region) ──
+# export HTTPS_PROXY=http://127.0.0.1:7890
 ```
 
 ### Important: Multi-Agent Environment Setup
@@ -67,7 +73,8 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 {
   "env": {
     "MEMPAL_EMBEDDING_MODEL": "gemini-embedding-2-preview",
-    "MEMPAL_RECALL_LLM": "1"
+    "MEMPAL_RECALL_LLM": "1",
+    "SSL_CERT_FILE": "/opt/homebrew/etc/openssl@3/cert.pem"
   }
 }
 ```
@@ -75,9 +82,14 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
 **Codex** — add `env` to the MCP server entry in `~/.codex/config.toml`:
 ```toml
 [mcp_servers.mempalace]
-command = "python3"
-args = ["-m", "mempalace.mcp_server"]
-env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", GEMINI_API_KEY = "your-key" }
+command = "mempalace-mcp"
+args = []
+env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", GEMINI_API_KEY = "your-key", SSL_CERT_FILE = "/opt/homebrew/etc/openssl@3/cert.pem" }
+
+# Also add to shell_environment_policy for hooks:
+[shell_environment_policy.set]
+MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview"
+MEMPAL_RECALL_LLM = "1"
 ```
 
 **Hermes** — add to `~/Library/LaunchAgents/ai.hermes.gateway.plist` inside `<dict>` under `EnvironmentVariables`:
@@ -86,6 +98,8 @@ env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", GEMINI_API_KEY = 
 <string>gemini-embedding-2-preview</string>
 <key>GEMINI_API_KEY</key>
 <string>your-key</string>
+<key>SSL_CERT_FILE</key>
+<string>/opt/homebrew/etc/openssl@3/cert.pem</string>
 ```
 Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist && launchctl load ~/Library/LaunchAgents/ai.hermes.gateway.plist`
 
@@ -126,11 +140,28 @@ Turns that don't need recall (continuations, code tasks, etc.) cost zero — the
 
 ### Improvements
 
+- **GeminiEmbeddingFunction inherits ChromaDB base class** — Prevents interface mismatch issues (like the embed_query parameter name bug). Future ChromaDB upgrades won't silently break embedding.
 - **Query rewrite preserves user's language** — Previously forced English translation, causing 20% retrieval penalty for Chinese content. Now keeps the same language as the user's message.
 - **Diary and hooks use natural language instead of AAAK** — AAAK compressed format scored 84.2% vs raw 96.6% on LongMemEval. All prompts now guide plain natural language for better search recall.
-- **Diary and hooks write in user's language** — Stop hook and `diary_write` tool description now instruct the model to write in the same language the user used during the session, preventing language mismatch with search queries.
-- **Smaller batch size for API-based repair** — `repair rebuild` uses batch=100 (matching Gemini API limit) when a custom embedding function is configured, with per-item retry fallback.
-- **Test isolation from embedding env vars** — `conftest.py` strips `MEMPAL_EMBEDDING_MODEL` and resets singleton caches so tests always use the default local model.
+- **Diary and hooks write in user's language** — Stop hook and `diary_write` tool description now instruct the model to write in the same language the user used during the session.
+- **Content sanitization** — `sanitize_content()` now strips control characters, collapses excessive blank lines, and truncates gracefully with a `[truncated at limit]` marker instead of raising errors.
+- **Hook hardening** — 15s internal budget timer, fail-closed with history-keyword fallback, system prompt detection (skips Codex title generation), save-checkpoint noise filtering for previous-assistant cache.
+- **Proxy support** — Gemini embedding supports `HTTPS_PROXY` / `ALL_PROXY` for regions where the API is blocked.
+- **Startup diagnostics** — Embedding probe at first use detects SSL cert errors, region blocks, and API key issues with actionable fix messages.
+- **One-command plugin sync** — `bash scripts/sync-plugins.sh` updates all 3 agents (Claude Code, Codex, Hermes) in one command.
+- **Test isolation** — `conftest.py` strips `MEMPAL_EMBEDDING_MODEL` and `MEMPAL_RECALL_LLM` so tests always use the default local model.
+
+### Troubleshooting
+
+**Search returns no hits but data exists** — Check `~/.mempalace/hook_state/hook.log` for:
+- `SSL: CERTIFICATE_VERIFY_FAILED` → Set `SSL_CERT_FILE` env var in all agent configs
+- `User location is not supported` → Set `HTTPS_PROXY` to a US/EU proxy
+- `Embedding dimension 384 does not match 3072` → Run `mempalace repair --yes` after switching models
+- `embed_query` errors → Run `pip install -e .` to update entry points
+
+**Hook times out (Codex)** — The LLM recall pipeline takes 8-12s. Set hook timeout to at least 20s in `~/.codex/hooks.json` and `.codex-plugin/hooks.json`.
+
+**MCP server shows "No palace found"** — The MCP server process may be stale. Restart the Claude Code / Codex session to spawn a fresh `mempalace-mcp` process.
 
 ### Migration
 
