@@ -72,13 +72,28 @@ def sanitize_kg_value(value: str, field_name: str = "value") -> str:
 
 
 def sanitize_content(value: str, max_length: int = 100_000) -> str:
-    """Validate drawer/diary content length."""
+    """Validate and clean drawer/diary content for safe storage and embedding.
+
+    - Strips leading/trailing whitespace
+    - Removes null bytes and other control characters (except newline/tab)
+    - Normalizes excessive whitespace runs
+    - Truncates to max_length with a marker if exceeded
+    """
     if not isinstance(value, str) or not value.strip():
         raise ValueError("content must be a non-empty string")
+    value = value.strip()
+    # Remove null bytes and non-printable control characters (keep \n \t)
+    value = "".join(
+        c for c in value
+        if c in ("\n", "\t") or (ord(c) >= 32) or (ord(c) > 127)
+    )
+    # Collapse runs of 3+ blank lines to 2
+    import re
+    value = re.sub(r"\n{4,}", "\n\n\n", value)
     if len(value) > max_length:
-        raise ValueError(f"content exceeds maximum length of {max_length} characters")
-    if "\x00" in value:
-        raise ValueError("content contains null bytes")
+        value = value[:max_length - 20] + "\n[truncated at limit]"
+    if not value.strip():
+        raise ValueError("content is empty after sanitization")
     return value
 
 
