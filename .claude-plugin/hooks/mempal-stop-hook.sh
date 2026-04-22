@@ -1,5 +1,6 @@
 #!/bin/bash
 # MemPalace Stop Hook — thin wrapper calling Python CLI
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/opt/homebrew/etc/openssl@3/cert.pem}"
 # All logic lives in mempalace.hooks_cli for cross-harness extensibility
 run_mempalace_hook() {
   if command -v mempalace >/dev/null 2>&1; then
