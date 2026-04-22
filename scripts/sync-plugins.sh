@@ -83,13 +83,15 @@ else
     echo "[2/6] Claude Code plugin cache not found, skipping"
 fi
 
-# 3. Codex: sync plugin hooks
+# 3. Codex: sync plugin hooks and config
 CODEX_PLUGIN="$HOME/.agents/plugins/mempalace/.codex-plugin"
 if [ -d "$CODEX_PLUGIN" ]; then
-    echo "[3/6] Syncing Codex plugin hooks..."
+    echo "[3/6] Syncing Codex plugin..."
     for f in "$REPO/.codex-plugin/hooks/"*.sh; do
         [ -f "$f" ] && smart_copy_hook "$f" "$CODEX_PLUGIN/hooks/$(basename "$f")"
     done
+    cp "$REPO/.codex-plugin/plugin.json" "$CODEX_PLUGIN/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
+    cp "$REPO/.codex-plugin/hooks.json" "$CODEX_PLUGIN/hooks.json" 2>/dev/null && echo "  → hooks.json synced" || true
 else
     echo "[3/6] Codex plugin dir not found, skipping"
 fi
