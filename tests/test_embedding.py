@@ -43,9 +43,11 @@ class TestGetEmbeddingFunction:
         result = embedding.get_embedding_function()
         assert result._dimensions == 768
 
-    def test_falls_back_when_no_api_key(self, monkeypatch):
+    def test_falls_back_when_no_api_key_and_no_endpoint(self, monkeypatch):
         monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
         monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+        monkeypatch.delenv("MEMPAL_EMBEDDING_ENDPOINT", raising=False)
+        monkeypatch.delenv("MEMPALACE_EMBEDDING_ENDPOINT", raising=False)
         assert embedding.get_embedding_function() is None
 
     def test_unknown_model_falls_back(self, monkeypatch):
