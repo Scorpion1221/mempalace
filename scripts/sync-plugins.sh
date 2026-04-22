@@ -57,8 +57,23 @@ pip install -e "$REPO" -q 2>/dev/null
 echo "  → $(python3 -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
 
 # 2. Claude Code: sync plugin cache
-CLAUDE_CACHE="$HOME/.claude/plugins/cache/mempalace/mempalace/3.3.0"
-if [ -d "$CLAUDE_CACHE" ]; then
+# Dynamically resolve the installed cache path from the plugin registry
+CLAUDE_CACHE=""
+if [ -f "$HOME/.claude/plugins/installed_plugins.json" ]; then
+    CLAUDE_CACHE=$(python3 -c "
+import json
+with open('$HOME/.claude/plugins/installed_plugins.json') as f:
+    data = json.load(f)
+for key, entries in data.get('plugins', {}).items():
+    if 'mempalace' in key.lower() and entries:
+        print(entries[0].get('installPath', ''))
+        break
+" 2>/dev/null)
+fi
+if [ -z "$CLAUDE_CACHE" ] || [ ! -d "$CLAUDE_CACHE" ]; then
+    CLAUDE_CACHE=$(find "$HOME/.claude/plugins/cache/mempalace/mempalace" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)
+fi
+if [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
     echo "[2/6] Syncing Claude Code plugin cache..."
     for f in "$REPO/.claude-plugin/hooks/"mempal-*.sh; do
         [ -f "$f" ] && smart_copy_hook "$f" "$CLAUDE_CACHE/hooks/$(basename "$f")"
