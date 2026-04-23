@@ -1105,3 +1105,98 @@ def test_async_save_prompt_requires_predicate_language_consistency():
     formatted = _ASYNC_SAVE_PROMPT.format(wing="test_wing", transcript="sample")
     assert "test_wing" in formatted
     assert "sample" in formatted
+
+
+# --- _get_palace_kg_entities ---
+
+
+def test_get_palace_kg_entities_returns_top_entities_by_triple_count(monkeypatch, tmp_path):
+    """Top entities are ranked by current-triple participation count."""
+    from mempalace import hooks_cli
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "kg.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    # 小柒 participates in 3 triples; 三只猫 in 2; 单飞 in 1.
+    kg.add_triple("小柒", "is_a", "cat")
+    kg.add_triple("小柒", "lives_with", "user")
+    kg.add_triple("user", "owns", "小柒")
+    kg.add_triple("三只猫", "includes", "小柒")
+    kg.add_triple("三只猫", "lives_at", "home")
+    kg.add_triple("单飞", "is_a", "cat")
+    kg.close()
+
+    # Patch the lazy import inside _get_palace_kg_entities so it points at our temp DB.
+    def _kg_factory():
+        return KnowledgeGraph(db_path=db_path)
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
+
+    names = hooks_cli._get_palace_kg_entities(limit=10)
+    assert "小柒" in names
+    assert "三只猫" in names
+    assert "单飞" in names
+    # 小柒 should rank first (most triples).
+    assert names[0] == "小柒"
+
+
+def test_get_palace_kg_entities_skips_expired_triples(monkeypatch, tmp_path):
+    """Entities only present in expired (valid_to set) triples are excluded."""
+    from mempalace import hooks_cli
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "kg.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    kg.add_triple("ActiveProj", "uses", "Postgres")
+    # Add a triple, then invalidate it so OldProj has no current triples.
+    kg.add_triple("OldProj", "uses", "MySQL")
+    kg.invalidate("OldProj", "uses", "MySQL", ended="2025-01-01")
+    kg.close()
+
+    def _kg_factory():
+        return KnowledgeGraph(db_path=db_path)
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
+
+    names = hooks_cli._get_palace_kg_entities(limit=10)
+    assert "ActiveProj" in names
+    # OldProj's only triple is expired, so it shouldn't appear.
+    assert "OldProj" not in names
+
+
+def test_get_palace_kg_entities_returns_empty_on_failure(monkeypatch):
+    """Defensive: any KG failure returns []."""
+    from mempalace import hooks_cli
+    import mempalace.knowledge_graph as kg_mod
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("kg unavailable")
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _broken)
+    assert hooks_cli._get_palace_kg_entities(limit=10) == []
+
+
+def test_get_palace_kg_entities_respects_limit(monkeypatch, tmp_path):
+    from mempalace import hooks_cli
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "kg.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    for i in range(5):
+        kg.add_triple(f"Entity{i}", "is_a", "thing")
+    kg.close()
+
+    def _kg_factory():
+        return KnowledgeGraph(db_path=db_path)
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
+
+    names = hooks_cli._get_palace_kg_entities(limit=3)
+    # 5 entities + "thing" appears as object → at most 3 returned.
+    assert len(names) <= 3

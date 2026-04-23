@@ -1189,6 +1189,85 @@ def _truncate_snippet(text: str, max_chars: int = USERPROMPT_MAX_SNIPPET_CHARS) 
     return text[:max_chars] + "…"
 
 
+def _get_palace_kg_entities(limit: int = 60) -> list[str]:
+    """Return the top KG entity names by triple count (most "important" first).
+
+    Used to feed the recall gate so it can rewrite user queries to include
+    canonical entity names already in the palace, boosting both vector and
+    KG recall (e.g. "小柒怎么样" → "小柒 状态" when "小柒" is a known entity).
+
+    Returns empty list on any failure — this is best-effort context, never
+    a hard requirement.
+    """
+    if limit <= 0:
+        return []
+    try:
+        import sqlite3
+
+        from .knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        try:
+            conn = sqlite3.connect(kg.db_path, timeout=5)
+            try:
+                # Rank entities by participation in CURRENT (non-expired)
+                # triples. Schema: triples(subject, object) → entities(id);
+                # name is the human-readable form we want to expose to the LLM.
+                rows = conn.execute(
+                    """
+                    SELECT e.name, COUNT(t.id) AS c
+                    FROM entities e
+                    LEFT JOIN triples t
+                      ON (t.subject = e.id OR t.object = e.id)
+                      AND t.valid_to IS NULL
+                    GROUP BY e.id
+                    HAVING c > 0
+                    ORDER BY c DESC, e.name ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            finally:
+                conn.close()
+            names: list[str] = []
+            seen: set[str] = set()
+            for row in rows:
+                name = row[0]
+                if not isinstance(name, str):
+                    continue
+                name = name.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+            return names
+        finally:
+            kg.close()
+    except Exception:
+        return []
+
+
+def _build_active_context(cwd: str, palace_path: str = None) -> object:
+    """Build active_context payload for the recall gate.
+
+    Includes the workdir (project hint), palace taxonomy (rooms/halls for
+    valid filter values), and top KG entity names (so the gate can rewrite
+    queries to echo canonical entity names). Falls back to a plain cwd string
+    when no taxonomy/entities are available, keeping the shape backward
+    compatible with older gate prompts.
+    """
+    ctx: dict = {"cwd": cwd}
+    if palace_path:
+        taxonomy = _get_palace_taxonomy(palace_path)
+        if taxonomy:
+            ctx["palace"] = taxonomy
+    entities = _get_palace_kg_entities(limit=60)
+    if entities:
+        ctx["entities"] = entities
+    if len(ctx) == 1:  # only cwd — nothing extra to expose
+        return cwd
+    return ctx
+
+
 def hook_userprompt(data: dict, harness: str):
     """UserPromptSubmit hook: search MemPalace and inject relevant memories.
 
@@ -1306,8 +1385,12 @@ def hook_userprompt(data: dict, harness: str):
         if is_enabled():
             llm_config = _get_llm_config()
         if llm_config:
-            taxonomy = _get_palace_taxonomy(palace_path)
-            active_ctx = {"cwd": cwd, "palace": taxonomy} if taxonomy else cwd
+            # Build active context: cwd + palace taxonomy (rooms/halls) + top
+            # KG entities, so the gate can pick valid filter values AND rewrite
+            # the query to echo canonical entity names when the user implicitly
+            # references one ("小柒怎么样" → include "小柒").
+            active_ctx = _build_active_context(cwd, palace_path)
+            taxonomy = active_ctx.get("palace") if isinstance(active_ctx, dict) else {}
             recall_decision = decide_recall(
                 user_prompt,
                 config=llm_config,

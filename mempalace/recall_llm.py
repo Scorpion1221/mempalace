@@ -446,7 +446,7 @@ You are a recall gate and search query optimizer for a personal memory database.
 You will receive:
 - CURRENT USER MESSAGE — this is the primary signal.
 - PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
-- ACTIVE CONTEXT — optional project/workdir hint AND the current palace taxonomy (available rooms/halls). Use this to pick valid filter values.
+- ACTIVE CONTEXT — optional project/workdir hint, the current palace taxonomy (available rooms/halls), and a list of KG entities currently in the palace. Use the taxonomy to pick valid filter values; use the entity list to spot when the user's question implicitly references an entity already in memory.
 
 Decide whether memory recall is needed for this turn, and what search filter will most precisely locate the answer.
 
@@ -481,6 +481,8 @@ Query rewrite rules (only when should_recall is true):
 - Preserve proper nouns EXACTLY (project names, tool names, people names) in their original form.
 - For mixed-language content, keep the dominant language and preserve technical terms as-is (e.g. "recall gate 中文继续消息误判" is fine — don't translate to pure English or pure Chinese).
 - If the PREVIOUS ASSISTANT MESSAGE TAIL contains entity names or specifics that the user's message references implicitly, include them in the query. E.g. user says "那个bug修了吗", assistant tail mentions "auth middleware session leak" → query should be "auth middleware session leak bug修复状态", mixing languages as needed for best retrieval.
+- Entity expansion: if the user's query mentions OR implicitly refers to any entity from the ACTIVE CONTEXT entity list, include that entity name VERBATIM in the rewritten query. This boosts both vector recall and KG matching. Examples: user "小柒怎么样" + entity list contains "小柒" → query "小柒 状态"; user "my daughter" + entity list contains "Riley" → query "Riley daughter". Never invent entity names that aren't in the list — only echo what's there.
+- Entity expansion: if the user's query mentions OR implicitly refers to any entity from the ACTIVE CONTEXT entity list, include that entity name VERBATIM in the rewritten query. This boosts both vector recall and KG matching. Examples: user "小柒怎么样" + entity list contains "小柒" → query "小柒 状态"; user "我家狗" + entity list contains "Buddy" → query "Buddy 狗 现状". Never invent entity names that aren't in the list — only echo what's there.
 - Max 200 chars. Remove filler words but keep semantic structure.
 - "query": if should_recall is false, output null.
 
@@ -515,6 +517,7 @@ Examples (user message → expected output):
 "我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"之前缓存方案决策","after":null,"filters":{{"room":"decisions","hall":null}}}}
 "昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"昨天bug修复状态","after":"{yesterday}","filters":{{"room":"bugs","hall":null}}}}
 "Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes飞书网关实现","after":null,"filters":{{"room":"architecture","hall":null}}}}
+"Berlin 的房子怎么了" (with entity list including "Berlin", "house") → {{"should_recall":true,"reason":"entity_status_query","query":"Berlin house 状态","after":null,"filters":{{"room":null,"hall":null}}}}
 "上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"上次部署脚本位置","after":null,"filters":{{"room":"operations","hall":null}}}}
 "where did we put the deploy script last time" → {{"should_recall":true,"reason":"past_session_reference","query":"deploy script location last time","after":null,"filters":{{"room":"operations","hall":null}}}}
 
