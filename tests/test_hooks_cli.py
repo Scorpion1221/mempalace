@@ -1081,3 +1081,27 @@ def test_kg_recall_short_latin_tokens_still_filtered(monkeypatch):
         assert len(t) >= 3 or hooks_cli._CJK_CHAR_RE.search(t), (
             f"Unexpectedly queried short non-CJK token {t!r}"
         )
+
+
+# --- _ASYNC_SAVE_PROMPT language consistency guidance ---
+
+
+def test_async_save_prompt_requires_predicate_language_consistency():
+    """The async-save prompt must instruct the model to match predicate language
+    to subject/object language (e.g. Chinese → Chinese predicate, English → English)."""
+    from mempalace.hooks_cli import _ASYNC_SAVE_PROMPT
+
+    # Critical heading is present
+    assert "Language consistency (critical)" in _ASYNC_SAVE_PROMPT
+
+    # Chinese predicate guidance is explicit
+    assert "使用" in _ASYNC_SAVE_PROMPT
+    assert "修复" in _ASYNC_SAVE_PROMPT
+
+    # The "养有" few-shot example is present
+    assert "养有" in _ASYNC_SAVE_PROMPT
+
+    # The prompt must still be a valid Python format string with {wing}/{transcript}
+    formatted = _ASYNC_SAVE_PROMPT.format(wing="test_wing", transcript="sample")
+    assert "test_wing" in formatted
+    assert "sample" in formatted

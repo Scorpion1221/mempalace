@@ -618,9 +618,14 @@ Return ONLY valid JSON:
 - Drawer content should be specific and actionable, not vague summaries
 - Include file paths, URLs, command examples, config values when mentioned
 - kg: 0-5 entity-relationship facts. Subject and object are entities (people, projects, tools, services).
-  Predicate should be a short, reusable verb or noun (1-2 words, snake_case). Prefer common terms so facts can be queried later.
-  Good predicates: uses, depends_on, works_on, owns, decided, prefers, hosted_at, tech_stack, role, name, status, fixed_by, deployed_to, config_value, endpoint, blocked_by, migrated_to, has_pet, reports_to
-  Bad predicates: found_no_direct_public_private_data_access_evidence (too specific, never queryable)
+  Predicate should be a short, reusable verb or noun (1-2 words). Prefer common terms so facts can be queried later.
+  **Language consistency (critical)**: the predicate's language MUST match the subject/object language. Do NOT mix.
+    - English subject/object → English predicate (snake_case): "uses", "owns", "depends_on", "fixed_by", "deployed_to"
+    - Chinese subject/object → Chinese predicate: "使用", "拥有", "依赖", "修复", "部署到", "养有", "喜欢", "属于", "位于", "状态"
+    - Japanese subject/object → Japanese predicate; Korean → Korean predicate; etc.
+  Good English predicates: uses, depends_on, works_on, owns, decided, prefers, hosted_at, tech_stack, role, name, status, fixed_by, deployed_to, config_value, endpoint, blocked_by, migrated_to, has_pet, reports_to
+  Good Chinese predicates: 使用, 依赖, 工作于, 拥有, 决定, 偏好, 托管于, 技术栈, 角色, 名字, 状态, 修复, 部署到, 配置, 端点, 阻塞于, 迁移到, 养有, 隶属于, 喜欢, 位于
+  Bad predicates: found_no_direct_public_private_data_access_evidence (too specific, never queryable). Mixed-language predicates like {{"张三", "loves", "下棋"}} — always wrong.
   Only include facts explicitly STATED in the conversation. Skip if no clear entity relationships.
 
 ## Examples
@@ -631,7 +636,7 @@ Output:
 
 Input: 用户报告搜索接口返回504超时，助手排查发现是缺少索引导致全表扫描，添加了复合索引修复。
 Output:
-{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}], "kg": [{{"subject": "backend_api", "predicate": "fixed_by", "object": "composite_index_user_id_created_at"}}]}}
+{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}], "kg": [{{"subject": "backend_api", "predicate": "修复", "object": "复合索引_user_id_created_at"}}]}}
 
 Input: Team decides to switch from REST to GraphQL for the mobile app API, with a 2-week migration plan.
 Output:
@@ -648,6 +653,10 @@ Output:
 Input: 用户和助手讨论了项目的技术选型，最终选择了 Next.js + tRPC + Prisma 的技术栈。
 Output:
 {{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}], "kg": [{{"subject": "{wing}", "predicate": "tech_stack", "object": "Next.js + tRPC + Prisma + PostgreSQL"}}]}}
+
+Input: 用户说自己有三只猫，名字叫小柒、小布、小包。
+Output:
+{{"diary": "用户提供个人信息：拥有三只猫，名字分别是小柒、小布、小包。", "drawers": [{{"wing": "{wing}", "room": "diary", "content": "用户养有三只猫：小柒、小布、小包"}}], "kg": [{{"subject": "用户", "predicate": "养有", "object": "三只猫"}}, {{"subject": "用户", "predicate": "拥有", "object": "小柒"}}, {{"subject": "用户", "predicate": "拥有", "object": "小布"}}, {{"subject": "用户", "predicate": "拥有", "object": "小包"}}]}}
 
 Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
