@@ -601,21 +601,24 @@ Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→Eng
 
 ## Output Format
 Return ONLY valid JSON:
-{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}]}}
+{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}], "kg": [{{"subject": "<entity>", "predicate": "<relationship>", "object": "<entity>"}}]}}
 
 ## Rules
 - diary: 2-5 sentences, include WHY not just WHAT
 - drawers: 0-5 items, each a standalone fact/decision/config worth recalling later
 - Skip trivial exchanges (greetings, confirmations, "OK", "继续")
-- If nothing worth saving: {{"diary": "", "drawers": []}}
+- If nothing worth saving: {{"diary": "", "drawers": [], "kg": []}}
 - Drawer content should be specific and actionable, not vague summaries
 - Include file paths, URLs, command examples, config values when mentioned
+- kg: 0-5 entity-relationship facts extracted from the conversation. Use for people, projects, tools, preferences, roles.
+  Predicates: uses, owns, works_on, decided, prefers, located_at, depends_on, name, role, has_pet, tech_stack, etc.
+  Only include facts that are STATED, not implied. Skip if no clear entity relationships.
 
 ## Examples
 
 Input: User asks how to connect to the staging database, assistant provides connection string requiring VPN.
 Output:
-{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}]}}
+{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}], "kg": [{{"subject": "backend_api", "predicate": "staging_db", "object": "staging-db.internal:5432/app_staging"}}]}}
 
 Input: 用户报告搜索接口返回504超时，助手排查发现是缺少索引导致全表扫描，添加了复合索引修复。
 Output:
@@ -623,7 +626,7 @@ Output:
 
 Input: Team decides to switch from REST to GraphQL for the mobile app API, with a 2-week migration plan.
 Output:
-{{"diary": "Architecture decision: mobile API switching from REST to GraphQL. Migration plan is 2 weeks, starting with read-only queries. Apollo Server chosen over Yoga for better caching.", "drawers": [{{"wing": "mobile_app", "room": "architecture", "content": "Mobile API migration: REST → GraphQL. Apollo Server (not Yoga) for caching. Phase 1: read-only queries (week 1), Phase 2: mutations (week 2). Existing REST endpoints kept until v3.0."}}, {{"wing": "mobile_app", "room": "decisions", "content": "Chose Apollo Server over GraphQL Yoga for mobile API — better built-in response caching and dataloader integration"}}]}}
+{{"diary": "Architecture decision: mobile API switching from REST to GraphQL. Migration plan is 2 weeks, starting with read-only queries. Apollo Server chosen over Yoga for better caching.", "drawers": [{{"wing": "mobile_app", "room": "architecture", "content": "Mobile API migration: REST → GraphQL. Apollo Server (not Yoga) for caching. Phase 1: read-only queries (week 1), Phase 2: mutations (week 2). Existing REST endpoints kept until v3.0."}}, {{"wing": "mobile_app", "room": "decisions", "content": "Chose Apollo Server over GraphQL Yoga for mobile API — better built-in response caching and dataloader integration"}}], "kg": [{{"subject": "mobile_app", "predicate": "uses", "object": "GraphQL"}}, {{"subject": "mobile_app", "predicate": "uses", "object": "Apollo Server"}}]}}
 
 Input: 助手帮用户重构了认证模块，从 JWT 改成了 session-based，修改了 src/auth/middleware.ts 和 src/auth/session.ts。
 Output:
@@ -639,11 +642,11 @@ Output:
 
 Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
-{{"diary": "", "drawers": []}}
+{{"diary": "", "drawers": [], "kg": []}}
 
 Input: User asks assistant to run tests and they all pass. No bugs found, no decisions made.
 Output:
-{{"diary": "Ran test suite, all tests passed.", "drawers": []}}
+{{"diary": "Ran test suite, all tests passed.", "drawers": [], "kg": []}}
 
 ## Conversation to process:
 {transcript}"""
@@ -772,6 +775,10 @@ def _async_save_worker(transcript_text, session_id, cwd):
             d_room = sanitize_name(drawer.get("room", "general"))
             import hashlib
 
+            from .miner import detect_hall
+
+            d_hall = detect_hall(content)
+
             d_id = (
                 f"drawer_{d_wing}_{d_room}"
                 f"_{hashlib.sha256((d_wing + d_room + content).encode()).hexdigest()[:24]}"
@@ -783,6 +790,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                     {
                         "wing": d_wing,
                         "room": d_room,
+                        "hall": d_hall,
                         "added_by": "haiku_async_save",
                         "filed_at": now.isoformat(),
                     }
@@ -790,8 +798,27 @@ def _async_save_worker(transcript_text, session_id, cwd):
             )
             written += 1
 
+        kg_facts = data.get("kg", [])
+        kg_written = 0
+        if kg_facts:
+            try:
+                from .knowledge_graph import KnowledgeGraph
+
+                kg = KnowledgeGraph()
+                for fact in kg_facts:
+                    subj = fact.get("subject", "")
+                    pred = fact.get("predicate", "")
+                    obj = fact.get("object", "")
+                    if subj and pred and obj:
+                        kg.add_triple(subj, pred, obj, valid_from=now.strftime("%Y-%m-%d"))
+                        kg_written += 1
+                kg.close()
+            except Exception as e:
+                _log(f"async save: KG write error: {e}")
+
         _log(
-            f"async save: wrote {written} entries (diary + {len(data.get('drawers', []))} drawers)"
+            f"async save: wrote {written} entries "
+            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts)"
         )
     except Exception as e:
         _log(f"async save error: {e}")
@@ -915,6 +942,35 @@ def _infer_wing_from_cwd(cwd: str) -> str:
     # Normalize: dashes to underscores, lowercase
     candidate = basename.replace("-", "_").lower()
     return candidate or None
+
+
+def _get_kg_context_for_recall(hits):
+    """Query knowledge graph for entities mentioned in search results."""
+    wings = set()
+    for h in hits:
+        w = h.get("wing", "")
+        if w and w != "?" and not w.startswith("-Users"):
+            wings.add(w)
+    if not wings:
+        return []
+    try:
+        from .knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        lines = []
+        for entity in list(wings)[:3]:
+            facts = kg.query_entity(entity)
+            if facts:
+                for f in facts[:3]:
+                    subj = f.get("subject", "")
+                    pred = f.get("predicate", "")
+                    obj = f.get("object", "")
+                    if subj and pred and obj:
+                        lines.append(f"- [KG] {subj} → {pred} → {obj}")
+        kg.close()
+        return lines
+    except Exception:
+        return []
 
 
 def _truncate_snippet(text: str, max_chars: int = USERPROMPT_MAX_SNIPPET_CHARS) -> str:
@@ -1166,9 +1222,16 @@ def hook_userprompt(data: dict, harness: str):
     for hit in hits[:USERPROMPT_RECALL_LIMIT]:
         wing = hit.get("wing", "?")
         room = hit.get("room", "general")
+        created = hit.get("created_at", "")
+        date_tag = f" ({created[:10]})" if created and len(created) >= 10 else ""
         snippet = _truncate_snippet(hit.get("text", ""))
         if snippet:
-            lines.append(f"- [{wing}/{room}] {snippet}")
+            lines.append(f"- [{wing}/{room}]{date_tag} {snippet}")
+
+    kg_lines = _get_kg_context_for_recall(hits)
+    if kg_lines:
+        lines.append("")
+        lines.extend(kg_lines)
 
     memories_body = "\n".join(lines)
     additional_context = (
