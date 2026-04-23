@@ -702,7 +702,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
             import hashlib
 
             entry_id = (
-                f"diary_wing_haiku_{now.strftime('%Y%m%d_%H%M%S%f')}"
+                f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}"
                 f"_{hashlib.sha256(diary.encode()).hexdigest()[:12]}"
             )
             col.add(
@@ -710,7 +710,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                 documents=[sanitize_content(diary)],
                 metadatas=[
                     {
-                        "wing": "wing_haiku",
+                        "wing": wing,
                         "room": "diary",
                         "hall": "hall_diary",
                         "topic": "auto-save",
@@ -795,7 +795,7 @@ def hook_stop(data: dict, harness: str):
 
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
-    if since_last >= SAVE_INTERVAL and exchange_count >= SAVE_MIN_MESSAGES:
+    if since_last > 0 and exchange_count >= SAVE_MIN_MESSAGES:
         try:
             last_save_file.write_text(str(exchange_count), encoding="utf-8")
         except OSError:
