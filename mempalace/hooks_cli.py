@@ -1270,16 +1270,18 @@ def hook_userprompt(data: dict, harness: str):
     # Fetch a larger pool when LLM rerank is available
     pool_size = USERPROMPT_RECALL_POOL if llm_config else USERPROMPT_RECALL_LIMIT
     extra = [original_query] if search_query != original_query else []
-    result = _search_via_mcp_socket(
-        query=search_query,
-        wing=None,
-        n_results=pool_size,
-        max_distance=USERPROMPT_MAX_DISTANCE,
-        preferred_wing=preferred_wing,
-    )
-    if result is not None:
-        _log("UserPrompt recall: used MCP socket (hot path)")
-    else:
+    result = None
+    if not extra:
+        result = _search_via_mcp_socket(
+            query=search_query,
+            wing=None,
+            n_results=pool_size,
+            max_distance=USERPROMPT_MAX_DISTANCE,
+            preferred_wing=preferred_wing,
+        )
+        if result is not None:
+            _log("UserPrompt recall: used MCP socket (hot path)")
+    if result is None:
         try:
             result = search_memories(
                 query=search_query,
