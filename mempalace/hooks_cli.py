@@ -693,7 +693,7 @@ def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=10000
                         else str(content)
                     )
                     if text and "<command-message>" not in text:
-                        exchanges.append(f"> {text[:500]}")
+                        exchanges.append(f"> {text[:2000]}")
                 elif msg_type == "assistant" and human_count > since_exchange:
                     text = (
                         _extract_assistant_text(content)
@@ -701,7 +701,7 @@ def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=10000
                         else str(content)
                     )
                     if text:
-                        exchanges.append(text[:1000])
+                        exchanges.append(text[:4000])
     except OSError:
         return ""
     result = "\n\n".join(exchanges)
