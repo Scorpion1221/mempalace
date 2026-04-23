@@ -407,6 +407,40 @@ def _enrich_closet_hits(hits, drawers_col, query):
         h["total_drawers"] = len(ordered_docs)
 
 
+def _keyword_recall(col, query, where, exclude_ids, limit=15):
+    """Fetch drawers matching query keywords via ChromaDB $contains.
+
+    Returns a list of (doc, meta, sentinel_distance) tuples for docs not
+    already in *exclude_ids*. The sentinel distance (1.0) is a neutral
+    value — BM25 scoring in _hybrid_rank will properly weight these.
+    """
+    tokens = _tokenize(query)
+    keywords = [t for t in tokens if len(t) >= 2][:5]
+    if not keywords:
+        return []
+
+    results = []
+    seen = set(exclude_ids)
+    for kw in keywords:
+        try:
+            gkw = {"$contains": kw}
+            r = col.get(
+                where_document=gkw,
+                where=where if where else None,
+                include=["documents", "metadatas"],
+                limit=limit,
+            )
+        except Exception:
+            continue
+        for did, doc, meta in zip(r.get("ids", []), r.get("documents", []), r.get("metadatas", [])):
+            if did not in seen:
+                seen.add(did)
+                results.append((doc, meta or {}, 1.0))
+        if len(results) >= limit:
+            break
+    return results[:limit]
+
+
 def search_memories(
     query: str,
     palace_path: str,
@@ -469,6 +503,12 @@ def search_memories(
         if "embed" in err_str.lower() or "SSL" in err_str or "CERTIFICATE" in err_str:
             return {"error": f"Embedding error (check MEMPAL_EMBEDDING_MODEL config): {e}"}
         return {"error": f"Search error: {e}"}
+
+    # --- Parallel BM25 keyword retrieval ---
+    # ChromaDB $contains finds docs that vector search may miss.
+    # Extract top keywords from query, fetch matching docs, merge into results.
+    vector_ids = set(_first_or_empty(drawer_results, "ids"))
+    keyword_hits = _keyword_recall(drawers_col, query, where, vector_ids, limit=n_results * 3)
 
     # Gather closet hits (best-per-source) to build a boost lookup.
     closet_boost_by_source: dict = {}  # source_file -> (rank, closet_dist, preview)
@@ -554,6 +594,32 @@ def search_memories(
         if closet_preview:
             entry["closet_preview"] = closet_preview
         scored.append(entry)
+
+    for doc, meta, dist in keyword_hits:
+        if max_distance > 0.0 and dist > max_distance:
+            continue
+        if after:
+            filed_at = meta.get("filed_at", "") or ""
+            if filed_at < after:
+                continue
+        source = meta.get("source_file", "") or ""
+        scored.append(
+            {
+                "text": doc,
+                "wing": meta.get("wing", "unknown"),
+                "room": meta.get("room", "unknown"),
+                "source_file": Path(source).name if source else "?",
+                "created_at": meta.get("filed_at", "unknown"),
+                "similarity": 0.0,
+                "distance": round(dist, 4),
+                "effective_distance": round(dist, 4),
+                "closet_boost": 0.0,
+                "matched_via": "keyword",
+                "_sort_key": dist,
+                "_source_file_full": source,
+                "_chunk_index": meta.get("chunk_index"),
+            }
+        )
 
     # BM25 hybrid re-rank on the FULL candidate set, then truncate.
     scored = _hybrid_rank(scored, query, preferred_wing=preferred_wing)
