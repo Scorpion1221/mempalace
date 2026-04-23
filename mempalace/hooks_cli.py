@@ -610,9 +610,11 @@ Return ONLY valid JSON:
 - If nothing worth saving: {{"diary": "", "drawers": [], "kg": []}}
 - Drawer content should be specific and actionable, not vague summaries
 - Include file paths, URLs, command examples, config values when mentioned
-- kg: 0-5 entity-relationship facts extracted from the conversation. Use for people, projects, tools, preferences, roles.
-  Predicates: uses, owns, works_on, decided, prefers, located_at, depends_on, name, role, has_pet, tech_stack, etc.
-  Only include facts that are STATED, not implied. Skip if no clear entity relationships.
+- kg: 0-5 entity-relationship facts. Subject and object are entities (people, projects, tools, services).
+  Predicate should be a short, reusable verb or noun (1-2 words, snake_case). Prefer common terms so facts can be queried later.
+  Good predicates: uses, depends_on, works_on, owns, decided, prefers, hosted_at, tech_stack, role, name, status, fixed_by, deployed_to, config_value, endpoint, blocked_by, migrated_to, has_pet, reports_to
+  Bad predicates: found_no_direct_public_private_data_access_evidence (too specific, never queryable)
+  Only include facts explicitly STATED in the conversation. Skip if no clear entity relationships.
 
 ## Examples
 
