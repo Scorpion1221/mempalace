@@ -441,17 +441,17 @@ def local_recall_decision(
 # =========================================================================
 
 _DECIDE_RECALL_PROMPT = """\
-You are a recall gate and search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps.
+You are a recall gate and search query optimizer for a personal memory database. The database stores notes, configs, decisions, and logs as text chunks with timestamps, organized by wing (project/topic), room (aspect), and hall (category).
 
 You will receive:
 - CURRENT USER MESSAGE — this is the primary signal.
 - PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
-- ACTIVE CONTEXT — optional project/workdir hint.
+- ACTIVE CONTEXT — optional project/workdir hint AND the current palace taxonomy (available rooms/halls). Use this to pick valid filter values.
 
-Decide whether memory recall is needed for this turn.
+Decide whether memory recall is needed for this turn, and what search filter will most precisely locate the answer.
 
 Output JSON only — no explanation:
-{{"should_recall": true, "reason": "short_machine_label", "query": "english keywords here or null", "after": "YYYY-MM-DD or null"}}
+{{"should_recall": true, "reason": "short_machine_label", "query": "keywords here or null", "after": "YYYY-MM-DD or null", "filters": {{"room": null, "hall": null}}}}
 
 The key question: does the user need information from MEMORY (past sessions) to handle this turn, or is the current conversation thread sufficient?
 
@@ -462,16 +462,18 @@ Rules (in priority order — earlier rules override later ones):
   - 1c. Session-local topic redirects: "先不管这个，帮我看看X" / "换个方向" / "skip that, do X instead" — the user is redirecting within the current thread, not asking for memory.
   - 1d. Proximal references to current-thread content: "这个报错怎么修", "那个函数怎么改" — when there is no history keyword, "这个/那个/this/that" refers to something in the current thread.
   - These ALL refer to the CURRENT conversation thread. Shortness or ambiguity is NOT a reason to recall — it means the user expects the assistant to use in-thread context.
-  - EXCEPTION: override to should_recall=true if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "以前", "当时", "那时候", "还记得", "earlier", "last time", "previous", "remember", "prior", "history", "historically"
+  - EXCEPTION A — override to should_recall=true if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "以前", "当时", "那时候", "还记得", "earlier", "last time", "previous", "remember", "prior", "history", "historically"
+  - EXCEPTION B — override to should_recall=true if the message is a PERSONAL-FACT QUERY about the user themselves (ownership, relationships, identity, biography, preferences stored as facts). Patterns: "我有/我养/我家/我住/我的 X ... (几/多少/什么/叫/是/在哪)" or English "how many X do I have / what is my Y / where do I Z". Even if the same fact was mentioned earlier in this thread, memory is the canonical source and the user may be verifying storage.
 - RULE 2 — "should_recall": false for self-contained tasks:
   - direct code execution, inspection, file operations ("run the tests", "帮我把这个函数改成async")
   - text transformation, formatting, translation, summarization ("翻译成英文")
   - mechanical edits, greetings
 - RULE 3 — "should_recall": true ONLY when the answer requires information from PAST SESSIONS or OTHER PROJECTS that is not in the current thread or current codebase:
-  - 3a. Explicit history references: messages containing any of the history-referencing words listed in RULE 1 EXCEPTION.
+  - 3a. Explicit history references: messages containing any of the history-referencing words listed in RULE 1 EXCEPTION A.
   - 3b. Cross-project queries: asking about a project/system NOT in the current working directory. Infer the current project name from the last segment of ACTIVE CONTEXT path. If the user names a different project/system, recall is likely needed.
   - 3c. Past decisions or preferences: "我们怎么决定的", "用什么方案", deployment procedures, architectural choices from earlier conversations.
   - 3d. Temporal queries about past work: "昨天那个bug", "上周的进展"
+  - 3e. Personal facts about the user themselves — see RULE 1 EXCEPTION B.
   - The test: if the assistant can handle this turn using ONLY the current conversation + current codebase, recall is NOT needed.
 
 Query rewrite rules (only when should_recall is true):
@@ -482,6 +484,19 @@ Query rewrite rules (only when should_recall is true):
 - Max 200 chars. Remove filler words but keep semantic structure.
 - "query": if should_recall is false, output null.
 
+Filter selection rules (output goes in "filters"):
+- Use "filters" to narrow the search BEFORE ranking. Values must come from ACTIVE CONTEXT's palace taxonomy — never invent room or hall names the palace doesn't actually have. If unsure, leave a field null.
+- Strong mapping by question type:
+  - Personal facts about the user (RULE 3e / EXCEPTION B): prefer hall="hall_diary" if that hall exists in the taxonomy; otherwise prefer room="diary" if present. This filter excludes technical meta-discussion drawers that mention the user's exact words.
+  - Past decisions / architecture / "what approach did we pick": prefer room="decisions" or room="architecture" if present.
+  - Bug history / incidents / error recurrence: prefer room="bugs" if present.
+  - Deployment / configuration / ops: prefer room="configuration" or room="operations" if present.
+  - Code-level queries ("where is function X implemented"): prefer room="code" if present.
+  - Cross-project / open exploratory / no strong hint: leave both null — rely on ranking.
+- Only ONE of room or hall is usually enough. Use hall when it is a cleaner signal (personal-fact halls like hall_diary, hall_identity, hall_family), use room otherwise.
+- "wing": leave null in nearly all cases. Only set wing when the user explicitly names a wing-level project different from the active workdir. The hook will fall back to a preferred-wing boost regardless.
+- If should_recall is false, output {{"room": null, "hall": null}}.
+
 Other fields:
 - "reason" must be a short snake_case label.
 - "after": extract temporal intent if present. Prefer the current user message. Use the previous assistant message tail only for disambiguation when clearly relevant.
@@ -489,21 +504,19 @@ Other fields:
 
 Examples (user message → expected output):
 
-"继续补" → {{"should_recall":false,"reason":"continuation_directive","query":null,"after":null}}
-"继续推进，直到完全修复完成" → {{"should_recall":false,"reason":"continuation_with_goal","query":null,"after":null}}
-"好的，做吧" → {{"should_recall":false,"reason":"confirmation","query":null,"after":null}}
-"帮我把这个函数改成async" → {{"should_recall":false,"reason":"direct_code_task","query":null,"after":null}}
-"run the tests" → {{"should_recall":false,"reason":"direct_execution","query":null,"after":null}}
-"这个报错怎么修" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
-"那个文件有什么问题" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null}}
-"翻译成英文" → {{"should_recall":false,"reason":"text_transformation","query":null,"after":null}}
-"先不管这个，帮我看看那个文件" → {{"should_recall":false,"reason":"session_local_redirect","query":null,"after":null}}
-"上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"上次部署脚本位置","after":null}}
-"我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"之前缓存方案决策","after":null}}
-"昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"昨天bug修复状态","after":"{yesterday}"}}
-"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes飞书网关实现","after":null}}
-"按之前那个方案继续推进" → {{"should_recall":true,"reason":"continuation_referencing_past_decision","query":"之前的实现方案","after":null}}
-"where did we put the deploy script last time" → {{"should_recall":true,"reason":"past_session_reference","query":"deploy script location last time","after":null}}
+"继续补" → {{"should_recall":false,"reason":"continuation_directive","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
+"好的，做吧" → {{"should_recall":false,"reason":"confirmation","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
+"帮我把这个函数改成async" → {{"should_recall":false,"reason":"direct_code_task","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
+"这个报错怎么修" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
+"翻译成英文" → {{"should_recall":false,"reason":"text_transformation","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
+"我养了几只猫？" → {{"should_recall":true,"reason":"personal_fact_query","query":"养猫 数量","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
+"我家狗叫什么名字" → {{"should_recall":true,"reason":"personal_fact_query","query":"家狗 名字","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
+"how many cats do I have" → {{"should_recall":true,"reason":"personal_fact_query","query":"cat count pets","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
+"我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"之前缓存方案决策","after":null,"filters":{{"room":"decisions","hall":null}}}}
+"昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"昨天bug修复状态","after":"{yesterday}","filters":{{"room":"bugs","hall":null}}}}
+"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes飞书网关实现","after":null,"filters":{{"room":"architecture","hall":null}}}}
+"上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"上次部署脚本位置","after":null,"filters":{{"room":"operations","hall":null}}}}
+"where did we put the deploy script last time" → {{"should_recall":true,"reason":"past_session_reference","query":"deploy script location last time","after":null,"filters":{{"room":"operations","hall":null}}}}
 
 Today is {today}.
 
@@ -578,6 +591,31 @@ def _normalize_after(after: object) -> str | None:
     return None
 
 
+_ALLOWED_FILTER_KEYS = ("wing", "room", "hall")
+
+
+def _normalize_filters(raw: object) -> dict:
+    """Extract {wing, room, hall} from the LLM filter object.
+
+    Any null/"null"/empty string values are stripped. Non-string values are
+    coerced or dropped. Unknown keys are ignored. Values are NOT validated
+    against the actual palace taxonomy — callers are expected to cross-check
+    against their current wings/rooms/halls before applying.
+    """
+    if not isinstance(raw, Mapping):
+        return {}
+    out: dict = {}
+    for key in _ALLOWED_FILTER_KEYS:
+        value = raw.get(key)
+        if value is None or value == "null":
+            continue
+        if isinstance(value, str):
+            v = value.strip()
+            if v and v.lower() != "null":
+                out[key] = v
+    return out
+
+
 def _parse_decide_recall_result(result: str) -> dict | None:
     """Parse the LLM decide+rewrite response into a normalized dict."""
     if not result:
@@ -598,6 +636,7 @@ def _parse_decide_recall_result(result: str) -> dict | None:
                 "reason": "query_string_fallback",
                 "query": clean,
                 "after": None,
+                "filters": {},
             }
         return None
 
@@ -609,6 +648,7 @@ def _parse_decide_recall_result(result: str) -> dict | None:
                 "reason": "query_string_fallback",
                 "query": clean,
                 "after": None,
+                "filters": {},
             }
         return None
 
@@ -634,6 +674,7 @@ def _parse_decide_recall_result(result: str) -> dict | None:
             "reason": str(parsed.get("reason") or "llm_decided_no_recall"),
             "query": None,
             "after": None,
+            "filters": {},
         }
 
     if not query or len(query) < 3:
@@ -644,6 +685,7 @@ def _parse_decide_recall_result(result: str) -> dict | None:
         "reason": str(parsed.get("reason") or "llm_decided_recall"),
         "query": query,
         "after": _normalize_after(parsed.get("after")),
+        "filters": _normalize_filters(parsed.get("filters")),
     }
 
 
@@ -668,6 +710,10 @@ def decide_recall(
         reason (str): Short machine label describing the decision.
         query (str): Rewritten English keyword query.
         after (str|None): ISO date string for time filtering, or None.
+        filters (dict): Optional {wing?, room?, hall?} narrowing the search.
+            Caller must validate values against the current palace taxonomy
+            before passing them to search_memories — the LLM may hallucinate
+            or use stale labels.
     Returns None if LLM is unavailable/fails.
     """
     if config is None:
@@ -713,21 +759,36 @@ _RERANK_PROMPT = """\
 You are a relevance judge for a personal memory search.
 
 You will receive:
-- CURRENT USER MESSAGE — this is the primary signal and should drive the relevance decision.
-- PREVIOUS ASSISTANT MESSAGE TAIL — optional context only. Use it only if it helps clarify the current user message. Ignore it if irrelevant, stale, or conflicting.
+- CURRENT USER MESSAGE — what the user just asked; this drives the decision.
+- PREVIOUS ASSISTANT MESSAGE TAIL — optional context. Use only if it clarifies the user message; ignore if stale or irrelevant.
 - {n} candidate memory snippets.
 
-Select the candidate memories that are relevant to the current user message. Return up to {k} results.
+Your job: select candidates that would actually help the assistant ANSWER the user's question. Return up to {k} results, most useful first.
 
-Rules:
-- Include candidates that contain information the user is looking for, even if only partially relevant.
-- A candidate mentioning the same project, system, or topic as the user's question is likely relevant — include it.
-- Prefer to INCLUDE borderline candidates rather than exclude them — false negatives (missing a relevant memory) are worse than false positives (including a marginally relevant one).
-- Use the previous assistant message tail only when it materially clarifies the current user message.
-- Reply NONE only if the candidates are clearly about completely unrelated topics.
-- Otherwise reply with ONLY the numbers of relevant candidates, separated by commas, in order of relevance
-- Example (some relevant): 3,1,7
-- Example (none relevant): NONE
+The test for each candidate:
+  "If the assistant quoted this snippet in its reply, would it move the answer forward — or would it just look topically related?"
+Topic overlap alone is NOT enough. A snippet must contain information the assistant would use in its answer.
+
+Distinguish a FACT from META-DISCUSSION about that fact:
+- STATES the fact ("I moved to Berlin in March 2024") → relevant to "when did I move?"
+- DISCUSSES the topic in meta fashion — as an example in a bug report, a test fixture, a changelog entry, or a sample query used to demo the search system → NOT relevant, even when it repeats the user's exact words. For instance, a drawer logging "fixed wrong indexing for the query <user-question-here>" describes the search system; it does not answer the question.
+- Drawers about the memory/search/indexing system itself are almost never the answer — exclude unless the user is asking about that system.
+
+Question-type calibration:
+- Factual / personal ("how many X", "what is my Y", "who is Z"): include only candidates that state the fact. Topic-adjacent commentary is noise.
+- Decision / preference ("how did we decide X", "what approach for Y"): include candidates that record the decision or rationale. Status pings naming X don't qualify.
+- Status / progress ("is X done", "state of Y"): include candidates that report status or recent activity on X.
+- Open / exploratory ("tell me about Z", "what do I know about Z"): be more inclusive — anything substantively about Z qualifies.
+
+When in doubt:
+- Factual / personal questions → exclude borderline candidates.
+- Exploratory questions → include them.
+
+Reply NONE when no candidate would actually contribute to the answer — even if some repeat the user's words. Returning NONE is the correct call when the palace doesn't contain the answer; injecting topic-matched noise is worse than injecting nothing.
+
+Output format:
+- Comma-separated indices in relevance order, e.g. 3,1,7
+- Or NONE if nothing helps.
 
 Current user message:
 {user_message}
@@ -791,7 +852,7 @@ def rerank(
     if config is None:
         return None
 
-    if len(hits) <= top_k:
+    if not hits:
         return hits
 
     prompt = _build_rerank_prompt(

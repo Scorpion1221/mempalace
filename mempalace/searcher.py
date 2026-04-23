@@ -206,15 +206,20 @@ def _hybrid_rank(
     return results
 
 
-def build_where_filter(wing: str = None, room: str = None) -> dict:
-    """Build ChromaDB where filter for wing/room filtering."""
-    if wing and room:
-        return {"$and": [{"wing": wing}, {"room": room}]}
-    elif wing:
-        return {"wing": wing}
-    elif room:
-        return {"room": room}
-    return {}
+def build_where_filter(wing: str = None, room: str = None, hall: str = None) -> dict:
+    """Build ChromaDB where filter for wing/room/hall filtering."""
+    clauses = []
+    if wing:
+        clauses.append({"wing": wing})
+    if room:
+        clauses.append({"room": room})
+    if hall:
+        clauses.append({"hall": hall})
+    if len(clauses) == 0:
+        return {}
+    if len(clauses) == 1:
+        return clauses[0]
+    return {"$and": clauses}
 
 
 def _extract_drawer_ids_from_closet(closet_doc: str) -> list:
@@ -446,6 +451,7 @@ def search_memories(
     palace_path: str,
     wing: str = None,
     room: str = None,
+    hall: str = None,
     n_results: int = 5,
     max_distance: float = 0.0,
     preferred_wing: str = None,
@@ -461,6 +467,7 @@ def search_memories(
         palace_path: Path to the ChromaDB palace directory.
         wing: Optional wing filter.
         room: Optional room filter.
+        hall: Optional hall filter (e.g. "hall_diary" for personal-fact recall).
         n_results: Max results to return.
         max_distance: Max cosine distance threshold. The palace collection uses
             cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
@@ -478,7 +485,7 @@ def search_memories(
             "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
         }
 
-    where = build_where_filter(wing, room)
+    where = build_where_filter(wing, room, hall)
 
     # Hybrid retrieval: always query drawers directly (the floor), then use
     # closet hits to boost rankings. Closets are a ranking SIGNAL, never a

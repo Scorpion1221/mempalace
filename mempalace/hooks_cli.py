@@ -1038,31 +1038,105 @@ def _infer_wing_from_cwd(cwd: str) -> str:
     return candidate or None
 
 
+def _get_palace_taxonomy(palace_path: str) -> dict:
+    """Snapshot the current palace taxonomy for the LLM gate.
+
+    Returns {"rooms": [...top by count], "halls": [...top by count]}, both
+    sorted by descending drawer count and capped at 12 entries each. Used as
+    the source of truth so the rewrite LLM only suggests filter values that
+    actually exist in the palace right now.
+
+    Returns {} on any failure — callers treat it as no taxonomy hint.
+    """
+    try:
+        from collections import Counter
+
+        import chromadb
+
+        client = chromadb.PersistentClient(path=palace_path)
+        try:
+            col = client.get_collection("mempalace_drawers")
+        except Exception:
+            return {}
+        r = col.get(include=["metadatas"])
+        metas = r.get("metadatas") or []
+        rooms = Counter(m.get("room") for m in metas if m and m.get("room"))
+        halls = Counter(m.get("hall") for m in metas if m and m.get("hall"))
+        return {
+            "rooms": [r for r, _ in rooms.most_common(12)],
+            "halls": [h for h, _ in halls.most_common(12)],
+        }
+    except Exception:
+        return {}
+
+
 def _get_kg_context_for_recall(hits, query=""):
-    """Query knowledge graph for entities in search results and query."""
-    entities = set()
-    for h in hits:
-        w = h.get("wing", "")
-        if w and w != "?" and not w.startswith("-Users") and not w.startswith("wing_"):
-            entities.add(w)
+    """Query knowledge graph for entities named in the user's QUERY.
 
-    if query:
-        from .searcher import _tokenize
+    Strategy:
+      1. Load all KG entity names.
+      2. Match any entity whose name appears as a substring of the raw query
+         (case-insensitive). Works for CJK where bigram tokenization would
+         otherwise lose entity references ("猫" is 1 char, "Scorpion" is 8).
+      3. Fall back to long-token matching (>=3 chars) so short/proper-noun
+         queries still get some coverage when no entity name appears
+         verbatim.
+      4. For each matched entity, fetch current facts (valid_to IS NULL).
 
-        tokens = _tokenize(query)
-        for t in tokens:
-            if len(t) >= 3:
-                entities.add(t)
-
-    if not entities:
+    We intentionally do NOT pull entities from hit wings — doing so used to
+    contaminate recall, dragging in every fact about a project just because
+    one of its drawers surfaced unrelated to the user's question.
+    """
+    del hits  # kept for caller compatibility; wing-based extraction was noisy
+    if not query:
         return []
     try:
         from .knowledge_graph import KnowledgeGraph
 
         kg = KnowledgeGraph()
+    except Exception:
+        return []
+
+    try:
+        entity_names = kg.list_entity_names()
+    except Exception:
+        entity_names = []
+
+    query_lower = query.lower()
+    entities: list = []
+    seen_entities: set = set()
+    for name in entity_names:
+        if not name:
+            continue
+        if name.lower() in query_lower:
+            key = name.lower()
+            if key not in seen_entities:
+                seen_entities.add(key)
+                entities.append(name)
+        if len(entities) >= 6:
+            break
+
+    # Fallback: long-token match (primarily helps English queries where the
+    # user typed a word that isn't yet an entity — we still try a lookup).
+    if not entities:
+        from .searcher import _tokenize
+
+        tokens = _tokenize(query)
+        for t in tokens:
+            if len(t) >= 3 and t.lower() not in seen_entities:
+                seen_entities.add(t.lower())
+                entities.append(t)
+            if len(entities) >= 6:
+                break
+
+    if not entities:
+        kg.close()
+        return []
+
+    try:
         lines = []
         seen = set()
-        for entity in list(entities)[:6]:
+        for entity in entities[:6]:
             try:
                 facts = kg.query_entity(entity, direction="both")
             except Exception:
@@ -1083,6 +1157,10 @@ def _get_kg_context_for_recall(hits, query=""):
         kg.close()
         return lines[:8]
     except Exception:
+        try:
+            kg.close()
+        except Exception:
+            pass
         return []
 
 
@@ -1203,17 +1281,20 @@ def hook_userprompt(data: dict, harness: str):
     # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
     llm_config = None
     time_after = None
+    rewrite_filters: dict = {}
     try:
         from .recall_llm import is_enabled, _get_llm_config, decide_recall, rerank
 
         if is_enabled():
             llm_config = _get_llm_config()
         if llm_config:
+            taxonomy = _get_palace_taxonomy(palace_path)
+            active_ctx = {"cwd": cwd, "palace": taxonomy} if taxonomy else cwd
             recall_decision = decide_recall(
                 user_prompt,
                 config=llm_config,
                 previous_assistant_context={"tail": previous_assistant_tail},
-                active_context=cwd,
+                active_context=active_ctx,
             )
             if recall_decision:
                 if not recall_decision.get("should_recall"):
@@ -1225,10 +1306,23 @@ def hook_userprompt(data: dict, harness: str):
                     return
                 search_query = recall_decision["query"]
                 time_after = recall_decision.get("after")
+                # Validate LLM-suggested filters against real palace taxonomy.
+                # Drop any value the LLM hallucinated so we never filter to an
+                # empty result set over a bogus hall/room name.
+                raw_filters = recall_decision.get("filters") or {}
+                valid_rooms = set(taxonomy.get("rooms", [])) if taxonomy else set()
+                valid_halls = set(taxonomy.get("halls", [])) if taxonomy else set()
+                if raw_filters.get("room") and (not valid_rooms or raw_filters["room"] in valid_rooms):
+                    rewrite_filters["room"] = raw_filters["room"]
+                if raw_filters.get("hall") and (not valid_halls or raw_filters["hall"] in valid_halls):
+                    rewrite_filters["hall"] = raw_filters["hall"]
+                if raw_filters.get("wing"):
+                    rewrite_filters["wing"] = raw_filters["wing"]
                 _log(
                     "UserPrompt recall: "
                     f"LLM decided recall reason={recall_decision.get('reason', 'unknown')}, "
-                    f"query={search_query[:80]!r}, after={time_after}"
+                    f"query={search_query[:80]!r}, after={time_after}, "
+                    f"filters={rewrite_filters or 'none'}"
                 )
             else:
                 # LLM returned None (API failure / parse error).
@@ -1271,7 +1365,8 @@ def hook_userprompt(data: dict, harness: str):
     pool_size = USERPROMPT_RECALL_POOL if llm_config else USERPROMPT_RECALL_LIMIT
     extra = [original_query] if search_query != original_query else []
     result = None
-    if not extra:
+    # MCP socket path doesn't support room/hall filter — skip it when filtered.
+    if not extra and not rewrite_filters:
         result = _search_via_mcp_socket(
             query=search_query,
             wing=None,
@@ -1286,13 +1381,37 @@ def hook_userprompt(data: dict, harness: str):
             result = search_memories(
                 query=search_query,
                 palace_path=palace_path,
-                wing=None,
+                wing=rewrite_filters.get("wing"),
+                room=rewrite_filters.get("room"),
+                hall=rewrite_filters.get("hall"),
                 preferred_wing=preferred_wing,
                 n_results=pool_size,
                 max_distance=USERPROMPT_MAX_DISTANCE,
                 after=time_after,
                 extra_queries=extra,
             )
+            # If the filter was too tight (empty pool), retry without filters
+            # so we don't fail closed on a hallucinated-but-valid label.
+            if (
+                rewrite_filters
+                and isinstance(result, dict)
+                and not result.get("error")
+                and len(result.get("results") or []) == 0
+            ):
+                _log(
+                    "UserPrompt recall: filtered search returned 0 hits, "
+                    f"retrying without filters={rewrite_filters}"
+                )
+                result = search_memories(
+                    query=search_query,
+                    palace_path=palace_path,
+                    wing=None,
+                    preferred_wing=preferred_wing,
+                    n_results=pool_size,
+                    max_distance=USERPROMPT_MAX_DISTANCE,
+                    after=time_after,
+                    extra_queries=extra,
+                )
         except Exception as e:
             _log(f"WARNING: search_memories failed: {e}")
             _output({})

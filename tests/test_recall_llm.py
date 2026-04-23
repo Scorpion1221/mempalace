@@ -49,8 +49,9 @@ class TestDecideRecall:
             "reason": "short_followup_depends_on_previous_assistant",
             "query": "dbeaver mysql test env",
             "after": "2026-04-17",
+            "filters": {},
         }
-        assert "Decide whether memory recall is needed for this turn." in captured["prompt"]
+        assert "Decide whether memory recall is needed for this turn" in captured["prompt"]
         assert "CURRENT USER MESSAGE — this is the primary signal." in captured["prompt"]
         assert "/Users/scorpion/git/mempalace" in captured["prompt"]
         assert "Earlier I mentioned the test env MySQL connection info." in captured["prompt"]
@@ -79,6 +80,7 @@ class TestDecideRecall:
             "reason": "direct_local_task_no_memory_needed",
             "query": None,
             "after": None,
+            "filters": {},
         }
 
     def test_decide_recall_falls_back_to_plain_query_string(self, monkeypatch):
@@ -99,6 +101,7 @@ class TestDecideRecall:
             "reason": "query_string_fallback",
             "query": "mysql host dbeaver test env",
             "after": None,
+            "filters": {},
         }
 
     def test_rewrite_query_wrapper_returns_none_when_decision_is_false(self, monkeypatch):
@@ -179,7 +182,7 @@ class TestRerank:
         )
 
         assert reranked == [hits[1], hits[0]]
-        assert "CURRENT USER MESSAGE — this is the primary signal and should drive the relevance decision." in captured["prompt"]
+        assert "CURRENT USER MESSAGE — what the user just asked" in captured["prompt"]
         assert "I previously pointed you to the test MySQL DB connection." in captured["prompt"]
         assert "1. [infra/db] Prod Postgres credentials" in captured["prompt"]
         assert "2. [infra/db] Test MySQL connection details for DBeaver" in captured["prompt"]

@@ -131,6 +131,23 @@ class KnowledgeGraph:
     def _entity_id(self, name: str) -> str:
         return name.lower().replace(" ", "_").replace("'", "")
 
+    # ── Read helpers ──────────────────────────────────────────────────────
+
+    def list_entity_names(self, limit: int = 2000) -> list:
+        """Return all entity display names currently in the graph.
+
+        Used for substring-based entity detection in queries, especially for
+        CJK text where bigram tokenization doesn't produce useful entity
+        lookups.
+        """
+        with self._lock:
+            conn = self._conn()
+            rows = conn.execute(
+                "SELECT name FROM entities ORDER BY name LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [r["name"] for r in rows if r["name"]]
+
     # ── Write operations ──────────────────────────────────────────────────
 
     def add_entity(self, name: str, entity_type: str = "unknown", properties: dict = None):
