@@ -232,9 +232,7 @@ def _get_collection(create=False):
 
         # Rebuild cache if: first time, explicit create, or ef appeared after initial cache
         needs_rebuild = (
-            _collection_cache is None
-            or create
-            or (ef is not None and not _collection_has_ef)
+            _collection_cache is None or create or (ef is not None and not _collection_has_ef)
         )
 
         client = _get_client()
@@ -242,7 +240,8 @@ def _get_collection(create=False):
             if create:
                 _collection_cache = ChromaCollection(
                     client.get_or_create_collection(
-                        _config.collection_name, metadata={"hnsw:space": "cosine"},
+                        _config.collection_name,
+                        metadata={"hnsw:space": "cosine"},
                         **ef_kwargs,
                     )
                 )
@@ -1712,8 +1711,81 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
+_SOCKET_PATH = os.path.join(os.path.expanduser("~"), ".mempalace", "mcp.sock")
+
+
+def _handle_socket_client(conn):
+    try:
+        data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        if not data:
+            return
+        request = json.loads(data.decode("utf-8").strip())
+        response = handle_request(request)
+        if response is not None:
+            conn.sendall(json.dumps(response).encode("utf-8") + b"\n")
+    except Exception as e:
+        try:
+            err = {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}
+            conn.sendall(json.dumps(err).encode("utf-8") + b"\n")
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def _start_socket_listener():
+    import atexit
+    import socket
+    import threading
+
+    sock_dir = os.path.dirname(_SOCKET_PATH)
+    os.makedirs(sock_dir, exist_ok=True)
+    if os.path.exists(_SOCKET_PATH):
+        try:
+            os.unlink(_SOCKET_PATH)
+        except OSError:
+            return
+    try:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(_SOCKET_PATH)
+        server.listen(4)
+    except OSError:
+        return
+
+    def _cleanup():
+        try:
+            server.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(_SOCKET_PATH)
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
+
+    def _accept_loop():
+        while True:
+            try:
+                conn, _ = server.accept()
+                threading.Thread(target=_handle_socket_client, args=(conn,), daemon=True).start()
+            except OSError:
+                break
+
+    threading.Thread(target=_accept_loop, daemon=True).start()
+    logger.info("Socket listener started at %s", _SOCKET_PATH)
+
+
 def main():
     _restore_stdout()
+    _start_socket_listener()
     logger.info("MemPalace MCP Server starting...")
     while True:
         try:

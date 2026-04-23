@@ -434,6 +434,10 @@ def mine_convos(
         else:
             chunks = chunk_exchanges(content)
 
+        from .normalize import is_noise_content
+
+        chunks = [c for c in chunks if not is_noise_content(c)]
+
         if not chunks:
             if not dry_run:
                 _register_file(collection, source_file, wing, agent)

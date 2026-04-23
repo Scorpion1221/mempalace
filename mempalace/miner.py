@@ -608,8 +608,15 @@ def process_file(
     if len(content) < MIN_CHUNK_SIZE:
         return 0, "general"
 
+    from .normalize import is_noise_content, strip_noise
+
+    content = strip_noise(content)
+    if not content or is_noise_content(content):
+        return 0, "general"
+
     room = detect_room(filepath, content, rooms, project_path)
     chunks = chunk_text(content, source_file)
+    chunks = [c for c in chunks if not is_noise_content(c)]
 
     if dry_run:
         print(f"    [DRY RUN] {filepath.name} -> room:{room} ({len(chunks)} drawers)")

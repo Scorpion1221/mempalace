@@ -109,6 +109,29 @@ def strip_noise(text: str) -> str:
     return text.strip()
 
 
+_NOISE_CONTENT_MARKERS = (
+    "sessionId",
+    "parentUuid",
+    "file-history-snapshot",
+    "isSidechain",
+    "permissionMode",
+    "preventedContinuation",
+    "isSnapshotUpdate",
+    '"type":"permission',
+    '"agentType"',
+)
+
+
+def is_noise_content(text) -> bool:
+    """Return True if *text* looks like framework/harness noise."""
+    if isinstance(text, dict):
+        text = text.get("text", text.get("content", ""))
+    if not isinstance(text, str):
+        return False
+    head = text[:400]
+    return any(marker in head for marker in _NOISE_CONTENT_MARKERS)
+
+
 def normalize(filepath: str) -> str:
     """
     Load a file and normalize to transcript format if it's a chat export.

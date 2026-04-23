@@ -30,26 +30,64 @@ USERPROMPT_BUDGET_SECONDS = 15  # internal timeout — bail before harness kills
 
 # Short phrases that don't need memory recall
 # Keep in sync with TRIVIAL_USER_MESSAGES in hermes-mempalace-plugin
-USERPROMPT_SKIP_PHRASES = frozenset({
-    # Greetings
-    "hi", "hello", "hey", "嗨", "你好",
-    # Acknowledgement
-    "ok", "okay", "好", "好的", "行", "嗯", "对",
-    "cool", "nice", "great", "sounds good",
-    # Affirmation / negation
-    "yes", "no", "是", "是的", "不", "不是",
-    # Continuation
-    "continue", "go", "go on", "next", "继续",
-    # Gratitude
-    "thanks", "thank you", "thx", "谢谢",
-    # Completion / exit
-    "done", "完成", "搞定", "stop", "quit", "exit",
-})
+USERPROMPT_SKIP_PHRASES = frozenset(
+    {
+        # Greetings
+        "hi",
+        "hello",
+        "hey",
+        "嗨",
+        "你好",
+        # Acknowledgement
+        "ok",
+        "okay",
+        "好",
+        "好的",
+        "行",
+        "嗯",
+        "对",
+        "cool",
+        "nice",
+        "great",
+        "sounds good",
+        # Affirmation / negation
+        "yes",
+        "no",
+        "是",
+        "是的",
+        "不",
+        "不是",
+        # Continuation
+        "continue",
+        "go",
+        "go on",
+        "next",
+        "继续",
+        # Gratitude
+        "thanks",
+        "thank you",
+        "thx",
+        "谢谢",
+        # Completion / exit
+        "done",
+        "完成",
+        "搞定",
+        "stop",
+        "quit",
+        "exit",
+    }
+)
 
 # Short prompts that are only meaningful with prior assistant context.
-USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES = frozenset({
-    "continue", "go", "go on", "next", "继续",
-})
+USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES = frozenset(
+    {
+        "continue",
+        "go",
+        "go on",
+        "next",
+        "继续",
+    }
+)
 USERPROMPT_HARD_SKIP_PHRASES = USERPROMPT_SKIP_PHRASES - USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES
 
 STOP_BLOCK_REASON = (
@@ -86,6 +124,58 @@ PRECOMPACT_BLOCK_REASON = (
     "3. mempalace_kg_add — entity relationships (optional)\n"
     "Save everything to MemPalace, then allow compaction to proceed."
 )
+
+_MCP_SOCKET_PATH = os.path.join(os.path.expanduser("~"), ".mempalace", "mcp.sock")
+_MCP_SOCKET_TIMEOUT = 3.0
+
+
+def _search_via_mcp_socket(query, wing=None, n_results=5, max_distance=0.0, preferred_wing=None):
+    """Try searching via the MCP server's Unix socket (hot HNSW cache).
+
+    Returns the search result dict on success, or None on failure.
+    """
+    import socket as sock_mod
+
+    if not os.path.exists(_MCP_SOCKET_PATH):
+        return None
+    try:
+        s = sock_mod.socket(sock_mod.AF_UNIX, sock_mod.SOCK_STREAM)
+        s.settimeout(_MCP_SOCKET_TIMEOUT)
+        s.connect(_MCP_SOCKET_PATH)
+        args = {"query": query, "limit": n_results}
+        if wing:
+            args["wing"] = wing
+        if max_distance > 0:
+            args["max_distance"] = max_distance
+        if preferred_wing:
+            args["preferred_wing"] = preferred_wing
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "mempalace_search", "arguments": args},
+        }
+        s.sendall(json.dumps(request).encode("utf-8") + b"\n")
+        data = b""
+        while True:
+            chunk = s.recv(8192)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        s.close()
+        response = json.loads(data.decode("utf-8").strip())
+        if "error" in response:
+            return None
+        result = response.get("result", {})
+        content = result.get("content", [])
+        if content and isinstance(content[0], dict):
+            text = content[0].get("text", "{}")
+            return json.loads(text)
+        return None
+    except Exception:
+        return None
 
 
 def _sanitize_session_id(session_id: str) -> str:
@@ -155,9 +245,16 @@ def _count_human_messages(transcript_path: str) -> int:
                             continue
                         count += 1
                         continue
-                    if entry_type in ("tool_use", "tool_result", "assistant",
-                                      "permission-mode", "attachment", "system",
-                                      "file-history-snapshot", "last-prompt"):
+                    if entry_type in (
+                        "tool_use",
+                        "tool_result",
+                        "assistant",
+                        "permission-mode",
+                        "attachment",
+                        "system",
+                        "file-history-snapshot",
+                        "last-prompt",
+                    ):
                         continue
 
                     # --- Legacy format: {"message": {"role": "user"}} ---
@@ -259,7 +356,11 @@ def _get_last_assistant_message(transcript_path: str) -> str:
                 # Claude Code JSONL: {"type": "assistant", "message": {"content": ...}}
                 if entry_type == "assistant":
                     message = entry.get("message", {})
-                    content = message.get("content") if isinstance(message, dict) else entry.get("content")
+                    content = (
+                        message.get("content")
+                        if isinstance(message, dict)
+                        else entry.get("content")
+                    )
                     text = _extract_assistant_text(content)
                     if text:
                         text_lower = text[:200].lower()
@@ -650,10 +751,7 @@ def hook_userprompt(data: dict, harness: str):
             active_context=cwd,
         )
         if local_decision and not local_decision.get("should_recall"):
-            _log(
-                "UserPrompt recall: local skip "
-                f"reason={local_decision.get('reason', 'unknown')}"
-            )
+            _log(f"UserPrompt recall: local skip reason={local_decision.get('reason', 'unknown')}")
             _output({})
             return
     except Exception as e:
@@ -699,6 +797,7 @@ def hook_userprompt(data: dict, harness: str):
     time_after = None
     try:
         from .recall_llm import is_enabled, _get_llm_config, decide_recall, rerank
+
         if is_enabled():
             llm_config = _get_llm_config()
         if llm_config:
@@ -732,7 +831,9 @@ def hook_userprompt(data: dict, harness: str):
                 prompt_lower = user_prompt.lower()
                 has_history_ref = any(h in prompt_lower for h in _HISTORY_REFERENCE_HINTS)
                 if has_history_ref:
-                    _log("UserPrompt recall: LLM decide returned None, but history ref detected — fallback to search")
+                    _log(
+                        "UserPrompt recall: LLM decide returned None, but history ref detected — fallback to search"
+                    )
                 else:
                     _log("UserPrompt recall: LLM decide returned None, fail closed")
                     _output({})
@@ -743,7 +844,9 @@ def hook_userprompt(data: dict, harness: str):
         prompt_lower = user_prompt.lower()
         has_history_ref = any(h in prompt_lower for h in _HISTORY_REFERENCE_HINTS)
         if has_history_ref:
-            _log(f"UserPrompt recall: decide+rewrite failed ({e}), but history ref detected — fallback to search")
+            _log(
+                f"UserPrompt recall: decide+rewrite failed ({e}), but history ref detected — fallback to search"
+            )
         else:
             _log(f"UserPrompt recall: decide+rewrite failed ({e}), fail closed")
             _output({})
@@ -758,20 +861,30 @@ def hook_userprompt(data: dict, harness: str):
     # --- Stage 2: Vector search + BM25 hybrid rank ---
     # Fetch a larger pool when LLM rerank is available
     pool_size = USERPROMPT_RECALL_POOL if llm_config else USERPROMPT_RECALL_LIMIT
-    try:
-        result = search_memories(
-            query=search_query,
-            palace_path=palace_path,
-            wing=None,  # search all wings
-            preferred_wing=preferred_wing,
-            n_results=pool_size,
-            max_distance=USERPROMPT_MAX_DISTANCE,
-            after=time_after,
-        )
-    except Exception as e:
-        _log(f"WARNING: search_memories failed: {e}")
-        _output({})
-        return
+    result = _search_via_mcp_socket(
+        query=search_query,
+        wing=None,
+        n_results=pool_size,
+        max_distance=USERPROMPT_MAX_DISTANCE,
+        preferred_wing=preferred_wing,
+    )
+    if result is not None:
+        _log("UserPrompt recall: used MCP socket (hot path)")
+    else:
+        try:
+            result = search_memories(
+                query=search_query,
+                palace_path=palace_path,
+                wing=None,
+                preferred_wing=preferred_wing,
+                n_results=pool_size,
+                max_distance=USERPROMPT_MAX_DISTANCE,
+                after=time_after,
+            )
+        except Exception as e:
+            _log(f"WARNING: search_memories failed: {e}")
+            _output({})
+            return
 
     # Distinguish "no results" from "search error" (e.g. embedding failure)
     if isinstance(result, dict) and "error" in result:
@@ -831,14 +944,16 @@ def hook_userprompt(data: dict, harness: str):
     )
     _log(f"UserPrompt recall: injecting {len(hits[:USERPROMPT_RECALL_LIMIT])} hits")
 
-    _output({
-        "continue": True,
-        "suppressOutput": True,
-        "hookSpecificOutput": {
-            "hookEventName": "UserPromptSubmit",
-            "additionalContext": additional_context,
-        },
-    })
+    _output(
+        {
+            "continue": True,
+            "suppressOutput": True,
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": additional_context,
+            },
+        }
+    )
 
 
 def run_hook(hook_name: str, harness: str):

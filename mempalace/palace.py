@@ -68,7 +68,8 @@ def _reset_embedding_cache():
 #
 # v2 (2026-04): introduced strip_noise() for Claude Code JSONL; previous
 #               drawers stored system tags / hook chrome verbatim.
-NORMALIZE_VERSION = 2
+# v3 (2026-04): added is_noise_content() chunk filter + strip_noise in miner.
+NORMALIZE_VERSION = 3
 
 
 def get_collection(
