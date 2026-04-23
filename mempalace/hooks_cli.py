@@ -1038,31 +1038,50 @@ def _infer_wing_from_cwd(cwd: str) -> str:
     return candidate or None
 
 
-def _get_kg_context_for_recall(hits):
-    """Query knowledge graph for entities mentioned in search results."""
-    wings = set()
+def _get_kg_context_for_recall(hits, query=""):
+    """Query knowledge graph for entities in search results and query."""
+    entities = set()
     for h in hits:
         w = h.get("wing", "")
-        if w and w != "?" and not w.startswith("-Users"):
-            wings.add(w)
-    if not wings:
+        if w and w != "?" and not w.startswith("-Users") and not w.startswith("wing_"):
+            entities.add(w)
+
+    if query:
+        from .searcher import _tokenize
+
+        tokens = _tokenize(query)
+        for t in tokens:
+            if len(t) >= 3:
+                entities.add(t)
+
+    if not entities:
         return []
     try:
         from .knowledge_graph import KnowledgeGraph
 
         kg = KnowledgeGraph()
         lines = []
-        for entity in list(wings)[:3]:
-            facts = kg.query_entity(entity)
-            if facts:
-                for f in facts[:3]:
-                    subj = f.get("subject", "")
-                    pred = f.get("predicate", "")
-                    obj = f.get("object", "")
-                    if subj and pred and obj:
+        seen = set()
+        for entity in list(entities)[:6]:
+            try:
+                facts = kg.query_entity(entity, direction="both")
+            except Exception:
+                continue
+            for f in facts:
+                if f.get("valid_to") is not None:
+                    continue
+                subj = f.get("subject", "")
+                pred = f.get("predicate", "")
+                obj = f.get("object", "")
+                if subj and pred and obj:
+                    key = (subj, pred, obj)
+                    if key not in seen:
+                        seen.add(key)
                         lines.append(f"- [KG] {subj} → {pred} → {obj}")
+            if len(lines) >= 8:
+                break
         kg.close()
-        return lines
+        return lines[:8]
     except Exception:
         return []
 
@@ -1322,7 +1341,7 @@ def hook_userprompt(data: dict, harness: str):
         if snippet:
             lines.append(f"- [{wing}/{room}]{date_tag} {snippet}")
 
-    kg_lines = _get_kg_context_for_recall(hits)
+    kg_lines = _get_kg_context_for_recall(hits, query=user_prompt)
     if kg_lines:
         lines.append("")
         lines.extend(kg_lines)
