@@ -608,6 +608,8 @@ Return ONLY valid JSON:
 - drawers: each a standalone fact/decision/config worth recalling later. Typically 0-5, but use more for rich conversations
 - Skip trivial exchanges (greetings, confirmations, "OK", "继续")
 - If nothing worth saving: {{"diary": "", "drawers": [], "kg": []}}
+- DEDUP: check the "Current Palace State" section above. Do NOT re-store facts/decisions/configs that already exist in the listed wings/rooms. Only store genuinely NEW information from this conversation segment.
+- If the AI's response is just recalling/repeating previously stored memories, there is nothing new to save.
 - Drawer content should be specific and actionable, not vague summaries
 - Include file paths, URLs, command examples, config values when mentioned
 - kg: 0-5 entity-relationship facts. Subject and object are entities (people, projects, tools, services).
@@ -742,6 +744,21 @@ def _build_palace_context():
                 for w, rs in sorted(wing_rooms.items())[:10]
             )
             lines.append(f"Wings: {wings_str}")
+
+        recent = col.get(
+            limit=10,
+            include=["documents", "metadatas"],
+            where={"added_by": "haiku_async_save"},
+        )
+        if recent and recent.get("documents"):
+            previews = []
+            for doc, meta in zip(recent["documents"], recent["metadatas"] or []):
+                w = meta.get("wing", "?") if meta else "?"
+                r = meta.get("room", "?") if meta else "?"
+                previews.append(f"  [{w}/{r}] {doc[:100]}")
+            if previews:
+                lines.append("Recent saves (do NOT re-store these):")
+                lines.extend(previews[:8])
 
         try:
             from .knowledge_graph import KnowledgeGraph
