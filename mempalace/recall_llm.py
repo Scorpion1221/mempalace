@@ -207,19 +207,30 @@ def _call_vertex(
     prompt: str,
     max_tokens: int,
     timeout: int,
+    *,
+    json_mode: bool = False,
 ) -> str | None:
-    """Call Vertex AI Claude endpoint. Returns response text or None."""
+    """Call Vertex AI Claude endpoint. Returns response text or None.
+
+    When ``json_mode`` is True, uses an assistant-prefill trick: appends an
+    assistant message containing ``{`` so the model must continue with JSON.
+    The returned text is prefixed with ``{`` to form a complete JSON document
+    (the API only returns what comes AFTER the prefill).
+    """
     # Vertex AI uses the Anthropic Messages API format
     url = (
         f"https://{location}-aiplatform.googleapis.com/v1/"
         f"projects/{project}/locations/{location}/"
         f"publishers/anthropic/models/{model}:rawPredict"
     )
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    if json_mode:
+        messages.append({"role": "assistant", "content": "{"})
     payload = json.dumps(
         {
             "anthropic_version": "vertex-2023-10-16",
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
         }
     ).encode("utf-8")
 
@@ -236,7 +247,10 @@ def _call_vertex(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
-        return result["content"][0]["text"].strip()
+        text = result["content"][0]["text"].strip()
+        if json_mode and not text.startswith("{"):
+            text = "{" + text
+        return text
     except Exception as e:
         logger.debug("Vertex AI call failed: %s", e)
         return None
@@ -248,13 +262,24 @@ def _call_anthropic(
     prompt: str,
     max_tokens: int,
     timeout: int,
+    *,
+    json_mode: bool = False,
 ) -> str | None:
-    """Call Anthropic Messages API. Returns response text or None."""
+    """Call Anthropic Messages API. Returns response text or None.
+
+    When ``json_mode`` is True, uses an assistant-prefill trick: appends an
+    assistant message containing ``{`` so the model must continue with JSON.
+    The returned text is prefixed with ``{`` to form a complete JSON document
+    (the API only returns what comes AFTER the prefill).
+    """
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    if json_mode:
+        messages.append({"role": "assistant", "content": "{"})
     payload = json.dumps(
         {
             "model": model,
             "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
         }
     ).encode("utf-8")
 
@@ -272,7 +297,10 @@ def _call_anthropic(
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             result = json.loads(resp.read())
-        return result["content"][0]["text"].strip()
+        text = result["content"][0]["text"].strip()
+        if json_mode and not text.startswith("{"):
+            text = "{" + text
+        return text
     except Exception as e:
         logger.debug("Anthropic API call failed: %s", e)
         return None
@@ -285,15 +313,23 @@ def _call_openai_compat(
     prompt: str,
     max_tokens: int,
     timeout: int,
+    *,
+    json_mode: bool = False,
 ) -> str | None:
-    """Call OpenAI-compatible /chat/completions. Returns response text or None."""
-    payload = json.dumps(
-        {
-            "model": model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-    ).encode("utf-8")
+    """Call OpenAI-compatible /chat/completions. Returns response text or None.
+
+    When ``json_mode`` is True, sets ``response_format={"type": "json_object"}``
+    on the request. LiteLLM proxies forward this to Vertex/Anthropic/OpenAI
+    as appropriate and most providers honor it.
+    """
+    body: dict = {
+        "model": model,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if json_mode:
+        body["response_format"] = {"type": "json_object"}
+    payload = json.dumps(body).encode("utf-8")
 
     headers = {"Content-Type": "application/json"}
     if key:
@@ -315,8 +351,21 @@ def _call_openai_compat(
         return None
 
 
-def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str | None:
-    """Dispatch LLM call to the configured backend."""
+def _call_llm(
+    config: dict,
+    prompt: str,
+    max_tokens: int,
+    timeout: int,
+    *,
+    json_mode: bool = False,
+) -> str | None:
+    """Dispatch LLM call to the configured backend.
+
+    When ``json_mode`` is True, the backend is instructed (via
+    ``response_format`` for OpenAI-compat or an assistant prefill for
+    Anthropic/Vertex) to emit a valid JSON object. The returned string is
+    guaranteed to start with ``{`` in that case.
+    """
     backend = config["backend"]
     if backend == "vertex":
         return _call_vertex(
@@ -327,6 +376,7 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
             prompt,
             max_tokens,
             timeout,
+            json_mode=json_mode,
         )
     if backend == "anthropic":
         return _call_anthropic(
@@ -335,6 +385,7 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
             prompt,
             max_tokens,
             timeout,
+            json_mode=json_mode,
         )
     return _call_openai_compat(
         config["endpoint"],
@@ -343,6 +394,7 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
         prompt,
         max_tokens,
         timeout,
+        json_mode=json_mode,
     )
 
 
@@ -351,7 +403,9 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
 # =========================================================================
 
 
-def _extract_previous_assistant_tail(previous_assistant_context: str | Mapping | None) -> str | None:
+def _extract_previous_assistant_tail(
+    previous_assistant_context: str | Mapping | None,
+) -> str | None:
     """Extract the previous assistant reply tail from a string or structured payload."""
     if previous_assistant_context is None:
         return None
@@ -361,7 +415,7 @@ def _extract_previous_assistant_tail(previous_assistant_context: str | Mapping |
         if not tail:
             return None
         if len(tail) > PREVIOUS_ASSISTANT_TAIL_MAX_CHARS:
-            tail = tail[-PREVIOUS_ASSISTANT_TAIL_MAX_CHARS :]
+            tail = tail[-PREVIOUS_ASSISTANT_TAIL_MAX_CHARS:]
         return tail
 
     if not isinstance(previous_assistant_context, Mapping):
@@ -632,7 +686,7 @@ def _parse_decide_recall_result(result: str) -> dict | None:
     try:
         parsed = json.loads(result)
     except json.JSONDecodeError:
-        clean = result.strip().strip('"\'')
+        clean = result.strip().strip("\"'")
         if 3 <= len(clean) <= 300:
             return {
                 "should_recall": True,
@@ -729,7 +783,13 @@ def decide_recall(
         previous_assistant_context,
         active_context,
     )
-    result = _call_llm(config, prompt, REWRITE_MAX_TOKENS, REWRITE_TIMEOUT_S)
+    result = _call_llm(
+        config,
+        prompt,
+        REWRITE_MAX_TOKENS,
+        REWRITE_TIMEOUT_S,
+        json_mode=True,
+    )
     return _parse_decide_recall_result(result)
 
 

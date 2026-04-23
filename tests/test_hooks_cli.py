@@ -13,6 +13,7 @@ from mempalace.hooks_cli import (
     STOP_BLOCK_REASON,
     USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS,
     _count_human_messages,
+    _extract_first_json_object,
     _get_mine_dir,
     _get_last_assistant_message,
     _log,
@@ -693,8 +694,7 @@ def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
     def fake_search_memories(**kwargs):
         return {
             "results": [
-                {"wing": "mempalace", "room": "decisions", "text": f"hit {i}"}
-                for i in range(6)
+                {"wing": "mempalace", "room": "decisions", "text": f"hit {i}"} for i in range(6)
             ]
         }
 
@@ -1200,3 +1200,89 @@ def test_get_palace_kg_entities_respects_limit(monkeypatch, tmp_path):
     names = hooks_cli._get_palace_kg_entities(limit=3)
     # 5 entities + "thing" appears as object → at most 3 returned.
     assert len(names) <= 3
+
+
+# ===========================================================================
+# JSON-extraction helper + async save dump-on-failure
+# ===========================================================================
+
+class TestExtractFirstJsonObject:
+    def test_clean_object(self):
+        assert _extract_first_json_object('{"a": 1}') == '{"a": 1}'
+
+    def test_brace_inside_string_does_not_close(self):
+        text = '{"k": "}"}'
+        assert _extract_first_json_object(text) == '{"k": "}"}'
+
+    def test_escaped_quote_inside_string(self):
+        text = r'{"k": "say \"hi\""}'
+        assert _extract_first_json_object(text) == r'{"k": "say \"hi\""}'
+
+    def test_prose_before_and_after(self):
+        text = 'prefix {"a": 1} suffix'
+        assert _extract_first_json_object(text) == '{"a": 1}'
+
+    def test_two_objects_returns_first(self):
+        text = '{"a": 1} {"b": 2}'
+        assert _extract_first_json_object(text) == '{"a": 1}'
+
+    def test_nested_objects(self):
+        text = '{"a": {"b": {"c": 1}}}'
+        assert _extract_first_json_object(text) == '{"a": {"b": {"c": 1}}}'
+
+    def test_no_object_returns_none(self):
+        assert _extract_first_json_object("not json at all") is None
+
+    def test_unbalanced_returns_none(self):
+        # Opens but never closes — should return None
+        assert _extract_first_json_object('{"a": 1') is None
+
+    def test_empty_string(self):
+        assert _extract_first_json_object("") is None
+
+
+class TestAsyncSaveDumpOnFailure:
+    def test_dumps_raw_response_when_json_parse_fails(self, tmp_path, monkeypatch):
+        from mempalace import hooks_cli, recall_llm
+
+        # Patch state dir so dump goes to tmp_path
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        # Avoid touching real palace + extra context build
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+
+        # Force an LLM config + return obviously bad JSON-like response
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+        bad_response = "garbage no braces at all here"
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: bad_response)
+
+        hooks_cli._async_save_worker("user: hi\nassistant: hello", "test-session", str(tmp_path))
+
+        dumps = list(tmp_path.glob("async_save_fail_*.txt"))
+        assert len(dumps) == 1, f"expected exactly one dump file, got {dumps}"
+        contents = dumps[0].read_text(encoding="utf-8")
+        assert bad_response in contents
+        assert "ERROR:" in contents
+        assert "=== RAW RESPONSE ===" in contents
+
+    def test_dumps_when_json_is_malformed(self, tmp_path, monkeypatch):
+        from mempalace import hooks_cli, recall_llm
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+        # Has braces but invalid JSON inside
+        bad_response = '{"diary": "oops" "drawers": [missing comma]}'
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: bad_response)
+
+        hooks_cli._async_save_worker("user: hi\nassistant: hello", "test-session", str(tmp_path))
+
+        dumps = list(tmp_path.glob("async_save_fail_*.txt"))
+        assert len(dumps) == 1
+        assert bad_response in dumps[0].read_text(encoding="utf-8")
+
+
+class TestAsyncSavePromptHardening:
+    def test_async_save_prompt_includes_escape_rule(self):
+        from mempalace.hooks_cli import _ASYNC_SAVE_PROMPT
+
+        assert "MUST be escaped as" in _ASYNC_SAVE_PROMPT

@@ -605,6 +605,7 @@ Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→Eng
 - **drawers**: discrete pieces of knowledge worth remembering in future sessions. Each drawer should be self-contained — readable without the conversation context.
 
 ## Output Format
+- All `"` inside JSON string values MUST be escaped as `\\"`. All newlines inside string values MUST be escaped as `\\n`. Never emit a literal newline inside a JSON string.
 Return ONLY valid JSON:
 {{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}], "kg": [{{"subject": "<entity>", "predicate": "<relationship>", "object": "<entity>"}}]}}
 
@@ -799,6 +800,40 @@ def _build_palace_context():
         return ""
 
 
+def _extract_first_json_object(text: str) -> str | None:
+    """Return the first complete top-level JSON object substring in text.
+
+    Scans for matching braces while respecting string literals (so a ``}``
+    inside a quoted string doesn't close the object). Returns None if no
+    balanced object is found.
+    """
+    start = text.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
 def _async_save_worker(transcript_text, session_id, cwd):
     """Background worker: call Haiku to extract memories, write to palace."""
     try:
@@ -819,17 +854,34 @@ def _async_save_worker(transcript_text, session_id, cwd):
                 f"## Current Palace State (reuse existing wings/rooms/entities when possible):\n{palace_context}\n\n## Conversation to process:",
             )
 
-        response = _call_llm(config, prompt, max_tokens=16000, timeout=30)
+        response = _call_llm(config, prompt, max_tokens=16000, timeout=30, json_mode=True)
         if not response:
             _log("async save: LLM returned empty response")
             return
 
-        start = response.find("{")
-        end = response.rfind("}") + 1
-        if start < 0 or end <= start:
-            _log("async save: no JSON in LLM response")
+        try:
+            candidate = _extract_first_json_object(response)
+            if candidate is None:
+                raise ValueError("no balanced JSON object in LLM response")
+            data = json.loads(candidate)
+        except (ValueError, json.JSONDecodeError) as e:
+            dump_dir = STATE_DIR
+            try:
+                dump_dir.mkdir(parents=True, exist_ok=True)
+                ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                dump_path = dump_dir / f"async_save_fail_{ts}.txt"
+                dump_path.write_text(
+                    (
+                        f"ERROR: {e}\n\n"
+                        f"=== PROMPT (first 2KB) ===\n{prompt[:2048]}\n\n"
+                        f"=== RAW RESPONSE ===\n{response}"
+                    ),
+                    encoding="utf-8",
+                )
+                _log(f"async save: JSON parse failed ({e}); raw dumped to {dump_path}")
+            except OSError:
+                _log(f"async save: JSON parse failed ({e}); could not write dump")
             return
-        data = json.loads(response[start:end])
 
         from .config import MempalaceConfig, sanitize_content, sanitize_name
         from .palace import get_collection
