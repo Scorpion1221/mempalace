@@ -613,7 +613,7 @@ Return ONLY valid JSON:
 
 ## Examples
 
-Input: User asks how to connect to the staging database, assistant provides the connection string and notes it requires VPN.
+Input: User asks how to connect to the staging database, assistant provides connection string requiring VPN.
 Output:
 {{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}]}}
 
@@ -621,9 +621,29 @@ Input: 用户报告搜索接口返回504超时，助手排查发现是缺少索�
 Output:
 {{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}]}}
 
-Input: User says "continue" and assistant continues previous coding task without new decisions.
+Input: Team decides to switch from REST to GraphQL for the mobile app API, with a 2-week migration plan.
+Output:
+{{"diary": "Architecture decision: mobile API switching from REST to GraphQL. Migration plan is 2 weeks, starting with read-only queries. Apollo Server chosen over Yoga for better caching.", "drawers": [{{"wing": "mobile_app", "room": "architecture", "content": "Mobile API migration: REST → GraphQL. Apollo Server (not Yoga) for caching. Phase 1: read-only queries (week 1), Phase 2: mutations (week 2). Existing REST endpoints kept until v3.0."}}, {{"wing": "mobile_app", "room": "decisions", "content": "Chose Apollo Server over GraphQL Yoga for mobile API — better built-in response caching and dataloader integration"}}]}}
+
+Input: 助手帮用户重构了认证模块，从 JWT 改成了 session-based，修改了 src/auth/middleware.ts 和 src/auth/session.ts。
+Output:
+{{"diary": "重构认证模块：JWT → session-based auth。修改了 middleware.ts 和新建了 session.ts，session 存储在 Redis 中，TTL 24小时。", "drawers": [{{"wing": "{wing}", "room": "code", "content": "认证重构 JWT→session: 修改 src/auth/middleware.ts（移除 JWT 验证，改用 session cookie），新建 src/auth/session.ts（Redis session store, TTL=24h）"}}, {{"wing": "{wing}", "room": "decisions", "content": "认证从 JWT 改为 session-based：原因是需要支持即时吊销（JWT 无法做到），session 存 Redis，cookie httpOnly+secure"}}]}}
+
+Input: User configures CI/CD pipeline, sets up GitHub Actions with Docker build and deploy to AWS ECS.
+Output:
+{{"diary": "Set up CI/CD: GitHub Actions workflow builds Docker image, pushes to ECR, deploys to ECS Fargate. Added .github/workflows/deploy.yml with staging and production environments.", "drawers": [{{"wing": "{wing}", "room": "operations", "content": "CI/CD pipeline: .github/workflows/deploy.yml — build Docker → push to ECR (123456.dkr.ecr.us-east-1) → deploy ECS Fargate. Staging auto-deploys on push to develop, production requires manual approval."}}, {{"wing": "{wing}", "room": "configuration", "content": "ECS Fargate config: task def in infra/ecs-task.json, 512 CPU / 1024 MB, health check /api/health, min 2 / max 8 tasks"}}]}}
+
+Input: 用户和助手讨论了项目的技术选型，最终选择了 Next.js + tRPC + Prisma 的技术栈。
+Output:
+{{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}]}}
+
+Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
 {{"diary": "", "drawers": []}}
+
+Input: User asks assistant to run tests and they all pass. No bugs found, no decisions made.
+Output:
+{{"diary": "Ran test suite, all tests passed.", "drawers": []}}
 
 ## Conversation to process:
 {transcript}"""
