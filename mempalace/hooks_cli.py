@@ -811,15 +811,25 @@ def hook_stop(data: dict, harness: str):
         if transcript_text and os.environ.get("MEMPAL_RECALL_LLM", "") == "1":
             cwd = data.get("cwd", "")
             try:
-                import threading
-
-                t = threading.Thread(
-                    target=_async_save_worker,
-                    args=(transcript_text, session_id, cwd),
-                    daemon=True,
+                proc = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys, json; "
+                        "d = json.load(sys.stdin); "
+                        "from mempalace.hooks_cli import _async_save_worker; "
+                        "_async_save_worker(d['text'], d['session'], d['cwd'])",
+                    ],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
                 )
-                t.start()
-                _log("async save: spawned background thread")
+                payload = json.dumps(
+                    {"text": transcript_text, "session": session_id, "cwd": cwd or ""}
+                )
+                proc.stdin.write(payload.encode("utf-8"))
+                proc.stdin.close()
+                _log("async save: spawned background process")
             except Exception as e:
                 _log(f"async save: failed to spawn ({e})")
 
