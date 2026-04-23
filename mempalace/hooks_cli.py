@@ -594,7 +594,7 @@ You are a memory librarian for MemPalace. Extract key content from this conversa
 Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→English).
 
 ## Palace Structure
-- **wing**: project or person name, lowercase with underscores (e.g. "mempalace", "paperclip", "solvely_web"). Use "{wing}" as default.
+- **wing**: project or domain name, lowercase with underscores (e.g. "backend_api", "infra_deploy"). Use "{wing}" as default.
 - **room**: topic category. Choose from: decisions, code, configuration, bugs, architecture, general, issues, operations
 - **diary**: natural language summary of the session segment — include specific decisions, file paths, commands, technical details. Not just "discussed X", but WHAT was decided/changed/found.
 - **drawers**: discrete pieces of knowledge worth remembering in future sessions. Each drawer should be self-contained — readable without the conversation context.
@@ -613,23 +613,15 @@ Return ONLY valid JSON:
 
 ## Examples
 
-### Example 1: Configuration discussion (Chinese)
-Conversation: User asks about paperclip tunnel domain, assistant finds it's paperclip.yqbqnn.com via cloudflared
+Input: User asks how to connect to the staging database, assistant provides the connection string and notes it requires VPN.
 Output:
-{{"diary": "查询了 Paperclip 项目的 tunnel 访问域名，确认是 https://paperclip.yqbqnn.com，通过 cloudflared tunnel 暴露。", "drawers": [{{"wing": "paperclip", "room": "configuration", "content": "Paperclip tunnel 域名: https://paperclip.yqbqnn.com (通过 cloudflared tunnel 暴露)"}}]}}
+{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}]}}
 
-### Example 2: Bug fix session (English)
-Conversation: User reports HNSW index bloated to 512GB, assistant traces root cause to duplicate add() calls
+Input: 用户报告搜索接口返回504超时，助手排查发现是缺少索引导致全表扫描，添加了复合索引修复。
 Output:
-{{"diary": "Diagnosed HNSW link_lists.bin bloat (512GB). Root cause: ChromaDB duplicate add() calls before v3.2.0 fix. Deleted bloated directory, rebuilt from SQLite orphan segment.", "drawers": [{{"wing": "mempalace", "room": "bugs", "content": "HNSW link_lists.bin bloat: caused by duplicate add() calls in ChromaDB pre-3.2.0. Fix: delete bloated segment dir, rebuild via scripts/palace_clean_rebuild.py"}}, {{"wing": "mempalace", "room": "code", "content": "Emergency palace rebuild: delete ~/.mempalace/palace/<segment-uuid>/, extract data from SQLite orphan segments, recreate collection with Gemini embedding"}}]}}
+{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}]}}
 
-### Example 3: Personal info (Chinese)
-Conversation: User shares they have three cats named 小柒、小布、小包
-Output:
-{{"diary": "用户分享了个人信息：养了三只猫，名字是小柒、小布和小包。", "drawers": [{{"wing": "general", "room": "general", "content": "用户（郭宝琪）养了三只猫：小柒、小布、小包"}}]}}
-
-### Example 4: Nothing worth saving
-Conversation: User says "继续" and assistant continues previous task
+Input: User says "continue" and assistant continues previous coding task without new decisions.
 Output:
 {{"diary": "", "drawers": []}}
 
@@ -637,7 +629,7 @@ Output:
 {transcript}"""
 
 
-def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=8000):
+def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=100000):
     """Read recent user+assistant exchanges from a JSONL transcript."""
     path = _validate_transcript_path(transcript_path)
     if not path or not path.is_file():
@@ -706,7 +698,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
         wing = Path(cwd).name.lower().replace(" ", "_").replace("-", "_") if cwd else "general"
         prompt = _ASYNC_SAVE_PROMPT.format(wing=wing, transcript=transcript_text)
 
-        response = _call_llm(config, prompt, max_tokens=2000, timeout=30)
+        response = _call_llm(config, prompt, max_tokens=16000, timeout=30)
         if not response:
             _log("async save: LLM returned empty response")
             return
