@@ -1195,8 +1195,10 @@ def hook_userprompt(data: dict, harness: str):
         return (_time.monotonic() - _budget_start) > USERPROMPT_BUDGET_SECONDS
 
     search_query = user_prompt
+    original_query = user_prompt
     if previous_assistant_tail:
         search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
+        original_query = search_query
 
     # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
     llm_config = None
@@ -1267,6 +1269,7 @@ def hook_userprompt(data: dict, harness: str):
     # --- Stage 2: Vector search + BM25 hybrid rank ---
     # Fetch a larger pool when LLM rerank is available
     pool_size = USERPROMPT_RECALL_POOL if llm_config else USERPROMPT_RECALL_LIMIT
+    extra = [original_query] if search_query != original_query else []
     result = _search_via_mcp_socket(
         query=search_query,
         wing=None,
@@ -1286,6 +1289,7 @@ def hook_userprompt(data: dict, harness: str):
                 n_results=pool_size,
                 max_distance=USERPROMPT_MAX_DISTANCE,
                 after=time_after,
+                extra_queries=extra,
             )
         except Exception as e:
             _log(f"WARNING: search_memories failed: {e}")

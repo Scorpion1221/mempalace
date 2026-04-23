@@ -450,6 +450,7 @@ def search_memories(
     max_distance: float = 0.0,
     preferred_wing: str = None,
     after: str = None,
+    extra_queries: list = None,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -489,26 +490,43 @@ def search_memories(
     # When time-filtering, over-fetch more aggressively since most results
     # will be filtered out by the post-search date check.
     over_fetch = n_results * 10 if after else n_results * 6
-    try:
-        dkwargs = {
-            "query_texts": [query],
-            "n_results": over_fetch,
-            "include": ["documents", "metadatas", "distances"],
-        }
-        if where:
-            dkwargs["where"] = where
-        drawer_results = drawers_col.query(**dkwargs)
-    except Exception as e:
-        err_str = str(e)
-        if "embed" in err_str.lower() or "SSL" in err_str or "CERTIFICATE" in err_str:
-            return {"error": f"Embedding error (check MEMPAL_EMBEDDING_MODEL config): {e}"}
-        return {"error": f"Search error: {e}"}
+    per_query_fetch = max(over_fetch // 2, n_results * 3)
 
-    # --- Parallel BM25 keyword retrieval ---
-    # ChromaDB $contains finds docs that vector search may miss.
-    # Extract top keywords from query, fetch matching docs, merge into results.
-    vector_ids = set(_first_or_empty(drawer_results, "ids"))
-    keyword_hits = _keyword_recall(drawers_col, query, where, vector_ids, limit=n_results * 3)
+    all_queries = [query] + (extra_queries or [])
+    all_queries = list(dict.fromkeys(q for q in all_queries if q and q.strip()))
+
+    merged: dict = {}
+
+    for q in all_queries:
+        try:
+            dkwargs = {
+                "query_texts": [q],
+                "n_results": per_query_fetch,
+                "include": ["documents", "metadatas", "distances"],
+            }
+            if where:
+                dkwargs["where"] = where
+            qresults = drawers_col.query(**dkwargs)
+            for did, doc, meta, dist in zip(
+                _first_or_empty(qresults, "ids"),
+                _first_or_empty(qresults, "documents"),
+                _first_or_empty(qresults, "metadatas"),
+                _first_or_empty(qresults, "distances"),
+            ):
+                if did not in merged or dist < merged[did][2]:
+                    merged[did] = (doc, meta, dist)
+        except Exception as e:
+            err_str = str(e)
+            if "embed" in err_str.lower() or "SSL" in err_str or "CERTIFICATE" in err_str:
+                return {"error": f"Embedding error (check MEMPAL_EMBEDDING_MODEL config): {e}"}
+            if not merged:
+                return {"error": f"Search error: {e}"}
+
+    keyword_ids = set(merged.keys())
+    all_keyword_queries = " ".join(all_queries)
+    keyword_hits = _keyword_recall(
+        drawers_col, all_keyword_queries, where, keyword_ids, limit=n_results * 3
+    )
 
     # Gather closet hits (best-per-source) to build a boost lookup.
     closet_boost_by_source: dict = {}  # source_file -> (rank, closet_dist, preview)
@@ -543,11 +561,7 @@ def search_memories(
     CLOSET_DISTANCE_CAP = 1.5  # cosine dist > 1.5 = too weak to use as signal
 
     scored: list = []
-    for doc, meta, dist in zip(
-        _first_or_empty(drawer_results, "documents"),
-        _first_or_empty(drawer_results, "metadatas"),
-        _first_or_empty(drawer_results, "distances"),
-    ):
+    for doc, meta, dist in merged.values():
         # Filter on raw distance before rounding to avoid precision loss.
         if max_distance > 0.0 and dist > max_distance:
             continue
@@ -636,6 +650,6 @@ def search_memories(
     return {
         "query": query,
         "filters": {"wing": wing, "room": room},
-        "total_before_filter": len(_first_or_empty(drawer_results, "documents")),
+        "total_before_filter": len(merged) + len(keyword_hits),
         "results": hits,
     }
