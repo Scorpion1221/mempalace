@@ -710,6 +710,64 @@ def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=10000
     return result
 
 
+def _build_palace_context():
+    """Build a compact summary of existing palace structure for Haiku context."""
+    try:
+        from .config import MempalaceConfig
+        from .palace import get_collection
+
+        cfg = MempalaceConfig()
+        col = get_collection(cfg.palace_path, create=False)
+        total = col.count() if col else 0
+        if total == 0:
+            return ""
+
+        lines = []
+
+        batch = col.get(limit=min(total, 5000), include=["metadatas"])
+        wing_rooms = {}
+        for meta in batch["metadatas"]:
+            if not meta:
+                continue
+            w = meta.get("wing", "")
+            r = meta.get("room", "")
+            if w:
+                wing_rooms.setdefault(w, set())
+                if r:
+                    wing_rooms[w].add(r)
+
+        if wing_rooms:
+            wings_str = ", ".join(
+                f"{w} ({', '.join(sorted(rs)[:5])})" if rs else w
+                for w, rs in sorted(wing_rooms.items())[:10]
+            )
+            lines.append(f"Wings: {wings_str}")
+
+        try:
+            from .knowledge_graph import KnowledgeGraph
+
+            kg = KnowledgeGraph()
+            import sqlite3
+
+            conn = sqlite3.connect(kg.db_path)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT DISTINCT subject FROM triples WHERE valid_to IS NULL "
+                "ORDER BY subject LIMIT 15"
+            )
+            entities = [r[0] for r in cur.fetchall()]
+            conn.close()
+            kg.close()
+            if entities:
+                lines.append(f"KG entities: {', '.join(entities)}")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _async_save_worker(transcript_text, session_id, cwd):
     """Background worker: call Haiku to extract memories, write to palace."""
     try:
@@ -721,7 +779,14 @@ def _async_save_worker(transcript_text, session_id, cwd):
             return
 
         wing = Path(cwd).name.lower().replace(" ", "_").replace("-", "_") if cwd else "general"
+
+        palace_context = _build_palace_context()
         prompt = _ASYNC_SAVE_PROMPT.format(wing=wing, transcript=transcript_text)
+        if palace_context:
+            prompt = prompt.replace(
+                "## Conversation to process:",
+                f"## Current Palace State (reuse existing wings/rooms/entities when possible):\n{palace_context}\n\n## Conversation to process:",
+            )
 
         response = _call_llm(config, prompt, max_tokens=16000, timeout=30)
         if not response:
