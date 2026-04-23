@@ -1306,10 +1306,10 @@ def hook_userprompt(data: dict, harness: str):
 
     hits = result.get("results", []) if isinstance(result, dict) else []
 
-    # Filter out diary entries — session logs are compact summaries that
-    # pollute auto-recall results. Agents can still find diary content
-    # via explicit mempalace_search tool calls.
-    hits = [h for h in hits if h.get("room") != "diary"]
+    # Note: diary entries are NOT filtered out. Previously we filtered them
+    # as "session logs", but Haiku async save now stores valuable personal
+    # facts (e.g. "user has three cats") as diary entries too. Let the
+    # reranker decide — it correctly identifies relevance.
 
     if not hits:
         _log("UserPrompt recall: no hits")
@@ -1317,7 +1317,10 @@ def hook_userprompt(data: dict, harness: str):
         return
 
     # --- Stage 3: LLM rerank + relevance filter ---
-    if llm_config and len(hits) > USERPROMPT_RECALL_LIMIT and not _budget_exceeded():
+    # Always rerank when LLM is available — even small hit sets may contain
+    # noise. The reranker filters out irrelevant matches (e.g. drawers that
+    # mention the keyword as a technical example, not as actual content).
+    if llm_config and len(hits) >= 1 and not _budget_exceeded():
         try:
             reranked = rerank(
                 user_prompt,  # use original prompt for relevance judgment
