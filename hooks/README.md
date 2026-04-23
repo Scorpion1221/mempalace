@@ -6,10 +6,11 @@ These hook scripts make MemPalace save automatically. No manual "save" commands 
 
 | Hook | When It Fires | What Happens |
 |------|--------------|-------------|
-| **Save Hook** | Every 15 human messages | Auto-mines transcript (tool output included), then blocks the AI to save topics/decisions/quotes |
-| **PreCompact Hook** | Right before context compaction | Auto-mines transcript, then emergency save — forces the AI to save EVERYTHING before losing context |
+| **Save Hook** | Every stop with new exchanges | Spawns async Haiku subprocess to extract diary + drawers + KG facts from transcript |
+| **PreCompact Hook** | Right before context compaction | Returns `{}` (non-blocking). Memory saving is handled by the async save on the preceding stop. |
+| **UserPromptSubmit Hook** | Every user message | Searches palace (via MCP socket hot path) and injects relevant memories as `<mempalace-recall>` context |
 
-**Two-layer capture:** Hooks auto-mine the JSONL transcript directly into the palace (capturing raw tool output — Bash results, search findings, build errors). They also block the AI with a reason message telling it to save verbatim tool output and key context. Belt and suspenders — tool output gets stored even if the AI summarizes instead of quoting.
+**Async Haiku save:** The save hook reads recent transcript exchanges, calls Haiku to extract structured content (diary summary, knowledge drawers, KG facts), and writes directly to the palace via Python API. Zero conversation interruption. Set `MEMPAL_VERBOSE=true` for old blocking behavior.
 
 ## Install — Claude Code
 

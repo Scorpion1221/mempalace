@@ -166,9 +166,24 @@ Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist &&
 When `MEMPAL_RECALL_LLM=1` is set, every `UserPromptSubmit` hook goes through:
 
 1. **Local fast-path** — Instant skip for obvious cases (continuations like "继续补", confirmations like "好的", execution commands like "run tests"). Zero API cost.
-2. **LLM decide + rewrite** (Claude Haiku, ~200 tokens) — Decides whether memory recall is needed. If yes, rewrites the query in the user's language for optimal vector search. Uses 3 prioritized rules + 14 few-shot examples.
-3. **Vector search + BM25 hybrid ranking** — Searches the palace with the rewritten query.
-4. **LLM rerank** (Claude Haiku, ~50 tokens) — Selects the most relevant results from the candidate pool, filtering noise.
+2. **LLM decide + rewrite** (Claude Haiku, ~200 tokens) — Decides whether memory recall is needed. If yes, rewrites the query in the user's language for optimal vector search.
+3. **Multi-query search** — Searches with BOTH original query AND rewritten query in parallel (prevents rewrite failures from losing exact matches), plus keyword `$contains` retrieval.
+4. **BM25 hybrid ranking** — Runs on the FULL candidate pool from all three retrieval paths before truncation.
+5. **LLM rerank** (Claude Haiku, ~50 tokens) — Selects the most relevant results, filtering noise.
+6. **KG enrichment** — Queries knowledge graph for entities in results and user query, injects temporal facts.
+
+### How Async Haiku Save Works
+
+Stop hook no longer blocks the conversation. Instead, it spawns a background subprocess that:
+
+1. **Reads recent exchanges** from the JSONL transcript (since last save, up to 100K chars)
+2. **Injects palace context** — current wings/rooms, recent saves (for dedup), KG entities
+3. **Calls Haiku** — with 8 diverse few-shot examples covering config, bugs, architecture, code, CI/CD, tech selection, Chinese/English
+4. **Writes diary** — natural language session summary under the project wing
+5. **Writes drawers** — each tagged with auto-detected hall (facts/events/discoveries/preferences/advice)
+6. **Writes KG facts** — entity-relationship triples with auto-invalidation of stale facts
+
+Triggers on every stop with new exchanges. Cost: ~$0.001/save. Set `MEMPAL_VERBOSE=true` for old blocking behavior.
 
 Total LLM cost per user turn (when recall is triggered): ~250 Haiku tokens ≈ $0.00006.
 Turns that don't need recall (continuations, code tasks, etc.) cost zero — the local fast-path or LLM gate skips them.
@@ -194,12 +209,39 @@ Turns that don't need recall (continuations, code tasks, etc.) cost zero — the
 
 **Auto-recall hooks for Claude Code and Codex** — `UserPromptSubmit` hook automatically searches the palace and injects relevant memories into the conversation context.
 
+**Async Haiku-powered save (non-blocking)** — Stop hook spawns a background subprocess that calls Haiku to extract diary + drawers + KG facts from the transcript. Zero conversation interruption, ~$0.001/save.
+
+- 8 diverse few-shot examples (Chinese/English, config/bugs/architecture/code/CI-CD/tech-selection)
+- Auto-detects hall category per drawer via `detect_hall()`
+- Injects current palace state (wings/rooms/recent saves/KG entities) as context for dedup
+- Auto-invalidates stale KG facts when the same subject+predicate gets a new object value
+- Triggers on every stop with new exchanges (configurable via `MEMPAL_SAVE_INTERVAL`)
+- `MEMPAL_VERBOSE=true` restores old blocking behavior for debugging
+
+**MCP Unix socket for hooks** — MCP server listens on `~/.mempalace/mcp.sock` alongside stdio. UserPromptSubmit hook tries socket first (hot HNSW cache, <1s), falls back to cold search (5s+).
+
+**Multi-query search** — `search_memories()` accepts `extra_queries` for parallel vector retrieval. When LLM rewrites a query, both original and rewritten versions run as separate searches, merged by ID (best distance wins). Prevents rewrite failures from losing exact matches.
+
+**Parallel keyword recall** — ChromaDB `$contains` full-text search runs alongside vector retrieval, catching exact keyword matches that vector similarity might miss. All paths merge into a single BM25 hybrid ranking pool.
+
+**KG extraction in Haiku save** — Stop hook now writes entity-relationship facts to the knowledge graph. Predicates use a standard vocabulary guided by examples. Auto-invalidation ensures updated facts (e.g. domain change) mark old values as expired.
+
+**KG-enriched recall** — Search results are augmented with knowledge graph facts. Queries both outgoing and incoming relationships for entities found in results and user query keywords. Only current facts (valid_to IS NULL) are included.
+
+**Content-level noise filter** — `is_noise_content()` detects framework JSON markers in the first 400 chars. Wired into both `miner.py` and `convo_miner.py` chunk pipelines. `NORMALIZE_VERSION` bumped to 3.
+
 ### Bug Fixes
 
 - **UserPromptSubmit hook pipe error** — Replaced `INPUT=$(cat)` + `echo "$INPUT" | python3 -m mempalace hook run` pattern with `run_mempalace_hook()` wrapper that inherits stdin directly (matching stop/precompact hooks). Fixes intermittent `line 6: Done echo "$INPUT"` non-blocking errors in Claude Code hook environment.
 - **sync-plugins.sh hardcoded version** — Replaced `CLAUDE_CACHE="...3.3.0"` with dynamic resolution from `installed_plugins.json`, preventing version drift when the plugin is upgraded past the hardcoded path.
+- **sync-plugins.sh missing Codex files** — Now syncs `plugin.json` and `hooks.json` for Codex (previously only synced `.sh` hook scripts).
 - **Concurrent single-text calls for OpenAI-compat embedding proxy** — LiteLLM's Vertex AI embedding proxy doesn't support batch input; embedding module now uses 10-thread concurrent single-text requests as a workaround.
 - **Rebuild MCP collection cache when embedding function becomes available** — Prevents stale cache from serving results with the wrong embedding dimensions after switching models.
+- **repair.py now rebuilds closets collection** — Previously only handled `mempalace_drawers`, leaving `mempalace_closets` with stale embedding dimensions after switching models.
+- **tool-results/ noise ingestion** — Added `tool-results` to `SKIP_DIRS` — 68% of palace drawers were raw tool output from `~/.claude/projects/*/tool-results/` that drowned out real memories.
+- **Auto-mine removed from hooks** — Stop and PreCompact hooks no longer auto-mine JSONL transcripts. Valuable content is saved via Haiku async save and explicit MCP tool calls. Auto-mining was the primary source of noise in the palace.
+- **BM25 reranking before truncation** — `_hybrid_rank()` now runs on the full candidate pool before `scored[:n_results]` truncation. Previously BM25 could only reorder within the already-truncated vector top-K, missing keyword-relevant results.
+- **MCP server test fixtures** — Properly patched `_get_collection`, `_client_cache`, `_collection_cache`, and `_palace_db_inode/mtime` in test fixtures. Fixed 5 pre-existing test failures (update_drawer, diary_write, cache_invalidation).
 
 ### Improvements
 
@@ -211,8 +253,10 @@ Turns that don't need recall (continuations, code tasks, etc.) cost zero — the
 - **Hook hardening** — 15s internal budget timer, fail-closed with history-keyword fallback, system prompt detection (skips Codex title generation), save-checkpoint noise filtering for previous-assistant cache.
 - **Proxy support** — Gemini embedding supports `HTTPS_PROXY` / `ALL_PROXY` for regions where the API is blocked.
 - **Startup diagnostics** — Embedding probe at first use detects SSL cert errors, region blocks, and API key issues with actionable fix messages.
-- **One-command plugin sync** — `bash scripts/sync-plugins.sh` updates all 3 agents (Claude Code, Codex, Hermes) in one command.
+- **One-command plugin sync** — `bash scripts/sync-plugins.sh` updates all 3 agents (Claude Code, Codex, Hermes) in one command. Dynamically resolves Claude plugin cache path.
 - **Test isolation** — `conftest.py` strips `MEMPAL_EMBEDDING_MODEL` and `MEMPAL_RECALL_LLM` so tests always use the default local model.
+- **Recall format enriched** — Each hit now includes creation date. KG facts for related entities are appended as `[KG]` lines.
+- **over_fetch increased** — Vector candidate pool from `n_results*3` to `n_results*6`, giving BM25 a larger pool to reorder.
 
 ### Troubleshooting
 
