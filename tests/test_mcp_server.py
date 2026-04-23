@@ -19,6 +19,10 @@ def _patch_mcp_server(monkeypatch, config, kg):
 
     monkeypatch.setattr(mcp_server, "_config", config)
     monkeypatch.setattr(mcp_server, "_kg", kg)
+    monkeypatch.setattr(mcp_server, "_client_cache", None)
+    monkeypatch.setattr(mcp_server, "_collection_cache", None)
+    monkeypatch.setattr(mcp_server, "_palace_db_inode", 0)
+    monkeypatch.setattr(mcp_server, "_palace_db_mtime", 0.0)
 
 
 def _get_collection(palace_path, create=False):
@@ -582,7 +586,15 @@ class TestWriteTools:
         from mempalace import mcp_server
         from mempalace.mcp_server import tool_update_drawer, tool_get_drawer
 
-        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: seeded_collection)
+        col = mcp_server._get_collection(create=True)
+        # Seed the MCP collection with test data
+        col.add(
+            ids=["drawer_proj_backend_aaa"],
+            documents=["Old auth content."],
+            metadatas=[{"wing": "project", "room": "backend", "source_file": "auth.py",
+                        "chunk_index": 0, "added_by": "test", "filed_at": "2026-01-01"}],
+        )
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: col)
 
         result = tool_update_drawer(
             "drawer_proj_backend_aaa", content="Updated content about auth."
@@ -675,9 +687,11 @@ class TestKGTools:
 class TestDiaryTools:
     def test_diary_write_and_read(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        from mempalace import mcp_server
         from mempalace.mcp_server import tool_diary_write, tool_diary_read
+
+        col = mcp_server._get_collection(create=True)
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: col)
 
         w = tool_diary_write(
             agent_name="TestAgent",
@@ -694,9 +708,11 @@ class TestDiaryTools:
 
     def test_diary_read_empty(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
+        from mempalace import mcp_server
         from mempalace.mcp_server import tool_diary_read
+
+        col = mcp_server._get_collection(create=True)
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: col)
 
         r = tool_diary_read(agent_name="Nobody")
         assert r["entries"] == []
@@ -705,10 +721,11 @@ class TestDiaryTools:
         self, monkeypatch, config, palace_path, kg
     ):
         _patch_mcp_server(monkeypatch, config, kg)
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
 
         from mempalace import mcp_server
+
+        col = mcp_server._get_collection(create=True)
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: col)
 
         class FrozenDateTime:
             calls = [
@@ -755,39 +772,34 @@ class TestCacheInvalidation:
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace import mcp_server
 
-        # Create a real collection so _get_collection succeeds
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
-
-        # Prime the cache
-        col1 = mcp_server._get_collection()
+        col1 = mcp_server._get_collection(create=True)
         assert col1 is not None
 
-        # Simulate an external write changing the mtime
         old_mtime = mcp_server._palace_db_mtime
         monkeypatch.setattr(mcp_server, "_palace_db_mtime", old_mtime - 10.0)
 
-        # _get_collection should detect the mtime drift and reconnect
-        col2 = mcp_server._get_collection()
+        # Reconnect should invalidate and rebuild the cache
+        col2 = mcp_server._get_collection(create=True)
         assert col2 is not None
+        # Cache was rebuilt — collection_cache was set to None by _get_client,
+        # then recreated, so it should be a fresh object
+        assert mcp_server._palace_db_mtime != old_mtime - 10.0
 
     def test_inode_change_invalidates_cache(self, monkeypatch, config, palace_path, kg):
         """When inode changes (file replaced), the cached collection should be replaced."""
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace import mcp_server
 
-        _client, _col = _get_collection(palace_path, create=True)
-        del _client
-
-        # Prime the cache
-        col1 = mcp_server._get_collection()
+        col1 = mcp_server._get_collection(create=True)
         assert col1 is not None
 
-        # Simulate a rebuild that changes the inode
-        monkeypatch.setattr(mcp_server, "_palace_db_inode", 99999)
+        # Forge a stale inode to trigger reconnect on next call
+        mcp_server._palace_db_inode = 99999
 
-        col2 = mcp_server._get_collection()
+        col2 = mcp_server._get_collection(create=True)
         assert col2 is not None
+        # After reconnect, inode was updated to the real DB inode
+        assert mcp_server._palace_db_inode != 99999
 
     @pytest.mark.skipif(
         sys.platform == "win32",
