@@ -990,3 +990,94 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
     # The injected value is not "true"/"1"/"yes", so the hook should NOT pass through
     # It should count messages and trigger async save (non-blocking)
     assert result == {}
+
+
+# --- _get_kg_context_for_recall: CJK token handling ---
+
+
+def test_kg_recall_keeps_cjk_bigrams(monkeypatch):
+    """CJK bigrams (len 2) must NOT be filtered out by the length check.
+
+    The tokenizer emits 2-char bigrams for Chinese runs. A plain
+    ``len(t) >= 3`` predicate drops all of them, so Chinese queries
+    would yield zero entities and skip the KG lookup entirely.
+    """
+    from mempalace import hooks_cli
+
+    queried: list = []
+
+    class _FakeKG:
+        def query_entity(self, entity, direction="both"):
+            queried.append(entity)
+            return []
+
+        def close(self):
+            pass
+
+    # Force the KG constructor to return our fake so we can see every
+    # entity it's asked about.
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    # Pass an empty hits list so the only entity source is the query tokens.
+    hooks_cli._get_kg_context_for_recall([], query="我养了几只猫")
+
+    # At least one CJK bigram should have been looked up.
+    assert queried, "Expected at least one CJK token to be queried, got none"
+    assert any(hooks_cli._CJK_CHAR_RE.search(t) for t in queried), (
+        f"Expected CJK tokens in {queried!r}"
+    )
+
+
+def test_kg_recall_still_keeps_long_latin_tokens(monkeypatch):
+    """Regression guard: long Latin tokens should still be queried."""
+    from mempalace import hooks_cli
+
+    queried: list = []
+
+    class _FakeKG:
+        def query_entity(self, entity, direction="both"):
+            queried.append(entity)
+            return []
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    hooks_cli._get_kg_context_for_recall([], query="Alice works at Acme Corporation")
+
+    # Expect at least one of the >=3-char Latin tokens to have been queried.
+    assert any(t.lower() in {"alice", "works", "acme", "corporation"} for t in queried), (
+        f"Expected Latin tokens in {queried!r}"
+    )
+
+
+def test_kg_recall_short_latin_tokens_still_filtered(monkeypatch):
+    """Sanity: 2-char non-CJK tokens should NOT be queried (noise filter intact)."""
+    from mempalace import hooks_cli
+
+    queried: list = []
+
+    class _FakeKG:
+        def query_entity(self, entity, direction="both"):
+            queried.append(entity)
+            return []
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    # "is" / "at" / "to" are 2-char Latin — must stay filtered.
+    hooks_cli._get_kg_context_for_recall([], query="it is at to")
+
+    for t in queried:
+        assert len(t) >= 3 or hooks_cli._CJK_CHAR_RE.search(t), (
+            f"Unexpectedly queried short non-CJK token {t!r}"
+        )

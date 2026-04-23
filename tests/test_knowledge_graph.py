@@ -137,3 +137,39 @@ class TestStats:
         assert stats["triples"] == 5
         assert stats["current_facts"] == 4  # 1 expired (Acme Corp)
         assert stats["expired_facts"] == 1
+
+
+class TestEntityIdNormalization:
+    """NFKC normalization in _entity_id — multilingual hygiene."""
+
+    def test_fullwidth_and_halfwidth_latin_collapse(self, kg):
+        # U+FF21..U+FF3A (full-width A–Z) should NFKC-fold to ASCII A–Z.
+        assert kg._entity_id("ＡＢＣ") == kg._entity_id("ABC")
+
+    def test_fullwidth_digits_collapse(self, kg):
+        # Full-width digits should fold to ASCII digits.
+        assert kg._entity_id("１２３") == kg._entity_id("123")
+
+    def test_simplified_chinese_stable(self, kg):
+        # Already-normalized simplified Chinese should round-trip to itself.
+        assert kg._entity_id("张三") == kg._entity_id("张三")
+        # And should not be empty.
+        assert kg._entity_id("张三") == "张三"
+
+    def test_combining_marks_normalized(self, kg):
+        # "é" can be a single NFC char (U+00E9) or e + combining acute (U+0065 U+0301).
+        # NFKC composes them into the same form.
+        assert kg._entity_id("café") == kg._entity_id("café")
+
+    def test_space_and_apostrophe_still_stripped(self, kg):
+        # Regression guard — existing transformations still apply after NFKC.
+        assert kg._entity_id("Dr. O'Brien") == "dr._obrien"
+
+    def test_fullwidth_entity_round_trips_in_triples(self, kg):
+        # End-to-end: adding a triple with full-width and querying with
+        # half-width should find the same entity.
+        kg.add_triple("ＡＢＣ", "is", "company")
+        results = kg.query_entity("ABC", direction="outgoing")
+        assert any(r["predicate"] == "is" and r["object"] == "company" for r in results), (
+            f"Expected to find the triple under the half-width name, got {results!r}"
+        )

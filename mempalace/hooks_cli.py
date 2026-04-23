@@ -19,6 +19,11 @@ SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "3"))
 SAVE_MIN_MESSAGES = int(os.environ.get("MEMPAL_SAVE_MIN_MESSAGES", "3"))
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 
+# Matches any CJK character (Chinese, Japanese kana, Korean hangul syllables).
+# Used so the KG recall path keeps 2-char CJK bigrams from ``_tokenize``,
+# which would otherwise be dropped by a plain ``len(t) >= 3`` filter.
+_CJK_CHAR_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
+
 # UserPromptSubmit recall settings
 USERPROMPT_RECALL_LIMIT = 5
 USERPROMPT_RECALL_POOL = 10  # over-fetch for LLM reranking
@@ -1118,12 +1123,16 @@ def _get_kg_context_for_recall(hits, query=""):
 
     # Fallback: long-token match (primarily helps English queries where the
     # user typed a word that isn't yet an entity — we still try a lookup).
+    # CJK queries: keep any token containing a CJK char even if it's only
+    # 2 chars (bigram), so Chinese queries don't fall through with zero
+    # entities. Without this check, the tokenizer's CJK bigrams (all len=2)
+    # would be silently dropped by the len>=3 filter.
     if not entities:
         from .searcher import _tokenize
 
         tokens = _tokenize(query)
         for t in tokens:
-            if len(t) >= 3 and t.lower() not in seen_entities:
+            if (_CJK_CHAR_RE.search(t) or len(t) >= 3) and t.lower() not in seen_entities:
                 seen_entities.add(t.lower())
                 entities.append(t)
             if len(entities) >= 6:

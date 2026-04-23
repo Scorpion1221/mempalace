@@ -40,6 +40,7 @@ import json
 import os
 import sqlite3
 import threading
+import unicodedata
 from datetime import date, datetime
 from pathlib import Path
 
@@ -129,7 +130,12 @@ class KnowledgeGraph:
                 self._connection = None
 
     def _entity_id(self, name: str) -> str:
-        return name.lower().replace(" ", "_").replace("'", "")
+        # NFKC folds full-width to half-width and composes characters
+        # consistently, so "ＡＢＣ" and "ABC" (and other compat-equivalent
+        # forms) map to the same id. Does NOT do Traditional↔Simplified
+        # Chinese conversion — that would require opencc and is out of scope.
+        normalized = unicodedata.normalize("NFKC", name)
+        return normalized.lower().replace(" ", "_").replace("'", "")
 
     # ── Read helpers ──────────────────────────────────────────────────────
 
