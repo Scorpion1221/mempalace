@@ -35,6 +35,7 @@ SKIP_DIRS = {
     ".eggs",
     "htmlcov",
     "target",
+    "tool-results",
 }
 
 _DEFAULT_BACKEND = ChromaBackend()
@@ -57,6 +58,7 @@ def _reset_embedding_cache():
     """Reset the embedding function cache. Used in tests."""
     global _embedding_fn_cache
     _embedding_fn_cache = "UNSET"
+
 
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
