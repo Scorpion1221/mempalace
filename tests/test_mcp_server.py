@@ -579,7 +579,10 @@ class TestWriteTools:
 
     def test_update_drawer_content(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace import mcp_server
         from mempalace.mcp_server import tool_update_drawer, tool_get_drawer
+
+        monkeypatch.setattr(mcp_server, "_get_collection", lambda create=True: seeded_collection)
 
         result = tool_update_drawer(
             "drawer_proj_backend_aaa", content="Updated content about auth."
