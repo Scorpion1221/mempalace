@@ -1098,8 +1098,8 @@ def test_async_save_prompt_requires_predicate_language_consistency():
     assert "使用" in _ASYNC_SAVE_PROMPT
     assert "修复" in _ASYNC_SAVE_PROMPT
 
-    # The "养有" few-shot example is present
-    assert "养有" in _ASYNC_SAVE_PROMPT
+    # The Chinese personal-fact few-shot uses Chinese predicates (e.g. 居住于 / 就职于)
+    assert "居住于" in _ASYNC_SAVE_PROMPT
 
     # The prompt must still be a valid Python format string with {wing}/{transcript}
     formatted = _ASYNC_SAVE_PROMPT.format(wing="test_wing", transcript="sample")
@@ -1117,13 +1117,13 @@ def test_get_palace_kg_entities_returns_top_entities_by_triple_count(monkeypatch
 
     db_path = str(tmp_path / "kg.sqlite3")
     kg = KnowledgeGraph(db_path=db_path)
-    # 小柒 participates in 3 triples; 三只猫 in 2; 单飞 in 1.
-    kg.add_triple("小柒", "is_a", "cat")
-    kg.add_triple("小柒", "lives_with", "user")
-    kg.add_triple("user", "owns", "小柒")
-    kg.add_triple("三只猫", "includes", "小柒")
-    kg.add_triple("三只猫", "lives_at", "home")
-    kg.add_triple("单飞", "is_a", "cat")
+    # alpha_project participates in 3 triples; beta_stack in 2; gamma_tool in 1.
+    kg.add_triple("alpha_project", "uses", "python")
+    kg.add_triple("alpha_project", "depends_on", "beta_stack")
+    kg.add_triple("user", "works_on", "alpha_project")
+    kg.add_triple("beta_stack", "includes", "alpha_project")
+    kg.add_triple("beta_stack", "hosted_at", "aws")
+    kg.add_triple("gamma_tool", "is_a", "cli")
     kg.close()
 
     # Patch the lazy import inside _get_palace_kg_entities so it points at our temp DB.
@@ -1135,11 +1135,11 @@ def test_get_palace_kg_entities_returns_top_entities_by_triple_count(monkeypatch
     monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
 
     names = hooks_cli._get_palace_kg_entities(limit=10)
-    assert "小柒" in names
-    assert "三只猫" in names
-    assert "单飞" in names
-    # 小柒 should rank first (most triples).
-    assert names[0] == "小柒"
+    assert "alpha_project" in names
+    assert "beta_stack" in names
+    assert "gamma_tool" in names
+    # alpha_project should rank first (most triples).
+    assert names[0] == "alpha_project"
 
 
 def test_get_palace_kg_entities_skips_expired_triples(monkeypatch, tmp_path):

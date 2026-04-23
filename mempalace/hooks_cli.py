@@ -655,9 +655,9 @@ Input: 用户和助手讨论了项目的技术选型，最终选择了 Next.js +
 Output:
 {{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}], "kg": [{{"subject": "{wing}", "predicate": "tech_stack", "object": "Next.js + tRPC + Prisma + PostgreSQL"}}]}}
 
-Input: 用户说自己有三只猫，名字叫小柒、小布、小包。
+Input: 用户说自己在北京生活了五年，目前在一家叫 Acme 的公司做高级工程师。
 Output:
-{{"diary": "用户提供个人信息：拥有三只猫，名字分别是小柒、小布、小包。", "drawers": [{{"wing": "{wing}", "room": "diary", "content": "用户养有三只猫：小柒、小布、小包"}}], "kg": [{{"subject": "用户", "predicate": "养有", "object": "三只猫"}}, {{"subject": "用户", "predicate": "拥有", "object": "小柒"}}, {{"subject": "用户", "predicate": "拥有", "object": "小布"}}, {{"subject": "用户", "predicate": "拥有", "object": "小包"}}]}}
+{{"diary": "用户提供个人信息：在北京生活 5 年，在 Acme 公司任高级工程师。", "drawers": [{{"wing": "{wing}", "room": "diary", "content": "用户现居北京，已 5 年；就职于 Acme 公司，职位高级工程师"}}], "kg": [{{"subject": "用户", "predicate": "居住于", "object": "北京"}}, {{"subject": "用户", "predicate": "就职于", "object": "Acme"}}, {{"subject": "用户", "predicate": "职位", "object": "高级工程师"}}]}}
 
 Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
@@ -1246,7 +1246,8 @@ def _get_palace_kg_entities(limit: int = 60) -> list[str]:
 
     Used to feed the recall gate so it can rewrite user queries to include
     canonical entity names already in the palace, boosting both vector and
-    KG recall (e.g. "小柒怎么样" → "小柒 状态" when "小柒" is a known entity).
+    KG recall (e.g. user mentions "the prod gateway" → query is rewritten to
+    include "auth-gateway-prod" verbatim when that's the canonical entity name).
 
     Returns empty list on any failure — this is best-effort context, never
     a hard requirement.
@@ -1440,7 +1441,7 @@ def hook_userprompt(data: dict, harness: str):
             # Build active context: cwd + palace taxonomy (rooms/halls) + top
             # KG entities, so the gate can pick valid filter values AND rewrite
             # the query to echo canonical entity names when the user implicitly
-            # references one ("小柒怎么样" → include "小柒").
+            # references one.
             active_ctx = _build_active_context(cwd, palace_path)
             taxonomy = active_ctx.get("palace") if isinstance(active_ctx, dict) else {}
             recall_decision = decide_recall(

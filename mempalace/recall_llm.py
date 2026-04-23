@@ -517,7 +517,7 @@ Rules (in priority order — earlier rules override later ones):
   - 1d. Proximal references to current-thread content: "这个报错怎么修", "那个函数怎么改" — when there is no history keyword, "这个/那个/this/that" refers to something in the current thread.
   - These ALL refer to the CURRENT conversation thread. Shortness or ambiguity is NOT a reason to recall — it means the user expects the assistant to use in-thread context.
   - EXCEPTION A — override to should_recall=true if the message contains EXPLICIT history-referencing words: "之前", "上次", "上回", "以前", "当时", "那时候", "还记得", "earlier", "last time", "previous", "remember", "prior", "history", "historically"
-  - EXCEPTION B — override to should_recall=true if the message is a PERSONAL-FACT QUERY about the user themselves (ownership, relationships, identity, biography, preferences stored as facts). Patterns: "我有/我养/我家/我住/我的 X ... (几/多少/什么/叫/是/在哪)" or English "how many X do I have / what is my Y / where do I Z". Even if the same fact was mentioned earlier in this thread, memory is the canonical source and the user may be verifying storage.
+  - EXCEPTION B — override to should_recall=true if the message is a PERSONAL-FACT QUERY about the user themselves or their stable context (identity, biography, relationships, possessions, preferences, habitual locations, roles). The defining trait is that the answer is a specific fact the palace would have stored, not reasoning the assistant can do from thread context. Questions of this shape almost always warrant a memory lookup — even when the same fact was discussed earlier in this thread, memory is the canonical source and the user may be verifying storage or expecting a stored-version answer.
 - RULE 2 — "should_recall": false for self-contained tasks:
   - direct code execution, inspection, file operations ("run the tests", "帮我把这个函数改成async")
   - text transformation, formatting, translation, summarization ("翻译成英文")
@@ -535,15 +535,14 @@ Query rewrite rules (only when should_recall is true):
 - Preserve proper nouns EXACTLY (project names, tool names, people names) in their original form.
 - For mixed-language content, keep the dominant language and preserve technical terms as-is (e.g. "recall gate 中文继续消息误判" is fine — don't translate to pure English or pure Chinese).
 - If the PREVIOUS ASSISTANT MESSAGE TAIL contains entity names or specifics that the user's message references implicitly, include them in the query. E.g. user says "那个bug修了吗", assistant tail mentions "auth middleware session leak" → query should be "auth middleware session leak bug修复状态", mixing languages as needed for best retrieval.
-- Entity expansion: if the user's query mentions OR implicitly refers to any entity from the ACTIVE CONTEXT entity list, include that entity name VERBATIM in the rewritten query. This boosts both vector recall and KG matching. Examples: user "小柒怎么样" + entity list contains "小柒" → query "小柒 状态"; user "my daughter" + entity list contains "Riley" → query "Riley daughter". Never invent entity names that aren't in the list — only echo what's there.
-- Entity expansion: if the user's query mentions OR implicitly refers to any entity from the ACTIVE CONTEXT entity list, include that entity name VERBATIM in the rewritten query. This boosts both vector recall and KG matching. Examples: user "小柒怎么样" + entity list contains "小柒" → query "小柒 状态"; user "我家狗" + entity list contains "Buddy" → query "Buddy 狗 现状". Never invent entity names that aren't in the list — only echo what's there.
+- Entity expansion: if the user's query mentions OR implicitly refers to any entity from the ACTIVE CONTEXT entity list, include that entity name VERBATIM in the rewritten query. This boosts both vector recall and KG matching. The entity list is the source of truth — only echo names that are in it; never invent. Pattern: paraphrase plus the canonical name (e.g. user "the staging api" + entity list contains "auth-gateway-staging" → query "auth-gateway-staging staging api").
 - Max 200 chars. Remove filler words but keep semantic structure.
 - "query": if should_recall is false, output null.
 
 Filter selection rules (output goes in "filters"):
 - Use "filters" to narrow the search BEFORE ranking. Values must come from ACTIVE CONTEXT's palace taxonomy — never invent room or hall names the palace doesn't actually have. If unsure, leave a field null.
 - Strong mapping by question type:
-  - Personal facts about the user (RULE 3e / EXCEPTION B): prefer hall="hall_diary" if that hall exists in the taxonomy; otherwise prefer room="diary" if present. This filter excludes technical meta-discussion drawers that mention the user's exact words.
+  - Personal facts about the user (RULE 3e / EXCEPTION B): prefer hall="hall_diary" if that hall exists in the taxonomy; otherwise prefer room="diary" if present. Personal-fact halls/rooms isolate biographical content from technical drawers, sharply improving precision.
   - Past decisions / architecture / "what approach did we pick": prefer room="decisions" or room="architecture" if present.
   - Bug history / incidents / error recurrence: prefer room="bugs" if present.
   - Deployment / configuration / ops: prefer room="configuration" or room="operations" if present.
@@ -565,13 +564,13 @@ Examples (user message → expected output):
 "帮我把这个函数改成async" → {{"should_recall":false,"reason":"direct_code_task","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
 "这个报错怎么修" → {{"should_recall":false,"reason":"proximal_reference_current_thread","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
 "翻译成英文" → {{"should_recall":false,"reason":"text_transformation","query":null,"after":null,"filters":{{"room":null,"hall":null}}}}
-"我养了几只猫？" → {{"should_recall":true,"reason":"personal_fact_query","query":"养猫 数量","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
-"我家狗叫什么名字" → {{"should_recall":true,"reason":"personal_fact_query","query":"家狗 名字","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
-"how many cats do I have" → {{"should_recall":true,"reason":"personal_fact_query","query":"cat count pets","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
+"我老婆生日是哪天" → {{"should_recall":true,"reason":"personal_fact_query","query":"配偶 生日","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
+"我现在住在哪个城市" → {{"should_recall":true,"reason":"personal_fact_query","query":"居住 城市","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
+"what is my employee id" → {{"should_recall":true,"reason":"personal_fact_query","query":"employee id number","after":null,"filters":{{"room":"diary","hall":"hall_diary"}}}}
 "我们之前决定用什么方案来做缓存的" → {{"should_recall":true,"reason":"past_decision_reference","query":"之前缓存方案决策","after":null,"filters":{{"room":"decisions","hall":null}}}}
 "昨天那个bug修了吗" → {{"should_recall":true,"reason":"past_work_status","query":"昨天bug修复状态","after":"{yesterday}","filters":{{"room":"bugs","hall":null}}}}
-"Hermes的飞书网关是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"Hermes飞书网关实现","after":null,"filters":{{"room":"architecture","hall":null}}}}
-"Berlin 的房子怎么了" (with entity list including "Berlin", "house") → {{"should_recall":true,"reason":"entity_status_query","query":"Berlin house 状态","after":null,"filters":{{"room":null,"hall":null}}}}
+"feishu-gateway 是怎么实现的" → {{"should_recall":true,"reason":"cross_project_query","query":"feishu-gateway 实现","after":null,"filters":{{"room":"architecture","hall":null}}}}
+"the staging api 最近有什么变动" (with entity list including "auth-gateway-staging") → {{"should_recall":true,"reason":"entity_status_query","query":"auth-gateway-staging staging api 变动","after":null,"filters":{{"room":null,"hall":null}}}}
 "上次那个部署脚本放哪了" → {{"should_recall":true,"reason":"past_session_reference","query":"上次部署脚本位置","after":null,"filters":{{"room":"operations","hall":null}}}}
 "where did we put the deploy script last time" → {{"should_recall":true,"reason":"past_session_reference","query":"deploy script location last time","after":null,"filters":{{"room":"operations","hall":null}}}}
 
