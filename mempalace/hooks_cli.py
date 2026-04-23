@@ -894,6 +894,16 @@ def _async_save_worker(transcript_text, session_id, cwd):
                     pred = fact.get("predicate", "")
                     obj = fact.get("object", "")
                     if subj and pred and obj:
+                        existing = kg.query_entity(subj, direction="outgoing")
+                        for old in existing:
+                            if (
+                                old.get("predicate") == pred
+                                and old.get("object") != obj
+                                and old.get("valid_to") is None
+                            ):
+                                kg.invalidate(
+                                    subj, pred, old["object"], ended=now.strftime("%Y-%m-%d")
+                                )
                         kg.add_triple(subj, pred, obj, valid_from=now.strftime("%Y-%m-%d"))
                         kg_written += 1
                 kg.close()
