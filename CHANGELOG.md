@@ -11,6 +11,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 This section documents changes in the fork that are not yet in upstream.
 Based on upstream `3.3.2`.
 
+### What's new (2026-04-24): recall precision overhaul + JSON-mode hardening
+
+Latest batch of improvements on top of the fork's previous recall pipeline. All opt-in via existing env vars — no new flags.
+
+- **Filter-aware rewrite** — `decide_recall` now outputs a `filters: {room?, hall?, wing?}` field alongside `query`. The gate reads the current palace taxonomy (rooms/halls list) from `active_context` and chooses precise filters per question type (personal facts → `hall=hall_diary`; decisions → `room=decisions`; bugs → `room=bugs`; etc.). Search runs with the filter applied, sharply cutting noise from unrelated rooms.
+- **KG entity injection into the gate** — Top KG entities (by current-triple participation count, default 60) are passed into `active_context`. The gate echoes any entity name implicit in the user's query into the rewritten query, boosting both vector recall and KG matching. Replaces the brittle "tokenize and length-filter" path that dropped all CJK bigrams.
+- **CJK + multilingual entity matching** — `_get_kg_context_for_recall` substring-matches the raw query against `KnowledgeGraph.list_entity_names()`. Fallback CJK-aware filter keeps any token containing a Chinese/Japanese/Korean character even when shorter than 3 chars. `KnowledgeGraph._entity_id` NFKC-normalizes names so half-width / full-width / combined-form variants collapse to the same id.
+- **Predicate language consistency** — `_ASYNC_SAVE_PROMPT` requires KG triples to use a single language per triple (Chinese subject/object → Chinese predicate, English → English). Adds a Chinese predicate vocabulary (`使用 / 依赖 / 工作于 / 拥有 / 决定 / 状态 / 修复 / ...`) and a Chinese few-shot showing canonical predicate names.
+- **Reranker rewritten for answer-relevance** — `_RERANK_PROMPT` now asks "would quoting this snippet move the answer forward, or just look topically related?" instead of "is this topically related". Includes explicit fact-vs-meta-discussion distinction, question-type calibration (factual questions → strict, exploratory → inclusive), and `NONE` is the correct return when nothing actually answers. The early-exit on small candidate sets is removed — every hit passes through the filter.
+- **JSON mode for LLM calls** — `_call_llm` and the per-backend helpers (`_call_openai_compat` / `_call_anthropic` / `_call_vertex`) accept `json_mode=True`. OpenAI-compat sends `response_format: {"type": "json_object"}`; Anthropic / Vertex use the assistant-prefill trick (append `{"role": "assistant", "content": "{"}` and re-prepend `{` to the response). `decide_recall` and async save both call with `json_mode=True`, eliminating most "no JSON in response" failures.
+- **Bracket-aware JSON extraction + raw dump on parse failure** — Replaces brittle `response.find("{")` / `response.rfind("}")` with `_extract_first_json_object`, a string-literal-aware brace counter that handles braces inside JSON string values. On any parse failure, the full raw response + first 2 KB of prompt are written to `~/.mempalace/hook_state/async_save_fail_<ts>.txt`. Previously the raw response was lost — observability blind spot is fixed.
+- **Hall filter on `search_memories`** — New `hall=` keyword arg on `search_memories` and `build_where_filter`. The recall hook validates LLM-suggested filter values against the actual taxonomy before passing them in, and falls back to an unfiltered retry if the filter empties the result set (defensive against hallucinated labels).
+- **Gemini 3.1 Flash-Lite Preview as a recall backend** — Recommended over Haiku 4.5 for the gate: 100% deterministic on classification (Haiku flapped between `personal_fact_query` and `self_contained_statement` on identical input), correctly handles proximal-context personal-fact queries, and significantly cheaper (~$0.10/1M input, $0.40/1M output). Wire it via the existing `MEMPAL_RECALL_*` env vars — no code changes needed.
+- **De-personalized prompts** — Replaced session-specific examples (cat ownership, project-specific names) with generic biographical / infra examples (city of residence, employee id, staging api), and rewrote pattern-match rules into principle-based ones to keep the gate from over-fitting any one phrasing.
+
+---
+
 ### Installation
 
 ```bash
@@ -33,22 +50,46 @@ mempalace init ~/your-project-dir
 
 Using Gemini embedding through a LiteLLM proxy avoids region restrictions, SSL issues, and API key rate limits. All three agents connect to the same local proxy.
 
-```bash
-# ~/.litellm/config.yaml — add this model:
-#   - model_name: gemini-embedding-2-preview
-#     litellm_params:
-#       model: vertex_ai/gemini-embedding-2-preview
-#       vertex_project: your-gcp-project
-#       vertex_location: us-central1
-#       vertex_credentials: /app/your-service-account-key.json
+```yaml
+# ~/.litellm/config.yaml — add these models:
+
+# Embedding model (used for both save and search vectors)
+- model_name: gemini-embedding-2-preview
+  litellm_params:
+    model: vertex_ai/gemini-embedding-2-preview
+    vertex_project: your-gcp-project
+    vertex_location: us-central1
+    vertex_credentials: /app/your-service-account-key.json
+
+# Recall gate model (used by the LLM recall gate + async save)
+# Gemini 3.1 Flash-Lite Preview: faster, cheaper, and more deterministic
+# than Haiku 4.5 on the JSON classification task.
+- model_name: gemini-3.1-flash-lite-preview
+  litellm_params:
+    model: vertex_ai/gemini-3.1-flash-lite-preview
+    vertex_project: your-gcp-project
+    vertex_location: global        # 3.1 Flash-Lite Preview is only in "global"
+    vertex_credentials: /app/your-service-account-key.json
+    input_cost_per_token: 1.0e-07
+    output_cost_per_token: 4.0e-07
 
 # ~/.litellm/docker-compose.yaml — mount the key:
 #   volumes:
 #     - ./your-service-account-key.json:/app/your-service-account-key.json:ro
+```
 
+```bash
 # Start: cd ~/.litellm && docker compose up -d
-# Test:  curl http://127.0.0.1:4000/v1/embeddings -H "Authorization: Bearer your-litellm-key" \
-#          -d '{"model":"gemini-embedding-2-preview","input":["test"]}'
+# Test embedding:
+curl http://127.0.0.1:4000/v1/embeddings \
+  -H "Authorization: Bearer your-litellm-key" \
+  -d '{"model":"gemini-embedding-2-preview","input":["test"]}'
+
+# Test recall gate model:
+curl http://127.0.0.1:4000/v1/chat/completions \
+  -H "Authorization: Bearer your-litellm-key" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gemini-3.1-flash-lite-preview","max_tokens":20,"messages":[{"role":"user","content":"Reply with exactly: OK"}]}'
 ```
 
 > **Note**: LiteLLM's Vertex AI embedding proxy doesn't support batch input (returns 1 embedding for N inputs). The embedding module works around this with 10-thread concurrent single-text requests (~7s for 100 texts).
@@ -89,13 +130,21 @@ export MEMPAL_EMBEDDING_KEY=your-litellm-key              # LiteLLM master key
 # export GEMINI_API_KEY=your-gemini-api-key
 # export SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem
 
-# ── LLM Recall Gate (smart recall + query rewrite, uses Claude Haiku) ──
+# ── LLM Recall Gate (smart recall + query rewrite + answer-relevance reranker) ──
 export MEMPAL_RECALL_LLM=1                                 # enable LLM-enhanced recall
 
 # Pick ONE backend for the recall LLM (in priority order):
-# Option A: Any OpenAI-compatible endpoint (LiteLLM, Ollama, etc.)
-export MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000        # your proxy URL
-export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the endpoint
+
+# Option A (RECOMMENDED): Any OpenAI-compatible endpoint (LiteLLM, Ollama, etc.)
+# Gemini 3.1 Flash-Lite Preview is the recommended model — deterministic on
+# JSON classification, fast (~1s), and very cheap. Configure it in your LiteLLM
+# config (see "LiteLLM Proxy Setup" above), then point MemPalace at it:
+export MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1     # your LiteLLM proxy URL
+export MEMPAL_RECALL_MODEL=gemini-3.1-flash-lite-preview   # model_name from config.yaml
+export MEMPAL_RECALL_KEY=your-litellm-key                  # LiteLLM master key
+
+# Alternative: Claude Haiku 4.5 via the same LiteLLM endpoint
+# export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001     # works but less stable than Gemini for the gate
 
 # Option B: Vertex AI (when using Claude Code in Vertex mode)
 # Requires CLAUDE_CODE_USE_VERTEX=1 + ANTHROPIC_VERTEX_PROJECT_ID + gcloud ADC credentials
@@ -127,7 +176,10 @@ export MEMPAL_RECALL_MODEL=claude-haiku-4-5-20251001       # model name at the e
     "MEMPAL_EMBEDDING_MODEL": "gemini-embedding-2-preview",
     "MEMPAL_EMBEDDING_ENDPOINT": "http://127.0.0.1:4000",
     "MEMPAL_EMBEDDING_KEY": "your-litellm-key",
-    "MEMPAL_RECALL_LLM": "1"
+    "MEMPAL_RECALL_LLM": "1",
+    "MEMPAL_RECALL_ENDPOINT": "http://127.0.0.1:4000/v1",
+    "MEMPAL_RECALL_MODEL": "gemini-3.1-flash-lite-preview",
+    "MEMPAL_RECALL_KEY": "your-litellm-key"
   }
 }
 ```
@@ -146,6 +198,9 @@ MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview"
 MEMPAL_EMBEDDING_ENDPOINT = "http://127.0.0.1:4000"
 MEMPAL_EMBEDDING_KEY = "your-litellm-key"
 MEMPAL_RECALL_LLM = "1"
+MEMPAL_RECALL_ENDPOINT = "http://127.0.0.1:4000/v1"
+MEMPAL_RECALL_MODEL = "gemini-3.1-flash-lite-preview"
+MEMPAL_RECALL_KEY = "your-litellm-key"
 ```
 
 **Hermes** — add to `~/Library/LaunchAgents/ai.hermes.gateway.plist` inside `<dict>` under `EnvironmentVariables`:
@@ -166,11 +221,16 @@ Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist &&
 When `MEMPAL_RECALL_LLM=1` is set, every `UserPromptSubmit` hook goes through:
 
 1. **Local fast-path** — Instant skip for obvious cases (continuations like "继续补", confirmations like "好的", execution commands like "run tests"). Zero API cost.
-2. **LLM decide + rewrite** (Claude Haiku, ~200 tokens) — Decides whether memory recall is needed. If yes, rewrites the query in the user's language for optimal vector search.
-3. **Multi-query search** — Searches with BOTH original query AND rewritten query in parallel (prevents rewrite failures from losing exact matches), plus keyword `$contains` retrieval.
-4. **BM25 hybrid ranking** — Runs on the FULL candidate pool from all three retrieval paths before truncation.
-5. **LLM rerank** (Claude Haiku, ~50 tokens) — Selects the most relevant results, filtering noise.
-6. **KG enrichment** — Queries knowledge graph for entities in results and user query, injects temporal facts.
+2. **Active-context assembly** — Snapshot the current palace taxonomy (rooms + halls from ChromaDB metadata) and the top ~60 KG entities by current-triple count. Passed to the gate so it can pick valid filter values and echo canonical entity names into the rewritten query.
+3. **LLM decide + rewrite + filter** (~1–2s, JSON-mode enforced) — Decides whether memory recall is needed and outputs:
+   - `query` — rewritten in the user's language, with any matching entity names echoed verbatim
+   - `filters.room` / `filters.hall` — narrows the search before ranking (e.g. personal facts → `hall=hall_diary`, decisions → `room=decisions`, bugs → `room=bugs`)
+   - `after` — ISO date for time-bounded queries
+   - Personal-fact queries about the user always recall, even when the fact came up earlier in the thread — memory is the canonical source.
+4. **Filtered multi-query search** — Searches with BOTH original query AND rewritten query in parallel (prevents rewrite failures from losing exact matches), filtered by the chosen room/hall. Falls back to unfiltered search if the filter empties the pool (defensive against hallucinated labels).
+5. **BM25 hybrid ranking** — Runs on the FULL candidate pool from all retrieval paths before truncation.
+6. **LLM rerank (answer-relevance)** (~1s, JSON-mode enforced) — Asks "would this snippet actually answer the question?", filtering topically-similar-but-unanswering meta-discussion. Returns `NONE` when nothing genuinely helps — injecting noise is worse than injecting nothing. Runs on every call regardless of pool size.
+7. **KG enrichment** — Substring-matches the raw query against the current KG entity list (CJK-aware, NFKC-normalized), fetches current facts (valid_to IS NULL), appends as `[KG]` lines.
 
 ### How Async Haiku Save Works
 
@@ -185,8 +245,7 @@ Stop hook no longer blocks the conversation. Instead, it spawns a background sub
 
 Triggers on every stop with new exchanges. Cost: ~$0.001/save. Set `MEMPAL_VERBOSE=true` for old blocking behavior.
 
-Total LLM cost per user turn (when recall is triggered): ~250 Haiku tokens ≈ $0.00006.
-Turns that don't need recall (continuations, code tasks, etc.) cost zero — the local fast-path or LLM gate skips them.
+Total LLM cost per user turn (when recall is triggered, Gemini 3.1 Flash-Lite Preview): ~300 tokens ≈ $0.00004. Switching to Haiku raises it to ~$0.00006. Turns that don't need recall (continuations, code tasks, etc.) cost zero — the local fast-path or LLM gate skips them.
 
 ### New Features
 
@@ -259,6 +318,8 @@ Turns that don't need recall (continuations, code tasks, etc.) cost zero — the
 - **over_fetch increased** — Vector candidate pool from `n_results*3` to `n_results*6`, giving BM25 a larger pool to reorder.
 
 ### Troubleshooting
+
+**Async save wrote 0 entries / malformed JSON** — Check `~/.mempalace/hook_state/async_save_fail_<timestamp>.txt` for the raw model response + first 2 KB of prompt. Since the 2026-04-24 update, every parse failure dumps here with a note in `hook.log`. Most common root cause: model returned prose before/after the JSON block — bracket-aware extraction handles that automatically, but dumps surface any remaining edge cases.
 
 **Search returns no hits but data exists** — Check `~/.mempalace/hook_state/hook.log` for:
 - `SSL: CERTIFICATE_VERIFY_FAILED` → Set `SSL_CERT_FILE` env var in all agent configs
