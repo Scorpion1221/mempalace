@@ -37,6 +37,7 @@ from .embedding import get_embedding_function
 
 
 COLLECTION_NAME = "mempalace_drawers"
+CLOSETS_COLLECTION_NAME = "mempalace_closets"
 
 
 def _get_palace_path():
@@ -91,8 +92,9 @@ def scan_palace(palace_path=None, only_wing=None):
     print(f"\n  Palace: {palace_path}")
     print("  Loading...")
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME,
-                                         embedding_function=get_embedding_function())
+    col = ChromaBackend().get_collection(
+        palace_path, COLLECTION_NAME, embedding_function=get_embedding_function()
+    )
 
     where = {"wing": only_wing} if only_wing else None
     total = col.count()
@@ -175,8 +177,9 @@ def prune_corrupt(palace_path=None, confirm=False):
         print("  Re-run with --confirm to actually delete.")
         return
 
-    col = ChromaBackend().get_collection(palace_path, COLLECTION_NAME,
-                                         embedding_function=get_embedding_function())
+    col = ChromaBackend().get_collection(
+        palace_path, COLLECTION_NAME, embedding_function=get_embedding_function()
+    )
     before = col.count()
     print(f"  Collection size before: {before:,}")
 
@@ -267,8 +270,7 @@ def rebuild_index(palace_path=None):
     print("  Rebuilding collection with hnsw:space=cosine...")
     backend.delete_collection(palace_path, COLLECTION_NAME)
     ef = get_embedding_function()
-    new_col = backend.create_collection(palace_path, COLLECTION_NAME,
-                                        embedding_function=ef)
+    new_col = backend.create_collection(palace_path, COLLECTION_NAME, embedding_function=ef)
 
     filed = 0
     insert_batch = 100 if ef is not None else batch_size
@@ -293,7 +295,65 @@ def rebuild_index(palace_path=None):
 
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
     print("  HNSW index is now clean with cosine distance metric.")
+
+    # Rebuild closets collection if it exists
+    _rebuild_closets(palace_path, backend, ef)
+
     print(f"\n{'=' * 55}\n")
+
+
+def _rebuild_closets(palace_path, backend, ef):
+    """Rebuild the closets collection to match the current embedding dimensions."""
+    try:
+        col = backend.get_collection(palace_path, CLOSETS_COLLECTION_NAME)
+        total = col.count()
+    except Exception:
+        return
+
+    if total == 0:
+        print("\n  Closets collection empty, deleting stale index...")
+        try:
+            backend.delete_collection(palace_path, CLOSETS_COLLECTION_NAME)
+            print("  Deleted stale closets collection.")
+        except Exception:
+            pass
+        return
+
+    print(f"\n  Rebuilding closets ({total} entries)...")
+
+    batch_size = 5000
+    all_ids, all_docs, all_metas = [], [], []
+    offset = 0
+    while offset < total:
+        batch = col.get(limit=batch_size, offset=offset, include=["documents", "metadatas"])
+        if not batch["ids"]:
+            break
+        all_ids.extend(batch["ids"])
+        all_docs.extend(batch["documents"])
+        all_metas.extend(batch["metadatas"])
+        offset += len(batch["ids"])
+
+    backend.delete_collection(palace_path, CLOSETS_COLLECTION_NAME)
+    new_col = backend.create_collection(palace_path, CLOSETS_COLLECTION_NAME, embedding_function=ef)
+
+    insert_batch = 100 if ef is not None else batch_size
+    filed = 0
+    for i in range(0, len(all_ids), insert_batch):
+        batch_ids = all_ids[i : i + insert_batch]
+        batch_docs = all_docs[i : i + insert_batch]
+        batch_metas = all_metas[i : i + insert_batch]
+        try:
+            new_col.upsert(documents=batch_docs, ids=batch_ids, metadatas=batch_metas)
+        except Exception as exc:
+            print(f"  ERROR at closet batch {i}: {exc}")
+            for did, doc, meta in zip(batch_ids, batch_docs, batch_metas):
+                try:
+                    new_col.upsert(documents=[doc], ids=[did], metadatas=[meta])
+                except Exception:
+                    pass
+        filed += len(batch_ids)
+
+    print(f"  Closets rebuilt: {filed} entries.")
 
 
 if __name__ == "__main__":

@@ -236,14 +236,16 @@ def test_rebuild_index_success(mock_backend_cls, mock_shutil, tmp_path):
     mock_shutil.copy2.assert_called_once()
     assert "chroma.sqlite3" in str(mock_shutil.copy2.call_args)
 
-    # Verify: deleted and recreated (cosine is the backend default)
-    mock_backend.delete_collection.assert_called_once_with(str(tmp_path), "mempalace_drawers")
-    mock_backend.create_collection.assert_called_once()
-    call_args = mock_backend.create_collection.call_args
-    assert call_args[0] == (str(tmp_path), "mempalace_drawers")
+    # Verify: deleted and recreated drawers + closets
+    delete_calls = mock_backend.delete_collection.call_args_list
+    assert any(c[0] == (str(tmp_path), "mempalace_drawers") for c in delete_calls)
+    assert any(c[0] == (str(tmp_path), "mempalace_closets") for c in delete_calls)
+    create_calls = mock_backend.create_collection.call_args_list
+    assert any(c[0] == (str(tmp_path), "mempalace_drawers") for c in create_calls)
+    assert any(c[0] == (str(tmp_path), "mempalace_closets") for c in create_calls)
 
-    # Verify: used upsert not add
-    mock_new_col.upsert.assert_called_once()
+    # Verify: used upsert not add (called for drawers + closets)
+    assert mock_new_col.upsert.call_count == 2
     mock_new_col.add.assert_not_called()
 
 
