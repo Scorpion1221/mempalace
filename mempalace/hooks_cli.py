@@ -589,6 +589,173 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
     }
 
 
+_ASYNC_SAVE_PROMPT = """\
+You are a memory librarian. Extract key content from this conversation segment.
+Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→English).
+
+Return ONLY valid JSON with this structure:
+{{"diary": "<natural language session summary — include decisions, file paths, technical details>", "drawers": [{{"wing": "<project-name>", "room": "<decisions|code|configuration|bugs|general>", "content": "<verbatim key content>"}}]}}
+
+Rules:
+- diary: 2-5 sentence summary of what happened, decisions made, outcomes
+- drawers: 0-5 discrete pieces of knowledge worth remembering long-term
+- wing: use "{wing}" unless the content clearly belongs to a different project
+- room: decisions for choices made, code for file changes, configuration for settings, bugs for issues found
+- Skip trivial exchanges (greetings, acknowledgements)
+- If nothing worth saving, return: {{"diary": "", "drawers": []}}
+
+Conversation:
+{transcript}"""
+
+
+def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=8000):
+    """Read recent user+assistant exchanges from a JSONL transcript."""
+    path = _validate_transcript_path(transcript_path)
+    if not path or not path.is_file():
+        return ""
+    exchanges = []
+    human_count = 0
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                msg_type = entry.get("type", "")
+                message = entry.get("message", {})
+                if not isinstance(message, dict):
+                    message = {}
+                content = message.get("content", "")
+                if msg_type in ("human", "user"):
+                    if isinstance(content, list):
+                        if all(
+                            isinstance(b, dict) and b.get("type") == "tool_result" for b in content
+                        ):
+                            continue
+                    human_count += 1
+                    if human_count <= since_exchange:
+                        continue
+                    text = (
+                        _extract_assistant_text(content)
+                        if isinstance(content, list)
+                        else str(content)
+                    )
+                    if text and "<command-message>" not in text:
+                        exchanges.append(f"> {text[:500]}")
+                elif msg_type == "assistant" and human_count > since_exchange:
+                    text = (
+                        _extract_assistant_text(content)
+                        if isinstance(content, list)
+                        else str(content)
+                    )
+                    if text:
+                        exchanges.append(text[:1000])
+    except OSError:
+        return ""
+    result = "\n\n".join(exchanges)
+    if len(result) > max_chars:
+        result = result[-max_chars:]
+    return result
+
+
+def _async_save_worker(transcript_text, session_id, cwd):
+    """Background worker: call Haiku to extract memories, write to palace."""
+    try:
+        from .recall_llm import _get_llm_config, _call_llm
+
+        config = _get_llm_config()
+        if not config:
+            _log("async save: no LLM configured, skipping")
+            return
+
+        wing = Path(cwd).name.lower().replace(" ", "_").replace("-", "_") if cwd else "general"
+        prompt = _ASYNC_SAVE_PROMPT.format(wing=wing, transcript=transcript_text)
+
+        response = _call_llm(config, prompt, max_tokens=2000, timeout=30)
+        if not response:
+            _log("async save: LLM returned empty response")
+            return
+
+        start = response.find("{")
+        end = response.rfind("}") + 1
+        if start < 0 or end <= start:
+            _log("async save: no JSON in LLM response")
+            return
+        data = json.loads(response[start:end])
+
+        from .config import MempalaceConfig, sanitize_content, sanitize_name
+        from .palace import get_collection
+
+        cfg = MempalaceConfig()
+        col = get_collection(cfg.palace_path, create=True)
+        now = datetime.now()
+        written = 0
+
+        diary = data.get("diary", "")
+        if diary and len(diary.strip()) > 20:
+            import hashlib
+
+            entry_id = (
+                f"diary_wing_haiku_{now.strftime('%Y%m%d_%H%M%S%f')}"
+                f"_{hashlib.sha256(diary.encode()).hexdigest()[:12]}"
+            )
+            col.add(
+                ids=[entry_id],
+                documents=[sanitize_content(diary)],
+                metadatas=[
+                    {
+                        "wing": "wing_haiku",
+                        "room": "diary",
+                        "hall": "hall_diary",
+                        "topic": "auto-save",
+                        "type": "diary_entry",
+                        "agent": "haiku",
+                        "filed_at": now.isoformat(),
+                        "date": now.strftime("%Y-%m-%d"),
+                    }
+                ],
+            )
+            written += 1
+
+        for drawer in data.get("drawers", []):
+            content = drawer.get("content", "")
+            if not content or len(content.strip()) < 20:
+                continue
+            d_wing = sanitize_name(drawer.get("wing", wing))
+            d_room = sanitize_name(drawer.get("room", "general"))
+            import hashlib
+
+            d_id = (
+                f"drawer_{d_wing}_{d_room}"
+                f"_{hashlib.sha256((d_wing + d_room + content).encode()).hexdigest()[:24]}"
+            )
+            col.upsert(
+                ids=[d_id],
+                documents=[sanitize_content(content)],
+                metadatas=[
+                    {
+                        "wing": d_wing,
+                        "room": d_room,
+                        "added_by": "haiku_async_save",
+                        "filed_at": now.isoformat(),
+                    }
+                ],
+            )
+            written += 1
+
+        _log(
+            f"async save: wrote {written} entries (diary + {len(data.get('drawers', []))} drawers)"
+        )
+    except Exception as e:
+        _log(f"async save error: {e}")
+
+
 def hook_stop(data: dict, harness: str):
     """Stop hook: block every N messages for auto-save."""
     parsed = _parse_harness_input(data, harness)
@@ -629,7 +796,6 @@ def hook_stop(data: dict, harness: str):
     _log(f"Session {session_id}: {exchange_count} exchanges, {since_last} since last save")
 
     if since_last >= SAVE_INTERVAL and exchange_count >= SAVE_MIN_MESSAGES:
-        # Update last save point
         try:
             last_save_file.write_text(str(exchange_count), encoding="utf-8")
         except OSError:
@@ -637,7 +803,27 @@ def hook_stop(data: dict, harness: str):
 
         _log(f"TRIGGERING SAVE at exchange {exchange_count}")
 
-        _output({"decision": "block", "reason": STOP_BLOCK_REASON})
+        if os.environ.get("MEMPAL_VERBOSE", "") in ("true", "1"):
+            _output({"decision": "block", "reason": STOP_BLOCK_REASON})
+            return
+
+        transcript_text = _extract_recent_exchanges(transcript_path, since_exchange=last_save)
+        if transcript_text and os.environ.get("MEMPAL_RECALL_LLM", "") == "1":
+            cwd = data.get("cwd", "")
+            try:
+                import threading
+
+                t = threading.Thread(
+                    target=_async_save_worker,
+                    args=(transcript_text, session_id, cwd),
+                    daemon=True,
+                )
+                t.start()
+                _log("async save: spawned background thread")
+            except Exception as e:
+                _log(f"async save: failed to spawn ({e})")
+
+        _output({})
     else:
         _output({})
 

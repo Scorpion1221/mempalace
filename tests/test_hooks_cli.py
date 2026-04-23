@@ -216,8 +216,7 @@ def test_stop_hook_blocks_at_interval(tmp_path):
         {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
         state_dir=tmp_path,
     )
-    assert result["decision"] == "block"
-    assert result["reason"] == STOP_BLOCK_REASON
+    assert result == {}
 
 
 def test_stop_hook_tracks_save_point(tmp_path):
@@ -228,9 +227,9 @@ def test_stop_hook_tracks_save_point(tmp_path):
     )
     data = {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)}
 
-    # First call blocks
+    # First call triggers async save (non-blocking)
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
-    assert result["decision"] == "block"
+    assert result == {}
 
     # Second call with same count passes through (already saved)
     result = _capture_hook_output(hook_stop, data, state_dir=tmp_path)
@@ -509,7 +508,7 @@ def test_stop_hook_oserror_on_last_save_read(tmp_path):
         {"session_id": "test", "stop_hook_active": False, "transcript_path": str(transcript)},
         state_dir=tmp_path,
     )
-    assert result["decision"] == "block"
+    assert result == {}
 
 
 def test_stop_hook_oserror_on_write(tmp_path):
@@ -534,7 +533,7 @@ def test_stop_hook_oserror_on_write(tmp_path):
                 },
                 state_dir=tmp_path,
             )
-    assert result["decision"] == "block"
+    assert result == {}
 
 
 # --- hook_precompact with MEMPAL_DIR ---
@@ -989,5 +988,5 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
         state_dir=tmp_path,
     )
     # The injected value is not "true"/"1"/"yes", so the hook should NOT pass through
-    # It should count messages and block at the interval
-    assert result["decision"] == "block"
+    # It should count messages and trigger async save (non-blocking)
+    assert result == {}
