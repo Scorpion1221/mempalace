@@ -590,21 +590,50 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
 
 
 _ASYNC_SAVE_PROMPT = """\
-You are a memory librarian. Extract key content from this conversation segment.
+You are a memory librarian for MemPalace. Extract key content from this conversation and return structured JSON.
 Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→English).
 
-Return ONLY valid JSON with this structure:
-{{"diary": "<natural language session summary — include decisions, file paths, technical details>", "drawers": [{{"wing": "<project-name>", "room": "<decisions|code|configuration|bugs|general>", "content": "<verbatim key content>"}}]}}
+## Palace Structure
+- **wing**: project or person name, lowercase with underscores (e.g. "mempalace", "paperclip", "solvely_web"). Use "{wing}" as default.
+- **room**: topic category. Choose from: decisions, code, configuration, bugs, architecture, general, issues, operations
+- **diary**: natural language summary of the session segment — include specific decisions, file paths, commands, technical details. Not just "discussed X", but WHAT was decided/changed/found.
+- **drawers**: discrete pieces of knowledge worth remembering in future sessions. Each drawer should be self-contained — readable without the conversation context.
 
-Rules:
-- diary: 2-5 sentence summary of what happened, decisions made, outcomes
-- drawers: 0-5 discrete pieces of knowledge worth remembering long-term
-- wing: use "{wing}" unless the content clearly belongs to a different project
-- room: decisions for choices made, code for file changes, configuration for settings, bugs for issues found
-- Skip trivial exchanges (greetings, acknowledgements)
-- If nothing worth saving, return: {{"diary": "", "drawers": []}}
+## Output Format
+Return ONLY valid JSON:
+{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}]}}
 
-Conversation:
+## Rules
+- diary: 2-5 sentences, include WHY not just WHAT
+- drawers: 0-5 items, each a standalone fact/decision/config worth recalling later
+- Skip trivial exchanges (greetings, confirmations, "OK", "继续")
+- If nothing worth saving: {{"diary": "", "drawers": []}}
+- Drawer content should be specific and actionable, not vague summaries
+- Include file paths, URLs, command examples, config values when mentioned
+
+## Examples
+
+### Example 1: Configuration discussion (Chinese)
+Conversation: User asks about paperclip tunnel domain, assistant finds it's paperclip.yqbqnn.com via cloudflared
+Output:
+{{"diary": "查询了 Paperclip 项目的 tunnel 访问域名，确认是 https://paperclip.yqbqnn.com，通过 cloudflared tunnel 暴露。", "drawers": [{{"wing": "paperclip", "room": "configuration", "content": "Paperclip tunnel 域名: https://paperclip.yqbqnn.com (通过 cloudflared tunnel 暴露)"}}]}}
+
+### Example 2: Bug fix session (English)
+Conversation: User reports HNSW index bloated to 512GB, assistant traces root cause to duplicate add() calls
+Output:
+{{"diary": "Diagnosed HNSW link_lists.bin bloat (512GB). Root cause: ChromaDB duplicate add() calls before v3.2.0 fix. Deleted bloated directory, rebuilt from SQLite orphan segment.", "drawers": [{{"wing": "mempalace", "room": "bugs", "content": "HNSW link_lists.bin bloat: caused by duplicate add() calls in ChromaDB pre-3.2.0. Fix: delete bloated segment dir, rebuild via scripts/palace_clean_rebuild.py"}}, {{"wing": "mempalace", "room": "code", "content": "Emergency palace rebuild: delete ~/.mempalace/palace/<segment-uuid>/, extract data from SQLite orphan segments, recreate collection with Gemini embedding"}}]}}
+
+### Example 3: Personal info (Chinese)
+Conversation: User shares they have three cats named 小柒、小布、小包
+Output:
+{{"diary": "用户分享了个人信息：养了三只猫，名字是小柒、小布和小包。", "drawers": [{{"wing": "general", "room": "general", "content": "用户（郭宝琪）养了三只猫：小柒、小布、小包"}}]}}
+
+### Example 4: Nothing worth saving
+Conversation: User says "继续" and assistant continues previous task
+Output:
+{{"diary": "", "drawers": []}}
+
+## Conversation to process:
 {transcript}"""
 
 
