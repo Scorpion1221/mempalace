@@ -536,9 +536,6 @@ def hook_stop(data: dict, harness: str):
 
         _log(f"TRIGGERING SAVE at exchange {exchange_count}")
 
-        # Optional: auto-ingest if MEMPAL_DIR is set
-        _maybe_auto_ingest(transcript_path)
-
         _output({"decision": "block", "reason": STOP_BLOCK_REASON})
     else:
         _output({})
@@ -562,12 +559,8 @@ def hook_precompact(data: dict, harness: str):
     """Precompact hook: mine transcript synchronously, then allow compaction."""
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
-    transcript_path = parsed["transcript_path"]
 
     _log(f"PRE-COMPACT triggered for session {session_id}")
-
-    # Mine synchronously so data lands before compaction proceeds
-    _mine_sync(transcript_path)
 
     _output({})
 

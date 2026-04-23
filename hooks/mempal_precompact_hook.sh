@@ -68,12 +68,7 @@ SESSION_ID=$(echo "$INPUT" | "$MEMPAL_PYTHON_BIN" -c "import sys,json; print(jso
 
 echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$STATE_DIR/hook.log"
 
-# Optional: run mempalace ingest synchronously so memories land before compaction
-if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    REPO_DIR="$(dirname "$SCRIPT_DIR")"
-    mempalace mine "$MEMPAL_DIR" >> "$STATE_DIR/hook.log" 2>&1
-fi
+# NOTE: auto-mining removed — see mempal_save_hook.sh for rationale.
 
 # Silent: return empty JSON to not block. "decision": "allow" is invalid —
 # only "block" or {} are recognized.

@@ -157,20 +157,11 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
 
     echo "[$(date '+%H:%M:%S')] TRIGGERING SAVE at exchange $EXCHANGE_COUNT" >> "$STATE_DIR/hook.log"
 
-    # Auto-mine the transcript. Two paths:
-    # 1. TRANSCRIPT_PATH (from Claude Code) — mine the directory it lives in
-    # 2. MEMPAL_DIR (user-configured) — mine that directory
-    # At least one should work. If neither is set, nothing mines.
-    MINE_DIR=""
-    if [ -n "$TRANSCRIPT_PATH" ] && [ -f "$TRANSCRIPT_PATH" ]; then
-        MINE_DIR="$(dirname "$TRANSCRIPT_PATH")"
-    fi
-    if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
-        MINE_DIR="$MEMPAL_DIR"
-    fi
-    if [ -n "$MINE_DIR" ]; then
-        mempalace mine "$MINE_DIR" >> "$STATE_DIR/hook.log" 2>&1 &
-    fi
+    # NOTE: auto-mining of raw transcripts was removed. Valuable content
+    # is saved via the AI's diary_write/add_drawer MCP tool calls during
+    # the stop-hook block. Raw JSONL mining produced mostly noise (tool
+    # output, hook logs, framework JSON) that drowned out real memories.
+    # Use `mempalace mine <dir>` manually when needed.
 
     # MEMPAL_VERBOSE toggle:
     #   true  = developer mode — block and show diaries/code in chat

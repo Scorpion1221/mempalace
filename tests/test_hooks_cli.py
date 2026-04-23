@@ -541,7 +541,7 @@ def test_stop_hook_oserror_on_write(tmp_path):
 
 
 def test_precompact_with_mempal_dir(tmp_path):
-    """Precompact runs subprocess.run (sync) when MEMPAL_DIR is set."""
+    """Precompact no longer auto-mines (removed to prevent noise ingestion)."""
     mempal_dir = tmp_path / "project"
     mempal_dir.mkdir()
     with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
@@ -552,20 +552,19 @@ def test_precompact_with_mempal_dir(tmp_path):
                 state_dir=tmp_path,
             )
     assert result == {}
-    mock_run.assert_called_once()
+    mock_run.assert_not_called()
 
 
 def test_precompact_with_mempal_dir_oserror(tmp_path):
-    """Precompact handles OSError from subprocess gracefully."""
+    """Precompact handles missing MEMPAL_DIR gracefully (no mining attempted)."""
     mempal_dir = tmp_path / "project"
     mempal_dir.mkdir()
     with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
-        with patch("mempalace.hooks_cli.subprocess.run", side_effect=OSError("fail")):
-            result = _capture_hook_output(
-                hook_precompact,
-                {"session_id": "test"},
-                state_dir=tmp_path,
-            )
+        result = _capture_hook_output(
+            hook_precompact,
+            {"session_id": "test"},
+            state_dir=tmp_path,
+        )
     assert result == {}
 
 
@@ -585,7 +584,7 @@ def test_precompact_with_timeout(tmp_path):
 
 
 def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
-    """Precompact mines transcript directory when no MEMPAL_DIR."""
+    """Precompact no longer mines transcript directory (auto-mine removed)."""
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("")
     monkeypatch.delenv("MEMPAL_DIR", raising=False)
@@ -596,10 +595,7 @@ def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
             state_dir=tmp_path,
         )
     assert result == {}
-    mock_run.assert_called_once()
-    # Verify mine dir is the transcript's parent
-    call_args = mock_run.call_args[0][0]
-    assert str(tmp_path) in call_args[-1]
+    mock_run.assert_not_called()
 
 
 # --- hook_userprompt ---
