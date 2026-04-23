@@ -351,9 +351,7 @@ def _call_llm(config: dict, prompt: str, max_tokens: int, timeout: int) -> str |
 # =========================================================================
 
 
-def _extract_previous_assistant_tail(
-    previous_assistant_context: str | Mapping | None,
-) -> str | None:
+def _extract_previous_assistant_tail(previous_assistant_context: str | Mapping | None) -> str | None:
     """Extract the previous assistant reply tail from a string or structured payload."""
     if previous_assistant_context is None:
         return None
@@ -363,7 +361,7 @@ def _extract_previous_assistant_tail(
         if not tail:
             return None
         if len(tail) > PREVIOUS_ASSISTANT_TAIL_MAX_CHARS:
-            tail = tail[-PREVIOUS_ASSISTANT_TAIL_MAX_CHARS:]
+            tail = tail[-PREVIOUS_ASSISTANT_TAIL_MAX_CHARS :]
         return tail
 
     if not isinstance(previous_assistant_context, Mapping):
@@ -593,7 +591,7 @@ def _parse_decide_recall_result(result: str) -> dict | None:
     try:
         parsed = json.loads(result)
     except json.JSONDecodeError:
-        clean = result.strip().strip("\"'")
+        clean = result.strip().strip('"\'')
         if 3 <= len(clean) <= 300:
             return {
                 "should_recall": True,
@@ -807,13 +805,8 @@ def rerank(
     if not result:
         return None
 
-    # LLM says nothing is relevant — fallback to top BM25 hit if any has
-    # a nonzero keyword score (avoids losing exact keyword matches).
+    # LLM says nothing is relevant
     if "NONE" in result.upper():
-        bm25_fallback = [h for h in hits if h.get("bm25_score", 0) > 0]
-        if bm25_fallback:
-            bm25_fallback.sort(key=lambda h: h.get("bm25_score", 0), reverse=True)
-            return bm25_fallback[:top_k]
         return []
 
     # Parse comma-separated numbers
