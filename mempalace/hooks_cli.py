@@ -595,7 +595,7 @@ Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→Eng
 
 ## Palace Structure
 - **wing**: project or domain name, lowercase with underscores (e.g. "backend_api", "infra_deploy"). Use "{wing}" as default.
-- **room**: topic category. Choose from: decisions, code, configuration, bugs, architecture, general, issues, operations
+- **room**: topic category, lowercase (e.g. "decisions", "code", "configuration", "bugs", "architecture", "general", "issues", "operations", or any fitting short name)
 - **diary**: natural language summary of the session segment — include specific decisions, file paths, commands, technical details. Not just "discussed X", but WHAT was decided/changed/found.
 - **drawers**: discrete pieces of knowledge worth remembering in future sessions. Each drawer should be self-contained — readable without the conversation context.
 
@@ -605,7 +605,7 @@ Return ONLY valid JSON:
 
 ## Rules
 - diary: 2-5 sentences, include WHY not just WHAT
-- drawers: 0-5 items, each a standalone fact/decision/config worth recalling later
+- drawers: each a standalone fact/decision/config worth recalling later. Typically 0-5, but use more for rich conversations
 - Skip trivial exchanges (greetings, confirmations, "OK", "继续")
 - If nothing worth saving: {{"diary": "", "drawers": [], "kg": []}}
 - Drawer content should be specific and actionable, not vague summaries
@@ -620,11 +620,11 @@ Return ONLY valid JSON:
 
 Input: User asks how to connect to the staging database, assistant provides connection string requiring VPN.
 Output:
-{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}], "kg": [{{"subject": "backend_api", "predicate": "staging_db", "object": "staging-db.internal:5432/app_staging"}}]}}
+{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}], "kg": [{{"subject": "backend_api", "predicate": "endpoint", "object": "staging-db.internal:5432/app_staging"}}]}}
 
 Input: 用户报告搜索接口返回504超时，助手排查发现是缺少索引导致全表扫描，添加了复合索引修复。
 Output:
-{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}]}}
+{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}], "kg": [{{"subject": "backend_api", "predicate": "fixed_by", "object": "composite_index_user_id_created_at"}}]}}
 
 Input: Team decides to switch from REST to GraphQL for the mobile app API, with a 2-week migration plan.
 Output:
@@ -632,15 +632,15 @@ Output:
 
 Input: 助手帮用户重构了认证模块，从 JWT 改成了 session-based，修改了 src/auth/middleware.ts 和 src/auth/session.ts。
 Output:
-{{"diary": "重构认证模块：JWT → session-based auth。修改了 middleware.ts 和新建了 session.ts，session 存储在 Redis 中，TTL 24小时。", "drawers": [{{"wing": "{wing}", "room": "code", "content": "认证重构 JWT→session: 修改 src/auth/middleware.ts（移除 JWT 验证，改用 session cookie），新建 src/auth/session.ts（Redis session store, TTL=24h）"}}, {{"wing": "{wing}", "room": "decisions", "content": "认证从 JWT 改为 session-based：原因是需要支持即时吊销（JWT 无法做到），session 存 Redis，cookie httpOnly+secure"}}]}}
+{{"diary": "重构认证模块：JWT → session-based auth。修改了 middleware.ts 和新建了 session.ts，session 存储在 Redis 中，TTL 24小时。", "drawers": [{{"wing": "{wing}", "room": "code", "content": "认证重构 JWT→session: 修改 src/auth/middleware.ts（移除 JWT 验证，改用 session cookie），新建 src/auth/session.ts（Redis session store, TTL=24h）"}}, {{"wing": "{wing}", "room": "decisions", "content": "认证从 JWT 改为 session-based：原因是需要支持即时吊销（JWT 无法做到），session 存 Redis，cookie httpOnly+secure"}}], "kg": [{{"subject": "{wing}", "predicate": "migrated_to", "object": "session_based_auth"}}, {{"subject": "{wing}", "predicate": "uses", "object": "Redis"}}]}}
 
 Input: User configures CI/CD pipeline, sets up GitHub Actions with Docker build and deploy to AWS ECS.
 Output:
-{{"diary": "Set up CI/CD: GitHub Actions workflow builds Docker image, pushes to ECR, deploys to ECS Fargate. Added .github/workflows/deploy.yml with staging and production environments.", "drawers": [{{"wing": "{wing}", "room": "operations", "content": "CI/CD pipeline: .github/workflows/deploy.yml — build Docker → push to ECR (123456.dkr.ecr.us-east-1) → deploy ECS Fargate. Staging auto-deploys on push to develop, production requires manual approval."}}, {{"wing": "{wing}", "room": "configuration", "content": "ECS Fargate config: task def in infra/ecs-task.json, 512 CPU / 1024 MB, health check /api/health, min 2 / max 8 tasks"}}]}}
+{{"diary": "Set up CI/CD: GitHub Actions workflow builds Docker image, pushes to ECR, deploys to ECS Fargate. Added .github/workflows/deploy.yml with staging and production environments.", "drawers": [{{"wing": "{wing}", "room": "operations", "content": "CI/CD pipeline: .github/workflows/deploy.yml — build Docker → push to ECR (123456.dkr.ecr.us-east-1) → deploy ECS Fargate. Staging auto-deploys on push to develop, production requires manual approval."}}, {{"wing": "{wing}", "room": "configuration", "content": "ECS Fargate config: task def in infra/ecs-task.json, 512 CPU / 1024 MB, health check /api/health, min 2 / max 8 tasks"}}], "kg": [{{"subject": "{wing}", "predicate": "deployed_to", "object": "AWS ECS Fargate"}}, {{"subject": "{wing}", "predicate": "uses", "object": "GitHub Actions"}}]}}
 
 Input: 用户和助手讨论了项目的技术选型，最终选择了 Next.js + tRPC + Prisma 的技术栈。
 Output:
-{{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}]}}
+{{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}], "kg": [{{"subject": "{wing}", "predicate": "tech_stack", "object": "Next.js + tRPC + Prisma + PostgreSQL"}}]}}
 
 Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
