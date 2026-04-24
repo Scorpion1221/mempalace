@@ -50,6 +50,44 @@ The script handles everything:
 1. **Restart** Claude Code / Codex CLI
 2. **Verify**: run `mempalace status` or use `/mempalace:status` in Claude Code
 
+## Environment Variables (Required for Full Functionality)
+
+`install.sh` installs the package and plugins but does **not** write env vars. Each agent reads from its own config — `~/.zshrc` alone is not enough (MCP servers and launchd services don't source shell profiles).
+
+Two groups of variables, both routed through a LiteLLM proxy at `127.0.0.1:4000`:
+
+| Group | Vars | Purpose |
+|---|---|---|
+| Embedding | `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` | ChromaDB vectorization (Gemini embedding). All three required; missing any falls back to MiniLM which mismatches a 3072-dim palace. |
+| Recall LLM | `MEMPAL_RECALL_LLM=1` + `MEMPAL_RECALL_{ENDPOINT,MODEL,KEY}` | Gates async save + recall rewrite/rerank (Gemini 3.1 Flash-Lite). Missing the quartet silently disables both — buffered turns get dropped. |
+
+Recommended values (LiteLLM proxy form, consistent across agents):
+```
+MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
+MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000
+MEMPAL_EMBEDDING_KEY=sk-litellm-local
+MEMPAL_RECALL_LLM=1
+MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1
+MEMPAL_RECALL_MODEL=gemini-3.1-flash-lite-preview
+MEMPAL_RECALL_KEY=sk-litellm-local
+```
+
+Where to put them:
+
+- **Claude Code** → `~/.claude/settings.json` → `env` block
+- **Codex** → `~/.codex/config.toml` in **both** `[mcp_servers.mempalace].env` (for the MCP server) and `[shell_environment_policy.set]` (for hook subprocesses — they don't inherit the MCP env)
+- **Hermes** → `~/Library/LaunchAgents/ai.hermes.gateway.plist` under `EnvironmentVariables`, then `launchctl unload && launchctl load` the plist
+
+See `CHANGELOG.md` → **Multi-Agent Environment Setup** for the full copy-paste snippets.
+
+### Verify and sync
+
+```bash
+bash scripts/sync-plugins.sh
+```
+
+Step `[6/6]` checks all seven variables are present in each agent's config and warns on drift.
+
 ## Key Features
 
 ### Auto-Recall (UserPromptSubmit Hook)

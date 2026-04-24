@@ -128,7 +128,13 @@ fi
 
 # 6. Verify env var config across all agents
 echo "[6/6] Verifying env var configuration..."
-REQUIRED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY"
+# Embedding triple: used by every read/write path (ChromaDB vectorization).
+EMBEDDING_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY"
+# Recall LLM quartet: gate flag + OpenAI-compatible endpoint/model/key
+# (defaults to Gemini via LiteLLM proxy). Without these, async save is a no-op
+# and recall rewrite/rerank fall back to plain vector search.
+RECALL_VARS="MEMPAL_RECALL_LLM MEMPAL_RECALL_ENDPOINT MEMPAL_RECALL_MODEL MEMPAL_RECALL_KEY"
+REQUIRED_VARS="$EMBEDDING_VARS $RECALL_VARS"
 HAS_WARNINGS=0
 
 # Claude Code
@@ -151,8 +157,8 @@ if [ -f "$HOME/.codex/config.toml" ]; then
             HAS_WARNINGS=1
         fi
     done
-    for var in $REQUIRED_VARS MEMPAL_RECALL_LLM; do
-        if ! grep -A10 '\[shell_environment_policy.set\]' "$HOME/.codex/config.toml" | grep -q "$var" 2>/dev/null; then
+    for var in $REQUIRED_VARS; do
+        if ! grep -A15 '\[shell_environment_policy.set\]' "$HOME/.codex/config.toml" | grep -q "$var" 2>/dev/null; then
             echo "  ⚠ Codex hooks: missing $var in [shell_environment_policy.set]"
             HAS_WARNINGS=1
         fi
@@ -164,7 +170,7 @@ fi
 HAS_WARNINGS=0
 HERMES_PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
 if [ -f "$HERMES_PLIST" ]; then
-    for var in MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY; do
+    for var in $REQUIRED_VARS; do
         if ! grep -q "$var" "$HERMES_PLIST" 2>/dev/null; then
             echo "  ⚠ Hermes: missing $var in launchd plist"
             HAS_WARNINGS=1

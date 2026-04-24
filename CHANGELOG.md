@@ -202,7 +202,7 @@ export MEMPAL_RECALL_KEY=your-litellm-key                  # LiteLLM master key
 [mcp_servers.mempalace]
 command = "mempalace-mcp"
 args = []
-env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", MEMPAL_EMBEDDING_ENDPOINT = "http://127.0.0.1:4000", MEMPAL_EMBEDDING_KEY = "your-litellm-key" }
+env = { MEMPAL_EMBEDDING_MODEL = "gemini-embedding-2-preview", MEMPAL_EMBEDDING_ENDPOINT = "http://127.0.0.1:4000", MEMPAL_EMBEDDING_KEY = "your-litellm-key", MEMPAL_RECALL_LLM = "1", MEMPAL_RECALL_ENDPOINT = "http://127.0.0.1:4000/v1", MEMPAL_RECALL_MODEL = "gemini-3.1-flash-lite-preview", MEMPAL_RECALL_KEY = "your-litellm-key", SSL_CERT_FILE = "/opt/homebrew/etc/openssl@3/cert.pem" }
 
 # 2. Hook subprocess (UserPromptSubmit recall runs here, NOT in MCP server):
 [shell_environment_policy.set]
@@ -223,8 +223,18 @@ MEMPAL_RECALL_KEY = "your-litellm-key"
 <string>http://127.0.0.1:4000</string>
 <key>MEMPAL_EMBEDDING_KEY</key>
 <string>your-litellm-key</string>
+<key>MEMPAL_RECALL_LLM</key>
+<string>1</string>
+<key>MEMPAL_RECALL_ENDPOINT</key>
+<string>http://127.0.0.1:4000/v1</string>
+<key>MEMPAL_RECALL_MODEL</key>
+<string>gemini-3.1-flash-lite-preview</string>
+<key>MEMPAL_RECALL_KEY</key>
+<string>your-litellm-key</string>
 ```
 Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist && launchctl load ~/Library/LaunchAgents/ai.hermes.gateway.plist`
+
+> Without the `MEMPAL_RECALL_*` quartet, `_haiku_save_recent_turns` short-circuits on `is_enabled()` and **drops all buffered turns without writing to the palace** — no error, just silent data loss. `scripts/sync-plugins.sh` validates all seven vars in `[6/6]`.
 
 > **Why not just `~/.zshrc`?** Shell profile env vars are only inherited by processes started from a login shell (e.g. terminal commands, `mempalace repair`). MCP servers are spawned as child processes by the agent harness without a login shell. launchd services have their own isolated environment. Each agent needs its own config.
 
