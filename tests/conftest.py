@@ -23,7 +23,7 @@ for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
 
 # Ensure tests use the default (local) embedding and no LLM recall,
 # not any API-based config from the user's shell environment.
-for _embed_var in ("MEMPAL_EMBEDDING_MODEL", "MEMPALACE_EMBEDDING_MODEL", "MEMPAL_RECALL_LLM"):
+for _embed_var in ("MEMPAL_EMBEDDING_MODEL", "MEMPAL_RECALL_LLM"):
     _original_env[_embed_var] = os.environ.pop(_embed_var, None)
 
 os.environ["HOME"] = _session_tmp

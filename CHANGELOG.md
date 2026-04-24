@@ -11,6 +11,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 This section documents changes in the fork that are not yet in upstream.
 Based on upstream `3.3.2`.
 
+### Breaking changes
+
+- **Embedding: Google direct-API path removed.** Embedding now goes exclusively through an OpenAI-compatible `/v1/embeddings` endpoint (LiteLLM proxy, Ollama, vLLM, etc.). The `https://generativelanguage.googleapis.com/.../batchEmbedContents` code path is gone.
+- **`MEMPAL_EMBEDDING_ENDPOINT` and `MEMPAL_EMBEDDING_KEY` are now required** whenever `MEMPAL_EMBEDDING_MODEL` is set (and not `"default"`). Missing either logs a warning and falls back to the ChromaDB built-in embedding.
+- **`GeminiEmbeddingFunction` renamed to `ProxyEmbeddingFunction`.** The old name is kept as a module-level alias for one release cycle and will be removed in the next major version.
+- **Dropped env-var aliases:** `MEMPALACE_EMBEDDING_MODEL`, `MEMPALACE_EMBEDDING_ENDPOINT`, `GEMINI_API_KEY`, and `LITELLM_KEY` are no longer read by the embedding factory. Use the three canonical `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` vars.
+- **Migration:** if you were using `GEMINI_API_KEY` directly without a proxy, stand up a LiteLLM proxy (see "LiteLLM Proxy Setup" below) and switch to the three `MEMPAL_EMBEDDING_*` env vars.
+
 ### What's new (2026-04-24): recall precision overhaul + JSON-mode hardening
 
 Latest batch of improvements on top of the fork's previous recall pipeline. All opt-in via existing env vars — no new flags.
