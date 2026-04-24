@@ -1573,28 +1573,77 @@ def hook_userprompt(data: dict, harness: str):
                 after=time_after,
                 extra_queries=extra,
             )
-            # If the filter was too tight (empty pool), retry without filters
-            # so we don't fail closed on a hallucinated-but-valid label.
+            # Two-stage fallback when the filtered search returns 0 hits.
+            #
+            # `wing` is a project-scoping SIGNAL, not a convenience: if the
+            # gate decided the query is about the active project and the
+            # palace has nothing for it, the truthful recall is empty. We
+            # must NOT abandon `wing` and drop back into a global search —
+            # doing so drags in drawers from unrelated projects as noise.
+            #
+            # `room`/`hall` are narrower hints and can be relaxed: the gate
+            # may have mis-classified the topic room, so a wing-only retry
+            # is a safe widening. Wing itself is never widened here.
             if (
                 rewrite_filters
                 and isinstance(result, dict)
                 and not result.get("error")
                 and len(result.get("results") or []) == 0
             ):
-                _log(
-                    "UserPrompt recall: filtered search returned 0 hits, "
-                    f"retrying without filters={rewrite_filters}"
-                )
-                result = search_memories(
-                    query=search_query,
-                    palace_path=palace_path,
-                    wing=None,
-                    preferred_wing=preferred_wing,
-                    n_results=pool_size,
-                    max_distance=USERPROMPT_MAX_DISTANCE,
-                    after=time_after,
-                    extra_queries=extra,
-                )
+                wing_filter = rewrite_filters.get("wing")
+                narrower = {k: v for k, v in rewrite_filters.items() if k != "wing"}
+                if wing_filter and narrower:
+                    _log(
+                        "UserPrompt recall: filtered search returned 0 hits, "
+                        f"widening within wing={wing_filter!r} (dropping {sorted(narrower)})"
+                    )
+                    result = search_memories(
+                        query=search_query,
+                        palace_path=palace_path,
+                        wing=wing_filter,
+                        preferred_wing=preferred_wing,
+                        n_results=pool_size,
+                        max_distance=USERPROMPT_MAX_DISTANCE,
+                        after=time_after,
+                        extra_queries=extra,
+                    )
+                    if (
+                        isinstance(result, dict)
+                        and not result.get("error")
+                        and len(result.get("results") or []) == 0
+                    ):
+                        _log(
+                            "UserPrompt recall: no hits for "
+                            f"wing={wing_filter!r}; returning empty recall "
+                            "(refusing to cross-project contaminate)"
+                        )
+                        _output({})
+                        return
+                elif wing_filter:
+                    # wing was the only filter and had 0 hits — stop here.
+                    _log(
+                        f"UserPrompt recall: no hits for wing={wing_filter!r}; "
+                        "returning empty recall"
+                    )
+                    _output({})
+                    return
+                else:
+                    # No wing filter — safe to fully widen (likely a
+                    # hallucinated room/hall label).
+                    _log(
+                        "UserPrompt recall: filtered search returned 0 hits, "
+                        f"retrying without filters={rewrite_filters}"
+                    )
+                    result = search_memories(
+                        query=search_query,
+                        palace_path=palace_path,
+                        wing=None,
+                        preferred_wing=preferred_wing,
+                        n_results=pool_size,
+                        max_distance=USERPROMPT_MAX_DISTANCE,
+                        after=time_after,
+                        extra_queries=extra,
+                    )
         except Exception as e:
             _log(f"WARNING: search_memories failed: {e}")
             _output({})
