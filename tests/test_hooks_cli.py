@@ -1206,6 +1206,7 @@ def test_get_palace_kg_entities_respects_limit(monkeypatch, tmp_path):
 # JSON-extraction helper + async save dump-on-failure
 # ===========================================================================
 
+
 class TestExtractFirstJsonObject:
     def test_clean_object(self):
         assert _extract_first_json_object('{"a": 1}') == '{"a": 1}'
@@ -1286,3 +1287,165 @@ class TestAsyncSavePromptHardening:
         from mempalace.hooks_cli import _ASYNC_SAVE_PROMPT
 
         assert "MUST be escaped as" in _ASYNC_SAVE_PROMPT
+
+
+# --- preferred_wing propagation + hook-side wing validation ---
+
+
+def test_build_active_context_includes_preferred_wing(tmp_path):
+    from mempalace.hooks_cli import _build_active_context
+
+    # No palace, no entities — but preferred_wing alone should still
+    # promote the return value to a dict that includes the hint.
+    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+        ctx = _build_active_context("/tmp/hermes-agent", preferred_wing="hermes_agent")
+
+    assert isinstance(ctx, dict)
+    assert ctx["preferred_wing"] == "hermes_agent"
+    assert ctx["cwd"] == "/tmp/hermes-agent"
+
+
+def test_build_active_context_falls_back_to_cwd_when_no_extras(tmp_path):
+    from mempalace.hooks_cli import _build_active_context
+
+    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+        ctx = _build_active_context("/tmp/hermes-agent")
+
+    # No preferred_wing, no palace, no entities — still a plain string
+    # to preserve backward-compatible behaviour.
+    assert ctx == "/tmp/hermes-agent"
+
+
+def test_userprompt_applies_gate_wing_filter(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+    search_calls = {}
+
+    def fake_search_memories(**kwargs):
+        search_calls.update(kwargs)
+        return {
+            "results": [
+                {"wing": "hermes_agent", "room": "bugs", "text": f"hit {i}"} for i in range(3)
+            ]
+        }
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": True,
+            "reason": "project_bug_query",
+            "query": "测试失败 排查",
+            "after": None,
+            "filters": {"wing": "hermes_agent", "room": "bugs", "hall": None},
+        }
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        return hits[:top_k]
+
+    # Palace taxonomy validation: wing matches preferred_wing (inferred from cwd),
+    # so it should pass validation even if the palace has no entries.
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch(
+                    "mempalace.hooks_cli._get_palace_taxonomy",
+                    return_value={"rooms": ["bugs"], "halls": [], "wings": ["hermes_agent"]},
+                ):
+                    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+                        with patch(
+                            "mempalace.searcher.search_memories",
+                            side_effect=fake_search_memories,
+                        ):
+                            with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                                with patch(
+                                    "mempalace.recall_llm._get_llm_config",
+                                    return_value={"backend": "stub"},
+                                ):
+                                    with patch(
+                                        "mempalace.recall_llm.decide_recall",
+                                        side_effect=fake_decide_recall,
+                                    ):
+                                        with patch(
+                                            "mempalace.recall_llm.rerank",
+                                            side_effect=fake_rerank,
+                                        ):
+                                            _capture_hook_output(
+                                                hook_userprompt,
+                                                {
+                                                    "session_id": "session-a",
+                                                    "prompt": "测试失败怎么查",
+                                                    "cwd": "/tmp/hermes-agent",
+                                                },
+                                                state_dir=tmp_path,
+                                            )
+
+    assert search_calls.get("wing") == "hermes_agent"
+    assert search_calls.get("room") == "bugs"
+
+
+def test_userprompt_drops_unknown_wing(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+    search_calls = []
+
+    def fake_search_memories(**kwargs):
+        search_calls.append(kwargs)
+        return {"results": []}
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": True,
+            "reason": "project_bug_query",
+            "query": "测试失败 排查",
+            "after": None,
+            "filters": {"wing": "nonexistent_project", "room": None, "hall": None},
+        }
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        return hits[:top_k]
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch(
+                    "mempalace.hooks_cli._get_palace_taxonomy",
+                    return_value={
+                        "rooms": ["bugs"],
+                        "halls": [],
+                        "wings": ["hermes_agent", "mempalace"],
+                    },
+                ):
+                    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+                        with patch(
+                            "mempalace.searcher.search_memories",
+                            side_effect=fake_search_memories,
+                        ):
+                            with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                                with patch(
+                                    "mempalace.recall_llm._get_llm_config",
+                                    return_value={"backend": "stub"},
+                                ):
+                                    with patch(
+                                        "mempalace.recall_llm.decide_recall",
+                                        side_effect=fake_decide_recall,
+                                    ):
+                                        with patch(
+                                            "mempalace.recall_llm.rerank",
+                                            side_effect=fake_rerank,
+                                        ):
+                                            _capture_hook_output(
+                                                hook_userprompt,
+                                                {
+                                                    "session_id": "session-a",
+                                                    "prompt": "测试失败怎么查",
+                                                    "cwd": "/tmp/hermes-agent",
+                                                },
+                                                state_dir=tmp_path,
+                                            )
+
+    # The hallucinated wing must NOT have reached search_memories.
+    assert search_calls, "search_memories should have been called"
+    assert search_calls[0].get("wing") is None

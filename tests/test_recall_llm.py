@@ -432,3 +432,21 @@ class TestCallLlmDispatchPassesJsonMode:
         )
 
         assert captured["kwargs"].get("json_mode") is True
+
+
+class TestDecideRecallPromptDefaultWing:
+    """The gate prompt must teach the LLM to default filters.wing to the
+    active project (preferred_wing) for project-scoped queries, to prevent
+    cross-project drawers from polluting recall."""
+
+    def test_prompt_mentions_preferred_wing_in_active_context(self):
+        assert "preferred_wing" in recall_llm._DECIDE_RECALL_PROMPT
+
+    def test_prompt_documents_default_wing_rule(self):
+        prompt = recall_llm._DECIDE_RECALL_PROMPT
+        # The new rule must tell the LLM to DEFAULT wing to preferred_wing
+        # for project-scoped queries.
+        assert "DEFAULT to ACTIVE CONTEXT's `preferred_wing`" in prompt
+        # And explicitly reset to null for cross-project or personal-fact
+        # queries.
+        assert "cross-project" in prompt or "cross_project" in prompt

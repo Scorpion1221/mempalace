@@ -1107,10 +1107,11 @@ def _infer_wing_from_cwd(cwd: str) -> str:
 def _get_palace_taxonomy(palace_path: str) -> dict:
     """Snapshot the current palace taxonomy for the LLM gate.
 
-    Returns {"rooms": [...top by count], "halls": [...top by count]}, both
-    sorted by descending drawer count and capped at 12 entries each. Used as
-    the source of truth so the rewrite LLM only suggests filter values that
-    actually exist in the palace right now.
+    Returns {"rooms": [...top by count], "halls": [...top by count],
+    "wings": [...top by count]}, all sorted by descending drawer count and
+    capped at 12 entries each. Used as the source of truth so the rewrite
+    LLM only suggests filter values that actually exist in the palace right
+    now, and so the hook can validate LLM-suggested wing names.
 
     Returns {} on any failure — callers treat it as no taxonomy hint.
     """
@@ -1128,9 +1129,11 @@ def _get_palace_taxonomy(palace_path: str) -> dict:
         metas = r.get("metadatas") or []
         rooms = Counter(m.get("room") for m in metas if m and m.get("room"))
         halls = Counter(m.get("hall") for m in metas if m and m.get("hall"))
+        wings = Counter(m.get("wing") for m in metas if m and m.get("wing"))
         return {
             "rooms": [r for r, _ in rooms.most_common(12)],
             "halls": [h for h, _ in halls.most_common(12)],
+            "wings": [w for w, _ in wings.most_common(12)],
         }
     except Exception:
         return {}
@@ -1299,14 +1302,18 @@ def _get_palace_kg_entities(limit: int = 60) -> list[str]:
         return []
 
 
-def _build_active_context(cwd: str, palace_path: str = None) -> object:
+def _build_active_context(
+    cwd: str, palace_path: str = None, preferred_wing: str | None = None
+) -> object:
     """Build active_context payload for the recall gate.
 
     Includes the workdir (project hint), palace taxonomy (rooms/halls for
-    valid filter values), and top KG entity names (so the gate can rewrite
-    queries to echo canonical entity names). Falls back to a plain cwd string
-    when no taxonomy/entities are available, keeping the shape backward
-    compatible with older gate prompts.
+    valid filter values), top KG entity names (so the gate can rewrite
+    queries to echo canonical entity names), and the inferred preferred_wing
+    (so the gate can default filters.wing to the active project for
+    project-scoped queries). Falls back to a plain cwd string when no extras
+    are available, keeping the shape backward compatible with older gate
+    prompts.
     """
     ctx: dict = {"cwd": cwd}
     if palace_path:
@@ -1316,6 +1323,8 @@ def _build_active_context(cwd: str, palace_path: str = None) -> object:
     entities = _get_palace_kg_entities(limit=60)
     if entities:
         ctx["entities"] = entities
+    if preferred_wing:
+        ctx["preferred_wing"] = preferred_wing
     if len(ctx) == 1:  # only cwd — nothing extra to expose
         return cwd
     return ctx
@@ -1442,7 +1451,7 @@ def hook_userprompt(data: dict, harness: str):
             # KG entities, so the gate can pick valid filter values AND rewrite
             # the query to echo canonical entity names when the user implicitly
             # references one.
-            active_ctx = _build_active_context(cwd, palace_path)
+            active_ctx = _build_active_context(cwd, palace_path, preferred_wing=preferred_wing)
             taxonomy = active_ctx.get("palace") if isinstance(active_ctx, dict) else {}
             recall_decision = decide_recall(
                 user_prompt,
@@ -1466,12 +1475,32 @@ def hook_userprompt(data: dict, harness: str):
                 raw_filters = recall_decision.get("filters") or {}
                 valid_rooms = set(taxonomy.get("rooms", [])) if taxonomy else set()
                 valid_halls = set(taxonomy.get("halls", [])) if taxonomy else set()
-                if raw_filters.get("room") and (not valid_rooms or raw_filters["room"] in valid_rooms):
+                valid_wings = set(taxonomy.get("wings", [])) if taxonomy else set()
+                if raw_filters.get("room") and (
+                    not valid_rooms or raw_filters["room"] in valid_rooms
+                ):
                     rewrite_filters["room"] = raw_filters["room"]
-                if raw_filters.get("hall") and (not valid_halls or raw_filters["hall"] in valid_halls):
+                if raw_filters.get("hall") and (
+                    not valid_halls or raw_filters["hall"] in valid_halls
+                ):
                     rewrite_filters["hall"] = raw_filters["hall"]
                 if raw_filters.get("wing"):
-                    rewrite_filters["wing"] = raw_filters["wing"]
+                    # Accept the LLM's wing only when it's real — either it
+                    # matches preferred_wing (inferred from CWD) or it's
+                    # present in the palace's known wings. This prevents
+                    # hallucinated wing names from filtering to an empty
+                    # result set.
+                    candidate_wing = raw_filters["wing"]
+                    if candidate_wing == preferred_wing or (
+                        valid_wings and candidate_wing in valid_wings
+                    ):
+                        rewrite_filters["wing"] = candidate_wing
+                    else:
+                        _log(
+                            "UserPrompt recall: dropping unknown wing "
+                            f"{candidate_wing!r} (preferred={preferred_wing!r}, "
+                            f"known={sorted(valid_wings)})"
+                        )
                 _log(
                     "UserPrompt recall: "
                     f"LLM decided recall reason={recall_decision.get('reason', 'unknown')}, "
