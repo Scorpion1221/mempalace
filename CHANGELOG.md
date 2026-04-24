@@ -14,10 +14,13 @@ Based on upstream `3.3.2`.
 ### Breaking changes
 
 - **Embedding: Google direct-API path removed.** Embedding now goes exclusively through an OpenAI-compatible `/v1/embeddings` endpoint (LiteLLM proxy, Ollama, vLLM, etc.). The `https://generativelanguage.googleapis.com/.../batchEmbedContents` code path is gone.
-- **`MEMPAL_EMBEDDING_ENDPOINT` and `MEMPAL_EMBEDDING_KEY` are now required** whenever `MEMPAL_EMBEDDING_MODEL` is set (and not `"default"`). Missing either logs a warning and falls back to the ChromaDB built-in embedding.
+- **`MEMPAL_EMBEDDING_ENDPOINT` and `MEMPAL_EMBEDDING_KEY` are now required** whenever `MEMPAL_EMBEDDING_MODEL` is set (and not `"default"`). Missing either logs a warning and falls back to the ChromaDB built-in embedding. **Note:** the shipped hook shell scripts (`.codex-plugin/hooks/mempal-hook.sh`, `.claude-plugin/hooks/mempal-*.sh`) export all three with standard local-LiteLLM defaults (`http://127.0.0.1:4000` / `sk-litellm-local`) so a fresh install works out of the box; override them via your agent env config (see Multi-Agent Environment Setup).
 - **`GeminiEmbeddingFunction` renamed to `ProxyEmbeddingFunction`.** The old name is kept as a module-level alias for one release cycle and will be removed in the next major version.
 - **Dropped env-var aliases:** `MEMPALACE_EMBEDDING_MODEL`, `MEMPALACE_EMBEDDING_ENDPOINT`, `GEMINI_API_KEY`, and `LITELLM_KEY` are no longer read by the embedding factory. Use the three canonical `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` vars.
-- **Migration:** if you were using `GEMINI_API_KEY` directly without a proxy, stand up a LiteLLM proxy (see "LiteLLM Proxy Setup" below) and switch to the three `MEMPAL_EMBEDDING_*` env vars.
+- **Migration:**
+  - If you were using `GEMINI_API_KEY` directly without a proxy, stand up a LiteLLM proxy (see "LiteLLM Proxy Setup" below) and switch to the three `MEMPAL_EMBEDDING_*` env vars.
+  - After upgrading, **add `MEMPAL_EMBEDDING_ENDPOINT` and `MEMPAL_EMBEDDING_KEY` to `~/.zshenv`** (or the equivalent shell profile) so shell-launched agents like Codex inherit them. The `MEMPAL_RECALL_*` vars had this covered; the embedding pair was previously propped up by the `GEMINI_API_KEY` fallback and now needs to be explicit.
+  - Run `bash scripts/sync-plugins.sh` after pulling to redeploy the updated hook scripts.
 
 ### What's new (2026-04-24): recall precision overhaul + JSON-mode hardening
 
@@ -127,16 +130,17 @@ All enhancements are **opt-in** via environment variables. Without them, behavio
 **Important**: `~/.zshrc` alone is NOT enough — see [Multi-Agent Environment Setup](#important-multi-agent-environment-setup) below.
 
 ```bash
-# ── Gemini Embedding via LiteLLM proxy (recommended) ──
+# ── Embedding via LiteLLM proxy (required — the Google direct-API path was removed) ──
+# All three must be set together. Missing any one → falls back to ChromaDB's
+# built-in MiniLM (384d), which mismatches a palace built with Gemini (3072d).
 export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
-export MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000   # LiteLLM proxy
+export MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000    # LiteLLM (or any OpenAI-compatible /v1/embeddings) proxy
 export MEMPAL_EMBEDDING_KEY=your-litellm-key              # LiteLLM master key
 # export MEMPAL_EMBEDDING_DIMS=3072                       # optional, default 3072
 
-# ── Gemini Embedding direct (alternative — may hit region/rate limits) ──
-# export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
-# export GEMINI_API_KEY=your-gemini-api-key
-# export SSL_CERT_FILE=/opt/homebrew/etc/openssl@3/cert.pem
+# The shipped hook scripts default these to http://127.0.0.1:4000 / sk-litellm-local
+# so a fresh LiteLLM install works without any explicit env. Override via
+# ~/.zshenv + agent config when you change the proxy or key.
 
 # ── LLM Recall Gate (smart recall + query rewrite + answer-relevance reranker) ──
 export MEMPAL_RECALL_LLM=1                                 # enable LLM-enhanced recall
@@ -332,7 +336,7 @@ Total LLM cost per user turn (when recall is triggered, Gemini 3.1 Flash-Lite Pr
 **Search returns no hits but data exists** — Check `~/.mempalace/hook_state/hook.log` for:
 - `SSL: CERTIFICATE_VERIFY_FAILED` → Set `SSL_CERT_FILE` env var in all agent configs
 - `User location is not supported` → Set `HTTPS_PROXY` to a US/EU proxy
-- `Embedding dimension 384 does not match 3072` → Run `mempalace repair --yes` after switching models
+- `Embedding dimension 384 does not match 3072` → The hook subprocess is missing one of `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` and fell back to ChromaDB's built-in MiniLM. Since the 2026-04-24 breaking change, all three are required. Make sure they are set in **both** `~/.zshenv` (for shell-launched agents like Codex) and the per-agent config (`~/.claude/settings.json` env block, `~/.codex/config.toml` `[shell_environment_policy.set]`, Hermes plist). If the palace itself was built with the wrong dim, run `mempalace repair --yes` after fixing the env.
 - `embed_query` errors → Run `pip install -e .` to update entry points
 
 **Hook times out (Codex)** — The LLM recall pipeline takes 8-12s. Set hook timeout to at least 20s in `~/.codex/hooks.json` and `.codex-plugin/hooks.json`.
@@ -347,10 +351,12 @@ After enabling Gemini embedding, you **must** re-embed existing drawers — Chro
 # 1. Back up your palace first
 cp -r ~/.mempalace/palace ~/.mempalace/palace.backup
 
-# 2. Set the env var
+# 2. Set the env vars (all three required — see Breaking changes above)
 export MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
+export MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000
+export MEMPAL_EMBEDDING_KEY=your-litellm-key
 
-# 3. Re-embed all drawers (uses Gemini API, ~35min for 45K drawers)
+# 3. Re-embed all drawers (uses the LiteLLM proxy, ~35min for 45K drawers)
 mempalace repair --yes
 ```
 
