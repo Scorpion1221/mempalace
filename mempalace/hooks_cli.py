@@ -1176,7 +1176,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                         "hall": "hall_diary",
                         "topic": "auto-save",
                         "type": "diary_entry",
-                        "agent": config.get("model", "unknown"),
+                        "added_by": ASYNC_SAVE_TAG,
                         "filed_at": now.isoformat(),
                         "date": now.strftime("%Y-%m-%d"),
                     }
