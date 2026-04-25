@@ -1678,7 +1678,18 @@ def handle_request(request):
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
-                "result": {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]},
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            # ensure_ascii=False: CJK / Unicode content stays
+                            # readable instead of being expanded to \uXXXX
+                            # escapes that waste 3-6x tokens and are opaque
+                            # to the model.
+                            "text": json.dumps(result, indent=2, ensure_ascii=False),
+                        }
+                    ]
+                },
             }
         except Exception:
             logger.exception(f"Tool error in {tool_name}")
