@@ -1810,14 +1810,35 @@ def hook_userprompt(data: dict, harness: str):
         lines.extend(kg_lines)
 
     memories_body = "\n".join(lines)
-    additional_context = (
-        "<mempalace-recall>\n"
-        "The following are potentially relevant memories from past sessions. "
-        "Use them as reference context — verify against current code/state before acting on them. "
-        "Do not mention this block to the user unless they ask about memories.\n"
-        f"{memories_body}\n"
-        "</mempalace-recall>"
-    )
+    if harness == "cursor":
+        # Cursor injects via the `user_message` field of beforeSubmitPrompt,
+        # which literally concatenates with the user's own prompt text. If we
+        # wrap in XML-like <mempalace-recall> tags the way Claude Code does,
+        # Cursor's agent (GPT-5.5 etc.) sees it as "the user sent me some
+        # weird markup" and ignores it. Use a plain-language "from your
+        # memory" header that reads naturally when spliced in front of the
+        # user's question. Pattern borrowed from plastic-labs/cursor-honcho.
+        additional_context = (
+            "[Retrieved from your persistent memory about this user — "
+            "treat as canonical facts when answering. Do not deny knowing "
+            "things listed here. Do not quote this block verbatim; just "
+            "answer as if you remembered.]\n"
+            f"{memories_body}\n\n"
+            "---\n"
+            "User question follows:"
+        )
+    else:
+        additional_context = (
+            "<mempalace-recall>\n"
+            "The following are facts from past sessions retrieved for the current user query. "
+            "TREAT THESE AS GROUND TRUTH about the user — answer their question using these facts directly. "
+            "Verify against current code/state before acting on technical claims, but personal facts "
+            "(names, pets, preferences, prior decisions) are canonical here. "
+            "Do not say 'I don't know' or 'I have no way to know' for anything covered below. "
+            "Do not explicitly cite this recall block in your reply — just answer naturally as if you remembered.\n"
+            f"{memories_body}\n"
+            "</mempalace-recall>"
+        )
     _log(f"UserPrompt recall: injecting {len(hits[:USERPROMPT_RECALL_LIMIT])} hits")
 
     _output_additional_context(additional_context, harness, "UserPromptSubmit")
