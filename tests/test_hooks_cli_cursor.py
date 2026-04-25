@@ -91,7 +91,7 @@ def _capture_output():
     )
 
 
-def test_output_additional_context_cursor_top_level():
+def test_output_additional_context_cursor_sessionstart_top_level():
     cm, buf = _capture_output()
     with cm:
         _output_additional_context("hello world", harness="cursor", event="SessionStart")
@@ -100,6 +100,20 @@ def test_output_additional_context_cursor_top_level():
     # Cursor must NOT see the claude-style nested shape.
     assert "hookSpecificOutput" not in result
     assert "continue" not in result
+
+
+def test_output_additional_context_cursor_userpromptsubmit_uses_user_message():
+    # beforeSubmitPrompt in Cursor only injects ``user_message`` into the
+    # prompt context (not ``additional_context``). Verified against the
+    # plastic-labs cursor-honcho plugin's output helper — the docs are
+    # incomplete on this point.
+    cm, buf = _capture_output()
+    with cm:
+        _output_additional_context("recall payload", harness="cursor", event="UserPromptSubmit")
+    result = json.loads(buf.getvalue())
+    assert result == {"continue": True, "user_message": "recall payload"}
+    assert "additional_context" not in result
+    assert "hookSpecificOutput" not in result
 
 
 def test_output_additional_context_claude_code_nested():

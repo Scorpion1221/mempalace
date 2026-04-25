@@ -487,14 +487,28 @@ def _output_additional_context(context: str, harness: str, event: str) -> None:
     Claude Code / Codex: wrapped under ``hookSpecificOutput.additionalContext``
     with the legacy ``continue`` / ``suppressOutput`` siblings.
 
-    Cursor: top-level ``additional_context`` key (cursor.com/cn/docs/hooks —
-    the ``sessionStart`` and ``postToolUse`` response schema).
+    Cursor: field depends on the event. ``sessionStart`` accepts top-level
+    ``additional_context`` (per cursor.com/cn/docs/hooks). ``beforeSubmitPrompt``
+    looks like it only accepts ``{permission, user_message, agent_message}``
+    per the docs, but in practice (verified against the plastic-labs
+    cursor-honcho plugin) it ALSO injects ``user_message`` into the prompt
+    context when ``continue: true`` — the docs are incomplete. Use that
+    undocumented-but-working shape so per-prompt recall actually lands.
 
-    ``event`` is the Claude Code / Codex hookEventName (e.g.
-    ``"UserPromptSubmit"``, ``"SessionStart"``). Cursor ignores this.
+    ``event`` is the Claude Code / Codex hookEventName (``"UserPromptSubmit"``,
+    ``"SessionStart"``) — we switch on it here to pick the right Cursor
+    field.
     """
     if harness == "cursor":
-        _output({"additional_context": context})
+        if event == "UserPromptSubmit":
+            # beforeSubmitPrompt path — ``user_message`` is the only field
+            # Cursor actually feeds into the agent's prompt context for
+            # this event.
+            _output({"continue": True, "user_message": context})
+        else:
+            # SessionStart (and any other event that documents
+            # ``additional_context``) — top-level key.
+            _output({"additional_context": context})
         return
     _output(
         {
