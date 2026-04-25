@@ -874,13 +874,13 @@ Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→Eng
 ## Output Format
 - All `"` inside JSON string values MUST be escaped as `\\"`. All newlines inside string values MUST be escaped as `\\n`. Never emit a literal newline inside a JSON string.
 Return ONLY valid JSON:
-{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}], "kg": [{{"subject": "<entity>", "predicate": "<relationship>", "object": "<entity>"}}]}}
+{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}], "kg": [{{"subject": "<entity>", "predicate": "<relationship>", "object": "<entity>"}}], "tunnels": [{{"source_wing": "<wing>", "source_room": "<room>", "target_wing": "<wing>", "target_room": "<room>", "label": "<why linked>"}}]}}
 
 ## Rules
 - diary: 2-5 sentences, include WHY not just WHAT
 - drawers: each a standalone fact/decision/config worth recalling later. Typically 0-5, but use more for rich conversations
 - Skip trivial exchanges (greetings, confirmations, "OK", "继续")
-- If nothing worth saving: {{"diary": "", "drawers": [], "kg": []}}
+- If nothing worth saving: {{"diary": "", "drawers": [], "kg": [], "tunnels": []}}
 - DEDUP: check the "Current Palace State" section above. Do NOT re-store facts/decisions/configs that already exist in the listed wings/rooms. Only store genuinely NEW information from this conversation segment.
 - If the AI's response is just recalling/repeating previously stored memories, there is nothing new to save.
 - Drawer content should be specific and actionable, not vague summaries
@@ -895,6 +895,12 @@ Return ONLY valid JSON:
   Good Chinese predicates: 使用, 依赖, 工作于, 拥有, 决定, 偏好, 托管于, 技术栈, 角色, 名字, 状态, 修复, 部署到, 配置, 端点, 阻塞于, 迁移到, 养有, 隶属于, 喜欢, 位于
   Bad predicates: found_no_direct_public_private_data_access_evidence (too specific, never queryable). Mixed-language predicates like {{"张三", "loves", "下棋"}} — always wrong.
   Only include facts explicitly STATED in the conversation. Skip if no clear entity relationships.
+- tunnels: 0-3 cross-wing edges connecting related palace locations. Strict rules:
+  - **Cross-wing only**: source_wing MUST differ from target_wing. Never emit a tunnel where both endpoints are in the same wing — those connections are already implicit.
+  - **Both endpoints must exist in "Current Palace State"**: pick source_wing/source_room and target_wing/target_room from the wings list shown above. Do NOT invent wings or rooms that are not already present. If unsure both exist, skip the tunnel.
+  - **Real causal/constraint linkage**: a decision or fact in one wing must actually constrain or shape content in the other. "Both mention auth" is not enough. Example of a good link: an "API rate limit" decision in `wing_backend_api` forces "DB pool sizing" in `wing_backend_db` — the first choice shapes the second.
+  - **Prefer 0**: default to no tunnels unless a genuine cross-wing link was surfaced in this conversation. Over-creating tunnels pollutes palace traversal. Max 2-3 per save.
+  - **Label**: one short sentence naming the causal/constraint story — the "why are these linked" in plain words (SAME LANGUAGE as the conversation).
 
 ## Examples
 
@@ -928,11 +934,19 @@ Output:
 
 Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
-{{"diary": "", "drawers": [], "kg": []}}
+{{"diary": "", "drawers": [], "kg": [], "tunnels": []}}
 
 Input: User asks assistant to run tests and they all pass. No bugs found, no decisions made.
 Output:
-{{"diary": "Ran test suite, all tests passed.", "drawers": [], "kg": []}}
+{{"diary": "Ran test suite, all tests passed.", "drawers": [], "kg": [], "tunnels": []}}
+
+Input: Team lowers the public API rate limit from 1000 to 100 req/min to protect the shared PostgreSQL pool. Palace already has wings `backend_api` (with rooms decisions, configuration) and `backend_db` (with rooms configuration, architecture).
+Output:
+{{"diary": "Lowered public API rate limit from 1000 → 100 req/min. The previous 1000 limit was saturating the PostgreSQL connection pool (max 200), causing backend_db to queue. New limit is sized to stay under the DB pool ceiling.", "drawers": [{{"wing": "backend_api", "room": "decisions", "content": "Public API rate limit: 1000 → 100 req/min. Reason: 1000 was saturating the shared PostgreSQL pool (max 200 connections) and causing request queueing in backend_db. 100 req/min keeps us safely below pool capacity."}}, {{"wing": "backend_db", "room": "configuration", "content": "PostgreSQL pool size: 200 connections (shared with backend_api). Do not raise without coordinating a matching change to the API rate limit — the limit is calibrated to this pool ceiling."}}], "kg": [{{"subject": "backend_api", "predicate": "config_value", "object": "rate_limit=100/min"}}, {{"subject": "backend_db", "predicate": "config_value", "object": "pg_pool=200"}}], "tunnels": [{{"source_wing": "backend_api", "source_room": "decisions", "target_wing": "backend_db", "target_room": "configuration", "label": "API rate limit of 100 req/min is calibrated to the backend_db PostgreSQL pool size of 200 — raising either in isolation will break the other"}}]}}
+
+Input: 用户决定把移动端 App 从 Firebase Auth 迁到自建认证服务。Palace 已有 wings `mobile_app`（rooms: decisions, architecture）和 `auth_service`（rooms: architecture, configuration）。
+Output:
+{{"diary": "决定移动端认证从 Firebase Auth 迁移到自建 auth_service。迁移原因是 Firebase 定价在用户量增长后变得不可控，以及需要在 auth_service 统一多端的会话策略。auth_service 需新增 /mobile/token 端点并支持刷新令牌 30 天。", "drawers": [{{"wing": "mobile_app", "room": "decisions", "content": "移动端认证迁移：Firebase Auth → 自建 auth_service。理由：Firebase 按 MAU 计费在高增长下不可控；统一多端会话策略；自主控制登录风控逻辑"}}, {{"wing": "auth_service", "room": "architecture", "content": "为移动端新增端点 POST /mobile/token（access token 1h / refresh token 30d），需在 auth_service 的 OAuth 流程基础上扩展 device_id 绑定"}}], "kg": [{{"subject": "mobile_app", "predicate": "migrated_to", "object": "auth_service"}}, {{"subject": "auth_service", "predicate": "endpoint", "object": "/mobile/token"}}], "tunnels": [{{"source_wing": "mobile_app", "source_room": "decisions", "target_wing": "auth_service", "target_room": "architecture", "label": "移动端迁移到自建认证，直接要求 auth_service 新增 /mobile/token 端点与 device_id 绑定"}}]}}
 
 ## Conversation to process:
 {transcript}"""
@@ -1243,9 +1257,40 @@ def _async_save_worker(transcript_text, session_id, cwd):
             except Exception as e:
                 _log(f"async save: KG write error: {e}")
 
+        tunnels = data.get("tunnels", [])
+        tunnels_written = 0
+        if tunnels:
+            try:
+                from .palace_graph import create_tunnel
+
+                for t in tunnels:
+                    sw = (t.get("source_wing") or "").strip()
+                    sr = (t.get("source_room") or "").strip()
+                    tw = (t.get("target_wing") or "").strip()
+                    tr = (t.get("target_room") or "").strip()
+                    label = (t.get("label") or "").strip()
+                    if not (sw and sr and tw and tr) or sw == tw:
+                        continue  # skip malformed or same-wing
+                    try:
+                        create_tunnel(
+                            source_wing=sw,
+                            source_room=sr,
+                            target_wing=tw,
+                            target_room=tr,
+                            label=label,
+                        )
+                        tunnels_written += 1
+                    except Exception as e:
+                        _log(
+                            f"async save: tunnel write error "
+                            f"({sw}/{sr} -> {tw}/{tr}): {e}"
+                        )
+            except Exception as e:
+                _log(f"async save: tunnel block failed: {e}")
+
         _log(
             f"async save: wrote {written} entries "
-            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts)"
+            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts + {tunnels_written} tunnels)"
         )
     except Exception as e:
         _log(f"async save error: {e}\n{traceback.format_exc()}")
@@ -2019,6 +2064,76 @@ def hook_userprompt(data: dict, harness: str):
         _log("UserPrompt recall: no hits")
         _output({})
         return
+
+    # Tunnel expansion: for each unique (wing, room) in the current pool,
+    # follow explicit tunnels to surface connected drawers in other wings.
+    # Rerank will filter irrelevant additions; we're just broadening candidates.
+    try:
+        from .palace_graph import follow_tunnels as _follow_tunnels
+
+        # Hits from search_memories don't carry a stable drawer_id; tunnel
+        # hits do (drawer_id of the connected endpoint). Dedup is therefore
+        # only meaningful among tunnel additions themselves — search hits
+        # live in different wings/rooms by construction (tunnels cross wings).
+        existing_tunnel_ids = set()
+        seen_pairs = set()
+        tunnel_added = 0
+        MAX_TUNNEL_EXPANSION = 5
+
+        for hit in list(result.get("results") or []):
+            if tunnel_added >= MAX_TUNNEL_EXPANSION:
+                break
+            w = (hit.get("wing") or "").strip()
+            r = (hit.get("room") or "").strip()
+            if not w or not r or (w, r) in seen_pairs:
+                continue
+            seen_pairs.add((w, r))
+            try:
+                connected = _follow_tunnels(w, r)
+            except Exception as e:
+                _log(f"UserPrompt recall: follow_tunnels({w!r}, {r!r}) failed: {e}")
+                continue
+            for c in connected or []:
+                if tunnel_added >= MAX_TUNNEL_EXPANSION:
+                    break
+                cid = c.get("drawer_id") or c.get("tunnel_id") or id(c)
+                if cid in existing_tunnel_ids:
+                    continue
+                existing_tunnel_ids.add(cid)
+                # follow_tunnels returns connection records, not drawer rows.
+                # Shape the entry to match search_memories hits so rerank
+                # and the formatter downstream stay happy.
+                tunnel_wing = c.get("connected_wing", "")
+                tunnel_room = c.get("connected_room", "")
+                tunnel_text = (
+                    c.get("drawer_preview")
+                    or c.get("text")
+                    or c.get("content")
+                    or c.get("label", "")
+                )
+                result.setdefault("results", []).append(
+                    {
+                        "text": tunnel_text,
+                        "wing": tunnel_wing,
+                        "room": tunnel_room,
+                        "created_at": c.get("filed_at") or c.get("created_at", ""),
+                        "matched_via": "tunnel",
+                        "similarity": 0.5,  # neutral — rerank decides
+                        "distance": 1.0,
+                        "source_file": c.get("source_file", "?"),
+                    }
+                )
+                tunnel_added += 1
+
+        if tunnel_added:
+            # Refresh hits view so the rerank stage below sees the additions.
+            hits = result.get("results", []) if isinstance(result, dict) else hits
+            _log(
+                f"UserPrompt recall: tunnel expansion added {tunnel_added} drawers "
+                f"(pool now {len(result.get('results') or [])})"
+            )
+    except Exception as e:
+        _log(f"UserPrompt recall: tunnel expansion skipped ({e})")
 
     # --- Stage 3: LLM rerank + relevance filter ---
     # Always rerank when LLM is available — even small hit sets may contain
