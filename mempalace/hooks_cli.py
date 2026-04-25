@@ -480,6 +480,34 @@ def _output(data: dict):
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
+def _output_additional_context(context: str, harness: str, event: str) -> None:
+    """Emit a hook response that injects ``context`` into the agent's context
+    window, in the shape the named harness expects.
+
+    Claude Code / Codex: wrapped under ``hookSpecificOutput.additionalContext``
+    with the legacy ``continue`` / ``suppressOutput`` siblings.
+
+    Cursor: top-level ``additional_context`` key (cursor.com/cn/docs/hooks —
+    the ``sessionStart`` and ``postToolUse`` response schema).
+
+    ``event`` is the Claude Code / Codex hookEventName (e.g.
+    ``"UserPromptSubmit"``, ``"SessionStart"``). Cursor ignores this.
+    """
+    if harness == "cursor":
+        _output({"additional_context": context})
+        return
+    _output(
+        {
+            "continue": True,
+            "suppressOutput": True,
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "additionalContext": context,
+            },
+        }
+    )
+
+
 def _get_mine_dir(transcript_path: str = "") -> str:
     """Determine directory to mine from MEMPAL_DIR or transcript path."""
     mempal_dir = os.environ.get("MEMPAL_DIR", "")
@@ -579,7 +607,7 @@ def _mine_sync(transcript_path: str = ""):
         pass
 
 
-SUPPORTED_HARNESSES = {"claude-code", "codex"}
+SUPPORTED_HARNESSES = {"claude-code", "codex", "cursor"}
 
 
 def _parse_harness_input(data: dict, harness: str) -> dict:
@@ -590,20 +618,31 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
     # cwd field name differs across harnesses:
     #   Claude Code: "cwd"
     #   Codex:       "cwd" or "workdir" (Codex internal tool-call payloads use "workdir")
+    #   Cursor:      "workspace_roots" — a list, first element is the workspace root
     # Falling back to "" means wing → "general" in downstream code, which
     # fragments a project's memory across a bogus wing. Extract once here.
+    workspace_roots = data.get("workspace_roots") or []
+    workspace_root = workspace_roots[0] if workspace_roots else None
     cwd = str(
         data.get("cwd")
         or data.get("workdir")
         or data.get("workspace_path")
         or data.get("working_directory")
+        or workspace_root
         or ""
     )
+    # Cursor's session id is "conversation_id"; fall back to session_id for
+    # Claude Code / Codex.
+    session_id = data.get("session_id") or data.get("conversation_id") or "unknown"
+    # Cursor doesn't emit a transcript_path for every hook — it's nullable in
+    # the docs — so str() on None would give "None"; normalise to empty.
+    transcript_path = data.get("transcript_path") or ""
     return {
-        "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
+        "session_id": _sanitize_session_id(str(session_id)),
         "stop_hook_active": data.get("stop_hook_active", False),
-        "transcript_path": str(data.get("transcript_path", "")),
+        "transcript_path": str(transcript_path),
         "cwd": cwd,
+        "harness": harness,
     }
 
 
@@ -1080,14 +1119,51 @@ def hook_stop(data: dict, harness: str):
 
 
 def hook_session_start(data: dict, harness: str):
-    """Session start hook: initialize session tracking state."""
+    """Session start hook: initialize session tracking state.
+
+    For Cursor, also injects a one-shot palace context summary (wings,
+    recent saves, KG entities) via the ``additional_context`` channel.
+    Cursor lacks a per-prompt context-injection hook, so sessionStart is
+    the only chance to seed the agent with memory map awareness — actual
+    per-query recall happens via the agent calling the ``mempalace_search``
+    MCP tool, which is encouraged by the ``mempalace-recall.mdc`` rule
+    shipped in ``.cursor-plugin/rules/``.
+
+    Claude Code / Codex have full per-prompt recall via ``hook_userprompt``,
+    so their session-start path stays a no-op pass-through.
+    """
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
 
-    _log(f"SESSION START for session {session_id}")
+    _log(f"SESSION START for session {session_id} (harness={harness})")
 
     # Initialize session state directory
     STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+    if harness == "cursor":
+        try:
+            palace_summary = _build_palace_context()
+        except Exception as exc:
+            _log(f"SessionStart: palace context build failed: {exc}")
+            palace_summary = ""
+        if palace_summary:
+            additional_context = (
+                "<mempalace-recall>\n"
+                "MemPalace overview for this session — wings, recent saves, "
+                "and known entities. When the user references past work, "
+                "decisions, or personal facts, call the `mempalace_search` "
+                "or `mempalace_kg_query` MCP tool to look up specifics; this "
+                "summary is a map, not the territory.\n"
+                f"{palace_summary}\n"
+                "</mempalace-recall>"
+            )
+            _output_additional_context(additional_context, harness, "SessionStart")
+            return
+        # Empty palace — emit empty additional_context shape for Cursor so
+        # we don't accidentally fall into the legacy {} pass-through that
+        # Cursor wouldn't recognise.
+        _output({"additional_context": ""})
+        return
 
     # Pass through — no blocking on session start
     _output({})
@@ -1730,16 +1806,7 @@ def hook_userprompt(data: dict, harness: str):
     )
     _log(f"UserPrompt recall: injecting {len(hits[:USERPROMPT_RECALL_LIMIT])} hits")
 
-    _output(
-        {
-            "continue": True,
-            "suppressOutput": True,
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": additional_context,
-            },
-        }
-    )
+    _output_additional_context(additional_context, harness, "UserPromptSubmit")
 
 
 def run_hook(hook_name: str, harness: str):

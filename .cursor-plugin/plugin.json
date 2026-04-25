@@ -1,0 +1,35 @@
+{
+  "name": "mempalace",
+  "version": "3.3.2",
+  "description": "Give your AI a memory — mine projects and conversations into a searchable palace. Shared memory across Claude Code, Codex, Hermes, and Cursor on one machine.",
+  "author": {
+    "name": "milla-jovovich"
+  },
+  "homepage": "https://github.com/MemPalace/mempalace",
+  "repository": "https://github.com/MemPalace/mempalace",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "ai",
+    "rag",
+    "mcp",
+    "chromadb",
+    "palace",
+    "search"
+  ],
+  "mcpServers": {
+    "mempalace": {
+      "command": "mempalace-mcp",
+      "env": {
+        "MEMPAL_EMBEDDING_MODEL": "gemini-embedding-2-preview",
+        "MEMPAL_EMBEDDING_ENDPOINT": "http://127.0.0.1:4000",
+        "MEMPAL_EMBEDDING_KEY": "sk-litellm-local",
+        "MEMPAL_RECALL_LLM": "1",
+        "MEMPAL_RECALL_ENDPOINT": "http://127.0.0.1:4000/v1",
+        "MEMPAL_RECALL_MODEL": "gemini-3.1-flash-lite-preview",
+        "MEMPAL_RECALL_KEY": "sk-litellm-local",
+        "SSL_CERT_FILE": "/opt/homebrew/etc/openssl@3/cert.pem"
+      }
+    }
+  }
+}

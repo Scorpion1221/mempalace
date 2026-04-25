@@ -45,48 +45,72 @@ The script handles everything:
 | Skills | `~/.codex/vendor_imports/skills/skills/.curated/mempalace-*` |
 | Feature flag | `~/.codex/config.toml` -> `[features] codex_hooks = true` |
 
+### Cursor IDE
+
+| Component | Location |
+|-----------|----------|
+| Plugin | `~/.cursor/plugins/local/mempalace` (symlink to `.cursor-plugin/` in this repo) |
+| Hooks | `sessionStart` (palace map injection), `stop` (auto-save), `preCompact` (emergency save) |
+| MCP server | Auto-registered via `plugin.json.mcpServers` |
+| Rule | `rules/mempalace-recall.mdc` — tells the agent to call `mempalace_search` on history-reference phrases |
+| Skills | Symlinked from the Codex plugin's skill set (same `/search`, `/status`, `/mine`, `/init`, `/help`) |
+
+Cursor has **no per-prompt hook that accepts context injection** (unlike Claude Code's `UserPromptSubmit` or Codex's equivalent). Auto-recall is instead:
+- `sessionStart` injects a palace *map* (top wings, recent saves, KG entities) at the start of every Cursor chat
+- `rules/mempalace-recall.mdc` instructs the agent to call `mempalace_search` MCP when the user references past work
+
+Same `~/.mempalace/` palace as Claude Code / Codex / Hermes — cross-agent memory on one machine.
+
 ## Post-Install
 
 1. **Restart** Claude Code / Codex CLI
 2. **Verify**: run `mempalace status` or use `/mempalace:status` in Claude Code
 
-## Environment Variables (Required for Full Functionality)
+## Environment Variables (single-source workflow)
 
-`install.sh` installs the package and plugins but does **not** write env vars. Each agent reads from its own config — `~/.zshrc` alone is not enough (MCP servers and launchd services don't source shell profiles).
-
-Two groups of variables, both routed through a LiteLLM proxy at `127.0.0.1:4000`:
-
-| Group | Vars | Purpose |
-|---|---|---|
-| Embedding | `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` | ChromaDB vectorization (Gemini embedding). All three required; missing any falls back to MiniLM which mismatches a 3072-dim palace. |
-| Recall LLM | `MEMPAL_RECALL_LLM=1` + `MEMPAL_RECALL_{ENDPOINT,MODEL,KEY}` | Gates async save + recall rewrite/rerank (Gemini 3.1 Flash-Lite). Missing the quartet silently disables both — buffered turns get dropped. |
-
-Recommended values (LiteLLM proxy form, consistent across agents):
-```
-MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
-MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000
-MEMPAL_EMBEDDING_KEY=sk-litellm-local
-MEMPAL_RECALL_LLM=1
-MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1
-MEMPAL_RECALL_MODEL=gemini-3.1-flash-lite-preview
-MEMPAL_RECALL_KEY=sk-litellm-local
-```
-
-Where to put them:
-
-- **Claude Code** → `~/.claude/settings.json` → `env` block
-- **Codex** → `~/.codex/config.toml` in **both** `[mcp_servers.mempalace].env` (for the MCP server) and `[shell_environment_policy.set]` (for hook subprocesses — they don't inherit the MCP env)
-- **Hermes** → `~/Library/LaunchAgents/ai.hermes.gateway.plist` under `EnvironmentVariables`, then `launchctl unload && launchctl load` the plist
-
-See `CHANGELOG.md` → **Multi-Agent Environment Setup** for the full copy-paste snippets.
-
-### Verify and sync
+There are 7 `MEMPAL_*` env vars driving embedding (3) and recall LLM (4). They live in **one** file: `~/.mempalace/env`. `scripts/sync-plugins.sh` propagates the values into each agent's native config format. **You only edit the source file.**
 
 ```bash
+# First time? sync-plugins.sh creates ~/.mempalace/env from the shipped template:
 bash scripts/sync-plugins.sh
+
+# To change a value:
+$EDITOR ~/.mempalace/env
+bash scripts/sync-plugins.sh   # propagates to all 4 agents + validates drift
 ```
 
-Step `[6/6]` checks all seven variables are present in each agent's config and warns on drift.
+What gets propagated where:
+
+| Agent | Env target |
+|---|---|
+| Claude Code | `~/.claude/settings.json` → `env` block |
+| Codex | `~/.codex/config.toml` → `[mcp_servers.mempalace].env` AND `[shell_environment_policy.set]` |
+| Hermes | `~/Library/LaunchAgents/ai.hermes.gateway.plist` → `EnvironmentVariables` (then launchd reload) |
+| Cursor (GUI) | `launchctl setenv` for the current login session + `~/Library/LaunchAgents/ai.mempalace.env.plist` for reboot persistence |
+
+### Why this matters
+
+- GUI apps (Cursor, sometimes Claude Desktop) launched via macOS LaunchServices do NOT source `~/.zshrc`. The launchctl + plist path is the only reliable way to seed their env.
+- launchd daemons (Hermes) don't source any shell profile. Their plist is the only env source.
+- Codex needs env in TWO places — its MCP server and its hook subprocesses don't share env.
+
+Manually keeping all four agents in sync is what caused mempalace's "drawer save silently fails on Hermes" bug in 2026-04-25 (Hermes plist drifted from the LiteLLM proxy config the other agents had). The single-source workflow is the fix.
+
+### Reference values
+
+The shipped `scripts/mempalace-env.template`:
+
+```bash
+export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"
+export MEMPAL_EMBEDDING_ENDPOINT="http://127.0.0.1:4000"   # LiteLLM (or any OpenAI-compat /v1/embeddings) proxy
+export MEMPAL_EMBEDDING_KEY="sk-litellm-local"             # LiteLLM master key
+export MEMPAL_RECALL_LLM="1"                                # enable LLM-enhanced recall + async save
+export MEMPAL_RECALL_ENDPOINT="http://127.0.0.1:4000/v1"   # OpenAI-compat endpoint
+export MEMPAL_RECALL_MODEL="gemini-3.1-flash-lite-preview"
+export MEMPAL_RECALL_KEY="sk-litellm-local"
+```
+
+Step `[7/8]` of `sync-plugins.sh` reads these from `~/.mempalace/env` and verifies every agent's config has the same value, complaining loudly on drift.
 
 ## Key Features
 

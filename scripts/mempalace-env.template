@@ -1,0 +1,37 @@
+# ~/.mempalace/env — single source of truth for all mempalace agent env vars.
+#
+# This file is sourced by scripts/sync-plugins.sh which propagates the values
+# into every agent's native config format:
+#   - Claude Code:  ~/.claude/settings.json          → env block
+#   - Codex:        ~/.codex/config.toml             → [mcp_servers.mempalace].env
+#                                                    + [shell_environment_policy.set]
+#   - Hermes:       ~/Library/LaunchAgents/ai.hermes.gateway.plist
+#                                                    → <key>EnvironmentVariables</key>
+#   - Cursor:       launchctl setenv + ai.mempalace.env.plist (for macOS GUI)
+#   - Shell:        ~/.zshenv sources this file (for any terminal-launched agent)
+#
+# Edit here, then: bash ~/git/mempalace/scripts/sync-plugins.sh
+#
+# The defaults assume a local LiteLLM proxy on 127.0.0.1:4000. See
+# INSTALL.md → "Environment Variables" for the LiteLLM setup.
+
+# --- Embedding (ChromaDB vectorization) ---
+# All three REQUIRED when any is set. Missing any → ChromaDB falls back to
+# built-in MiniLM (384 dims) and silently breaks every upsert against a
+# palace created with Gemini (3072 dims). See CHANGELOG.md for the history.
+export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"
+export MEMPAL_EMBEDDING_ENDPOINT="http://127.0.0.1:4000"
+export MEMPAL_EMBEDDING_KEY="sk-litellm-local"
+
+# --- Recall LLM (save extraction + recall gate) ---
+# The quartet gates both async save (Stop hook) and recall rewrite/rerank
+# (UserPromptSubmit hook + sessionStart on Cursor). Missing any → async
+# save silently drops buffered turns; recall falls back to raw vector search.
+export MEMPAL_RECALL_LLM="1"
+export MEMPAL_RECALL_ENDPOINT="http://127.0.0.1:4000/v1"
+export MEMPAL_RECALL_MODEL="gemini-3.1-flash-lite-preview"
+export MEMPAL_RECALL_KEY="sk-litellm-local"
+
+# --- Platform-specific (optional) ---
+# macOS: LiteLLM's HTTPS egress needs a CA bundle path on some installs.
+export SSL_CERT_FILE="${SSL_CERT_FILE:-/opt/homebrew/etc/openssl@3/cert.pem}"

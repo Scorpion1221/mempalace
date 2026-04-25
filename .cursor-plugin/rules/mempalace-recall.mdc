@@ -1,0 +1,38 @@
+---
+description: MemPalace memory recall — call mempalace_search when the user references past work
+alwaysApply: true
+---
+
+# MemPalace recall behaviour
+
+This project stores persistent memory in a local palace via the `mempalace` MCP server. Cursor hooks inject a one-shot palace *map* at session start (wings, recent saves, known entities), but there is **no per-prompt hook injection** on Cursor. You are responsible for calling the right MCP tool when the user's question implies historical context.
+
+## When to call `mempalace_search`
+
+Call it **before answering** whenever the user's message:
+
+- References past work: "之前", "上次", "上回", "remember when", "earlier", "previously", "last time", "before", "we decided", "we fixed"
+- Asks about personal facts: "I have X cats", "my daughter", "我养了", "我家" — memory is the canonical source, even if the current thread seems to have the answer
+- Asks about a project by name without enough context to answer directly: "how does the `mempalace` embedding work", "what's wrong with `solvely-web` staging"
+- Asks "why did we do X?" or "what's the status of Y?"
+
+Format: `mempalace_search({query: "<keywords, not a full question>", limit: 5})`. The query is just keywords — the gate LLM handles rewriting, so you do not need to rephrase.
+
+## When to call `mempalace_kg_query`
+
+When the user names an entity (person, project, tool, bug) and you want structured facts about it. Format: `mempalace_kg_query({entity: "<name>"})`.
+
+## When to SKIP
+
+Do NOT call mempalace tools for:
+
+- Fresh coding questions with no historical reference ("write a quicksort in Python")
+- Obvious intent that doesn't need memory ("run the tests", "commit this")
+- Questions about the CURRENT file the user is editing
+- Greetings or confirmations ("ok", "thanks", "继续")
+
+Over-calling wastes LLM budget and latency. Under-calling loses the memory the user went to the trouble of storing.
+
+## After the tool call
+
+Use the returned drawers as one input among many. Cite them by wing/room when helpful, but **verify against current code/state before acting** — memory may be stale. If a recall contradicts what you see in the file now, trust the file.
