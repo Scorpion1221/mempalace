@@ -587,10 +587,23 @@ def _parse_harness_input(data: dict, harness: str) -> dict:
     if harness not in SUPPORTED_HARNESSES:
         print(f"Unknown harness: {harness}", file=sys.stderr)
         sys.exit(1)
+    # cwd field name differs across harnesses:
+    #   Claude Code: "cwd"
+    #   Codex:       "cwd" or "workdir" (Codex internal tool-call payloads use "workdir")
+    # Falling back to "" means wing → "general" in downstream code, which
+    # fragments a project's memory across a bogus wing. Extract once here.
+    cwd = str(
+        data.get("cwd")
+        or data.get("workdir")
+        or data.get("workspace_path")
+        or data.get("working_directory")
+        or ""
+    )
     return {
         "session_id": _sanitize_session_id(str(data.get("session_id", "unknown"))),
         "stop_hook_active": data.get("stop_hook_active", False),
         "transcript_path": str(data.get("transcript_path", "")),
+        "cwd": cwd,
     }
 
 
@@ -599,7 +612,7 @@ You are a memory librarian for MemPalace. Extract key content from this conversa
 Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→English).
 
 ## Palace Structure
-- **wing**: project or domain name, lowercase with underscores (e.g. "backend_api", "infra_deploy"). Use "{wing}" as default.
+- **wing**: project or domain name, lowercase with underscores (e.g. "backend_api", "infra_deploy"). Use "{wing}" as default. **IMPORTANT**: if the conversation is clearly about a project that already exists in the "Current Palace State" wings list, override the default and use that existing wing — this lets memories from different agents on this machine pool into the same project wing.
 - **room**: topic category, lowercase (e.g. "decisions", "code", "configuration", "bugs", "architecture", "general", "issues", "operations", or any fitting short name)
 - **diary**: natural language summary of the session segment — include specific decisions, file paths, commands, technical details. Not just "discussed X", but WHAT was decided/changed/found.
 - **drawers**: discrete pieces of knowledge worth remembering in future sessions. Each drawer should be self-contained — readable without the conversation context.
@@ -1037,7 +1050,7 @@ def hook_stop(data: dict, harness: str):
 
         transcript_text = _extract_recent_exchanges(transcript_path, since_exchange=last_save)
         if transcript_text and os.environ.get("MEMPAL_RECALL_LLM", "") == "1":
-            cwd = data.get("cwd", "")
+            cwd = parsed.get("cwd", "") or data.get("cwd", "")
             try:
                 proc = subprocess.Popen(
                     [
@@ -1345,7 +1358,7 @@ def hook_userprompt(data: dict, harness: str):
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
     user_prompt = data.get("user_prompt", "") or data.get("prompt", "")
-    cwd = data.get("cwd", "")
+    cwd = parsed.get("cwd", "") or data.get("cwd", "")
     previous_assistant_message = _read_session_state_text(session_id, "last_assistant")
     previous_assistant_tail = _tail_chars(
         previous_assistant_message, USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS
