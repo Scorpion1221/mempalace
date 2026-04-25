@@ -278,6 +278,7 @@ hooks = cfg.setdefault("hooks", {})
 
 events = {
     "sessionStart": "session-start",
+    "beforeSubmitPrompt": "userprompt",
     "stop": "stop",
     "preCompact": "precompact",
 }
