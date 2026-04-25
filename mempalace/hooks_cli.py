@@ -728,7 +728,7 @@ def _extract_recent_exchanges(transcript_path, since_exchange=0, max_chars=10000
 
 
 def _build_palace_context():
-    """Build a compact summary of existing palace structure for Haiku context."""
+    """Build a compact summary of existing palace structure for the recall LLM context."""
     try:
         from .config import MempalaceConfig
         from .palace import get_collection
@@ -835,7 +835,7 @@ def _extract_first_json_object(text: str) -> str | None:
 
 
 def _async_save_worker(transcript_text, session_id, cwd):
-    """Background worker: call Haiku to extract memories, write to palace."""
+    """Background worker: call the recall LLM to extract memories, write to palace."""
     try:
         from .recall_llm import _get_llm_config, _call_llm
 
@@ -1658,7 +1658,7 @@ def hook_userprompt(data: dict, harness: str):
     hits = result.get("results", []) if isinstance(result, dict) else []
 
     # Note: diary entries are NOT filtered out. Previously we filtered them
-    # as "session logs", but Haiku async save now stores valuable personal
+    # as "session logs", but the async save now stores valuable personal
     # facts (e.g. "user has three cats") as diary entries too. Let the
     # reranker decide — it correctly identifies relevance.
 
