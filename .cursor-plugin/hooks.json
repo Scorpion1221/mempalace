@@ -8,13 +8,6 @@
         "timeout": 30
       }
     ],
-    "beforeSubmitPrompt": [
-      {
-        "command": "./hooks/mempal-hook.sh userprompt",
-        "type": "command",
-        "timeout": 30
-      }
-    ],
     "stop": [
       {
         "command": "./hooks/mempal-hook.sh stop",

@@ -278,10 +278,17 @@ hooks = cfg.setdefault("hooks", {})
 
 events = {
     "sessionStart": "session-start",
-    "beforeSubmitPrompt": "userprompt",
     "stop": "stop",
     "preCompact": "precompact",
 }
+# NOTE: beforeSubmitPrompt intentionally NOT wired. Empirically (Cursor
+# 3.1.17, tested 2026-04-25) both `user_message` and `additional_context`
+# response fields are silently dropped from the agent's prompt context for
+# this event — Cursor's docs describe it as permission-only, and that turns
+# out to be literal. Running the hook regardless would cost ~5s of LLM
+# rewrite+rerank per user message with no user-visible benefit. Cursor gets
+# its recall via sessionStart (map) + the agent calling mempalace_search
+# MCP on demand (driven by sessionStart instructions).
 changed = []
 for cursor_event, mempal_arg in events.items():
     arr = hooks.setdefault(cursor_event, [])
@@ -296,11 +303,30 @@ for cursor_event, mempal_arg in events.items():
     hooks[cursor_event] = arr
     changed.append(cursor_event)
 
+# Prune mempalace hooks from any event that is NOT in the current events
+# map. This removes stale hooks from previous script versions (e.g. the
+# beforeSubmitPrompt entry that was registered before we confirmed
+# Cursor's user_message field doesn't actually work for context injection).
+pruned = []
+for event_name in list(hooks.keys()):
+    if event_name in events:
+        continue
+    arr = hooks[event_name]
+    filtered = [h for h in arr if "mempal-hook.sh" not in (h.get("command") or "")]
+    if len(filtered) != len(arr):
+        pruned.append(event_name)
+    if filtered:
+        hooks[event_name] = filtered
+    else:
+        del hooks[event_name]
+
 path.parent.mkdir(parents=True, exist_ok=True)
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write("\n")
 print(f"  → registered {len(changed)} hooks in {path}: {', '.join(changed)}")
+if pruned:
+    print(f"  → pruned stale mempalace hooks from: {', '.join(pruned)}")
 PYEOF
 
 # Push env vars into the macOS GUI session so Cursor (launched via

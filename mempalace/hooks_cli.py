@@ -1161,13 +1161,31 @@ def hook_session_start(data: dict, harness: str):
             _log(f"SessionStart: palace context build failed: {exc}")
             palace_summary = ""
         if palace_summary:
+            # This is the ONLY injection point that Cursor 3.1.17 actually
+            # feeds into the agent context. beforeSubmitPrompt's user_message
+            # is documented but silent-drops in practice, so we can't do
+            # per-prompt recall the way Claude Code / Codex do. Compensate
+            # by giving the agent a strong, specific instruction to pull
+            # memory on-demand via the MCP tool.
             additional_context = (
                 "<mempalace-recall>\n"
-                "MemPalace overview for this session — wings, recent saves, "
-                "and known entities. When the user references past work, "
-                "decisions, or personal facts, call the `mempalace_search` "
-                "or `mempalace_kg_query` MCP tool to look up specifics; this "
-                "summary is a map, not the territory.\n"
+                "You have access to a MemPalace memory system via the "
+                "`mempalace_search` and `mempalace_kg_query` MCP tools. "
+                "This block is a map of what's stored — use the tools to "
+                "fetch specifics.\n\n"
+                "BEHAVIOUR RULES — these override any 'I don't know' reflex:\n"
+                "• If the user asks about personal facts (pets, family, "
+                "preferences, plans, projects they work on) → call "
+                "`mempalace_search` BEFORE answering. Do not say 'I have "
+                "no way to know' — the answer is likely in memory.\n"
+                "• If the user references past work ('之前', '上次', "
+                "'remember', 'last time', 'we decided', '我们') → call "
+                "`mempalace_search` BEFORE answering.\n"
+                "• If the user names a project/person/tool you're uncertain "
+                "about → call `mempalace_kg_query` with that entity.\n"
+                "• Skip mempalace for fresh code-writing questions with no "
+                "historical reference — don't waste latency.\n\n"
+                "Palace map (for orientation; do NOT treat as the full answer):\n"
                 f"{palace_summary}\n"
                 "</mempalace-recall>"
             )
