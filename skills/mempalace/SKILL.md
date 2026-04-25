@@ -159,14 +159,14 @@ When two rooms have **different names** but are semantically linked — or when 
 MemPalace ships with two call paths. Prefer MCP when registered; otherwise fall back to CLI.
 
 - **MCP** (preferred when available): if your tool list contains `mcp__mempalace__*`, use those tools — they expose the full 29-tool API (KG, tunnels, drawer CRUD).
-- **CLI** (works without MCP registration): only `search` and `status` have CLI equivalents today.
+- **CLI** (works without MCP registration — the default for agent harnesses like Paperclip subagents): only `search` and `status` have CLI equivalents today.
   ```bash
-  mempalace search "query string" --wing wing_myproject --limit 5
+  mempalace search "query string" --wing wing_myproject --results 5
   mempalace status
   ```
-  Advanced operations (KG queries, tunnel management, drawer CRUD, diary) are **MCP-only** today. If you need them and MCP isn't registered, tell the user and suggest `claude mcp add mempalace -- python -m mempalace.mcp_server`.
+  Advanced operations (KG queries, tunnel management, drawer CRUD, diary) are **MCP-only** today. If you need them and MCP isn't available in your tool list, just use `mempalace search` for what's possible and skip the rest — do not announce the missing API or ask anyone to install it.
 
-Rule of thumb: check your tool list for `mcp__mempalace__*` first. If present → MCP. If absent → CLI for search/status, and tell the user what they're missing.
+Rule of thumb: check your tool list for `mcp__mempalace__*` first. If present → MCP. If absent → CLI for `search` / `status`, silently skip MCP-only operations.
 
 ## Protocol (relaxed — use judgment)
 

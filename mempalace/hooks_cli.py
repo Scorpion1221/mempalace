@@ -2069,7 +2069,19 @@ def hook_userprompt(data: dict, harness: str):
     # follow explicit tunnels to surface connected drawers in other wings.
     # Rerank will filter irrelevant additions; we're just broadening candidates.
     try:
+        from .palace import get_collection
         from .palace_graph import follow_tunnels as _follow_tunnels
+
+        # Load the drawers collection once so follow_tunnels can populate
+        # `drawer_preview` (first 300 chars of connected drawer content).
+        # Without this, follow_tunnels returns only the tunnel label — rerank
+        # then gets a one-sentence candidate it almost always rejects, and the
+        # expansion does nothing.
+        try:
+            _tunnel_col = get_collection(palace_path, create=False)
+        except Exception as e:
+            _log(f"UserPrompt recall: tunnel expansion collection load failed ({e})")
+            _tunnel_col = None
 
         # Hits from search_memories don't carry a stable drawer_id; tunnel
         # hits do (drawer_id of the connected endpoint). Dedup is therefore
@@ -2089,10 +2101,41 @@ def hook_userprompt(data: dict, harness: str):
                 continue
             seen_pairs.add((w, r))
             try:
-                connected = _follow_tunnels(w, r)
+                connected = _follow_tunnels(w, r, col=_tunnel_col)
             except Exception as e:
                 _log(f"UserPrompt recall: follow_tunnels({w!r}, {r!r}) failed: {e}")
                 continue
+            # Backfill drawer_preview when a tunnel was created without an
+            # explicit drawer_id (the dominant case — auto-save binds tunnels
+            # to (wing, room) only). Fetch one representative drawer from the
+            # connected location so rerank has real content to evaluate
+            # instead of just the tunnel's one-sentence label.
+            if _tunnel_col is not None and connected:
+                for c in connected:
+                    if c.get("drawer_preview"):
+                        continue
+                    cw = c.get("connected_wing")
+                    cr = c.get("connected_room")
+                    if not (cw and cr):
+                        continue
+                    try:
+                        sample = _tunnel_col.get(
+                            where={"$and": [{"wing": cw}, {"room": cr}]},
+                            limit=1,
+                            include=["documents"],
+                        )
+                        docs = (
+                            sample.get("documents")
+                            if isinstance(sample, dict)
+                            else getattr(sample, "documents", None)
+                        )
+                        if docs and docs[0]:
+                            c["drawer_preview"] = docs[0][:300]
+                    except Exception as e:
+                        _log(
+                            "UserPrompt recall: tunnel preview backfill "
+                            f"({cw!r}, {cr!r}) failed: {e}"
+                        )
             for c in connected or []:
                 if tunnel_added >= MAX_TUNNEL_EXPANSION:
                     break
@@ -2100,17 +2143,16 @@ def hook_userprompt(data: dict, harness: str):
                 if cid in existing_tunnel_ids:
                     continue
                 existing_tunnel_ids.add(cid)
-                # follow_tunnels returns connection records, not drawer rows.
-                # Shape the entry to match search_memories hits so rerank
-                # and the formatter downstream stay happy.
+                # follow_tunnels returns connection records. When col= was
+                # passed above, `drawer_preview` holds the first 300 chars
+                # of the connected drawer content — real substance for the
+                # reranker to judge. Fall back to label only if the drawer
+                # was deleted or never had an id.
                 tunnel_wing = c.get("connected_wing", "")
                 tunnel_room = c.get("connected_room", "")
-                tunnel_text = (
-                    c.get("drawer_preview")
-                    or c.get("text")
-                    or c.get("content")
-                    or c.get("label", "")
-                )
+                tunnel_text = c.get("drawer_preview") or c.get("label", "")
+                if not tunnel_text:
+                    continue  # no content to rerank against — skip silently
                 result.setdefault("results", []).append(
                     {
                         "text": tunnel_text,
