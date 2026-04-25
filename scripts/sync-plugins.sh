@@ -240,8 +240,9 @@ else
     echo "[4/8] Hermes plugin dir not found, skipping"
 fi
 
-# --- [5/8] Cursor: symlink plugin + launchctl setenv + LaunchAgent plist ----
+# --- [5/8] Cursor: symlink plugin + register hooks + launchctl env ---------
 CURSOR_PLUGIN="$HOME/.cursor/plugins/local/mempalace"
+CURSOR_HOOKS_JSON="$HOME/.cursor/hooks.json"
 echo "[5/8] Installing Cursor plugin..."
 mkdir -p "$HOME/.cursor/plugins/local"
 if [ ! -L "$CURSOR_PLUGIN" ] && [ ! -d "$CURSOR_PLUGIN" ]; then
@@ -257,6 +258,49 @@ else
     cp "$REPO/.cursor-plugin/plugin.json" "$CURSOR_PLUGIN/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
     cp "$REPO/.cursor-plugin/hooks.json" "$CURSOR_PLUGIN/hooks.json" 2>/dev/null && echo "  → hooks.json synced" || true
 fi
+
+# Cursor does NOT auto-discover plugin-local hooks.json (verified empirically
+# 2026-04-25 — only ~/.cursor/hooks.json, project hooks, and Claude Code
+# compatibility settings are read). So we merge our hook entries into the
+# user-scoped hooks.json with absolute paths to the plugin's hook script.
+HOOK_CMD="$CURSOR_PLUGIN/hooks/mempal-hook.sh"
+python3 - <<PYEOF
+import json, os, pathlib
+path = pathlib.Path("$CURSOR_HOOKS_JSON")
+hook_cmd = "$HOOK_CMD"
+if path.exists():
+    with open(path) as f:
+        cfg = json.load(f)
+else:
+    cfg = {"version": 1, "hooks": {}}
+cfg.setdefault("version", 1)
+hooks = cfg.setdefault("hooks", {})
+
+events = {
+    "sessionStart": "session-start",
+    "stop": "stop",
+    "preCompact": "precompact",
+}
+changed = []
+for cursor_event, mempal_arg in events.items():
+    arr = hooks.setdefault(cursor_event, [])
+    desired_cmd = f"{hook_cmd} {mempal_arg}"
+    # Drop any pre-existing mempalace hook for this event so we don't dupe.
+    arr = [h for h in arr if "mempal-hook.sh" not in (h.get("command") or "")]
+    arr.append({
+        "command": desired_cmd,
+        "type": "command",
+        "timeout": 30,
+    })
+    hooks[cursor_event] = arr
+    changed.append(cursor_event)
+
+path.parent.mkdir(parents=True, exist_ok=True)
+with open(path, "w") as f:
+    json.dump(cfg, f, indent=2, ensure_ascii=False)
+    f.write("\n")
+print(f"  → registered {len(changed)} hooks in {path}: {', '.join(changed)}")
+PYEOF
 
 # Push env vars into the macOS GUI session so Cursor (launched via
 # LaunchServices, which does NOT source ~/.zshrc) sees them.

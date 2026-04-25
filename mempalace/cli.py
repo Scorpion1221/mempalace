@@ -34,6 +34,7 @@ import argparse
 from pathlib import Path
 
 from .config import MempalaceConfig
+from .hooks_cli import SUPPORTED_HARNESSES
 from .version import __version__
 
 
@@ -670,7 +671,7 @@ def main():
     p_hook_run.add_argument(
         "--harness",
         required=True,
-        choices=["claude-code", "codex"],
+        choices=sorted(SUPPORTED_HARNESSES),
         help="Harness type (determines stdin JSON format)",
     )
 
