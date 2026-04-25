@@ -51,9 +51,14 @@ smart_copy_hook() {
 
 echo "=== Syncing MemPalace plugins to all 3 agents ==="
 
-# 1. Reinstall Python package (picks up new entry points like mempalace-mcp)
-echo "[1/6] Reinstalling Python package (editable)..."
-pip install -e "$REPO" -q 2>/dev/null
+# 1. Reinstall Python package as a SNAPSHOT (not editable).
+# Using --force-reinstall --no-deps copies the current source tree into
+# site-packages, so running agents (Claude Code / Codex / Hermes) keep
+# running the snapshot from the last deploy — they do NOT pick up every
+# mid-edit save in $REPO. This makes the repo safe to develop in without
+# destabilising the memory system in real time. Deploy = run this script.
+echo "[1/6] Installing Python package (snapshot, not editable)..."
+pip install --force-reinstall --no-deps "$REPO" -q 2>/dev/null
 echo "  → $(python3 -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
 
 # 2. Claude Code: sync plugin cache
@@ -105,7 +110,8 @@ if [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__ini
 
     HERMES_VENV="$HOME/.hermes/hermes-agent/venv"
     if [ -f "$HERMES_VENV/bin/python" ]; then
-        "$HERMES_VENV/bin/python" -m pip install -e "$REPO" -q 2>/dev/null && echo "  → Hermes venv updated" || true
+        # Snapshot install (not editable) — same reason as [1/6].
+        "$HERMES_VENV/bin/python" -m pip install --force-reinstall --no-deps "$REPO" -q 2>/dev/null && echo "  → Hermes venv updated" || true
     fi
 else
     echo "[4/6] Hermes plugin dir not found, skipping"
