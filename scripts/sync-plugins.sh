@@ -110,6 +110,17 @@ if [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
     cp "$REPO/skills/mempalace/SKILL.md" "$CLAUDE_CACHE/skills/mempalace/SKILL.md" \
         && echo "  → skills/mempalace/SKILL.md synced from canonical" || true
 
+    # Also sync to the user-installed skills dir (~/.claude/skills/mempalace/).
+    # Claude Code reads from BOTH the plugin cache AND ~/.claude/skills/<name>/,
+    # and Paperclip-spawned subagents (claude_local adapter) often resolve the
+    # latter path first. If we only update plugin cache, those subagents see
+    # stale skill content — confirmed in the wild for SUP-94 (2026-04-26).
+    USER_SKILL_DIR="$HOME/.claude/skills/mempalace"
+    if [ -d "$USER_SKILL_DIR" ]; then
+        cp "$REPO/skills/mempalace/SKILL.md" "$USER_SKILL_DIR/SKILL.md" \
+            && echo "  → skills/mempalace/SKILL.md synced to $USER_SKILL_DIR" || true
+    fi
+
     # Upsert env vars into ~/.claude/settings.json
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     if [ -f "$CLAUDE_SETTINGS" ]; then
