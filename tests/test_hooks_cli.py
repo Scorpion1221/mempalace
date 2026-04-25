@@ -22,6 +22,7 @@ from mempalace.hooks_cli import (
     _parse_harness_input,
     _sanitize_session_id,
     _validate_transcript_path,
+    _wing_from_transcript_path,
     hook_stop,
     hook_session_start,
     hook_precompact,
@@ -335,6 +336,46 @@ def test_precompact_allows(tmp_path):
         state_dir=tmp_path,
     )
     assert result == {}
+
+
+# --- _wing_from_transcript_path ---
+
+
+def test_wing_from_transcript_path_extracts_project():
+    path = "/home/jp/.claude/projects/-home-jp-Projects-memorypalace/session.jsonl"
+    assert _wing_from_transcript_path(path) == "wing_memorypalace"
+
+
+def test_wing_from_transcript_path_fallback():
+    assert _wing_from_transcript_path("/some/random/path.jsonl") == "wing_sessions"
+
+
+def test_wing_from_transcript_path_windows_backslashes():
+    path = "C:\\Users\\jp\\.claude\\projects\\-home-jp-Projects-myapp\\session.jsonl"
+    assert _wing_from_transcript_path(path) == "wing_myapp"
+
+
+def test_wing_from_transcript_path_lowercases():
+    path = "/home/jp/.claude/projects/-home-jp-Projects-MyProject/session.jsonl"
+    assert _wing_from_transcript_path(path) == "wing_myproject"
+
+
+def test_wing_from_transcript_path_non_projects_layout():
+    # Linux users with code under ~/dev/, ~/src/, ~/code/ — no -Projects- segment.
+    # Project name is the final dash-separated token of the encoded folder.
+    path = "/home/igor/.claude/projects/-home-igor-dev-MemPalace-mempalace/session.jsonl"
+    assert _wing_from_transcript_path(path) == "wing_mempalace"
+
+
+def test_wing_from_transcript_path_macos_users_layout():
+    # macOS ~/ layout without a Projects/ segment.
+    path = "/Users/alice/.claude/projects/-Users-alice-code-MyApp/session.jsonl"
+    assert _wing_from_transcript_path(path) == "wing_myapp"
+
+
+def test_wing_from_transcript_path_nested_deep():
+    path = "/home/bob/.claude/projects/-home-bob-work-clients-acme-frontend/session.jsonl"
+    assert _wing_from_transcript_path(path) == "wing_frontend"
 
 
 # --- _log ---
