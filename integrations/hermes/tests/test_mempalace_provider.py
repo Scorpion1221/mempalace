@@ -4,7 +4,6 @@ import json
 import warnings
 from pathlib import Path
 
-import chromadb
 import pytest
 from mempalace.knowledge_graph import KnowledgeGraph
 
@@ -13,10 +12,20 @@ from plugins.memory.mempalace import MemPalaceMemoryProvider, register, resolve_
 
 
 def _get_collection(palace_path: Path):
+    """Open the palace via mempalace.palace — same path the provider uses.
+
+    A raw ``chromadb.PersistentClient`` here would conflict with the cached
+    client inside ``mempalace.palace.ChromaBackend``: ChromaDB raises
+    "instance already exists with different settings" when the same path
+    is opened with different telemetry / settings by two clients in the
+    same process. Delegating to the shared backend keeps both paths in
+    lockstep and matches production behaviour.
+    """
     import os
     os.environ.setdefault("ANONYMIZED_TELEMETRY", "False")
-    client = chromadb.PersistentClient(path=str(palace_path))
-    return client.get_or_create_collection("mempalace_drawers")
+    from mempalace.palace import get_collection
+
+    return get_collection(str(palace_path), create=True)
 
 
 def _collection_count(palace_path: Path) -> int:
@@ -57,14 +66,21 @@ def test_register_registers_provider() -> None:
     assert isinstance(ctx.providers[0], MemPalaceMemoryProvider)
 
 
-def test_default_paths_resolve_under_hermes_home(tmp_path: Path) -> None:
+def test_default_paths_resolve_to_shared_mempalace(tmp_path: Path, _isolated_shared_defaults) -> None:
+    # Parity with Claude Code / Codex (mempalace commit 32dbd5a): palace
+    # and KG default to the shared ``~/.mempalace/`` store (monkeypatched
+    # per-test by the autouse fixture) regardless of hermes_home. Only
+    # ``base_dir`` and ``identity_path`` are profile-scoped — everything
+    # that carries user memory pools across agents.
     hermes_home = tmp_path / "profile"
     paths = resolve_paths(hermes_home)
 
     assert paths.base_dir == hermes_home / "mempalace"
-    assert paths.palace_path == hermes_home / "mempalace" / "palace"
     assert paths.identity_path == hermes_home / "mempalace" / "identity.txt"
-    assert paths.kg_path == hermes_home / "mempalace" / "knowledge_graph.sqlite3"
+    # Shared store — defaults come from mempalace.config / mempalace.knowledge_graph,
+    # routed through the autouse fixture to a tmp dir for test isolation.
+    assert paths.palace_path == _isolated_shared_defaults / "palace"
+    assert paths.kg_path == _isolated_shared_defaults / "knowledge_graph.sqlite3"
 
 
 def test_custom_paths_from_config_are_respected(tmp_path: Path) -> None:
@@ -738,7 +754,7 @@ def test_render_recall_passes_previous_assistant_context_to_llm_rewrite_and_rera
     # on for filter selection.
     active_ctx = calls["active_context"]
     assert isinstance(active_ctx, dict)
-    assert active_ctx["wing"] == "wing_coder"
+    assert active_ctx["wing"] == "coder"
     assert active_ctx["platform"] == "cli"
     assert calls["rerank"] == {
         "tail": "Earlier I explained the MemPalace Claude and Codex hooks."

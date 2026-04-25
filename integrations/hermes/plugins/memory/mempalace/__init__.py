@@ -1492,9 +1492,16 @@ class MemPalaceMemoryProvider(MemoryProvider):
         for session_id in list(self._sessions):
             self._flush_session(session_id)
         self._executor.shutdown(wait=True, cancel_futures=False)
+        # Drop our cached reference to the shared backend's clients — but do
+        # NOT call _palace_backend.close(). close() permanently disables the
+        # backend, which is wrong when the host process may have other
+        # mempalace users (e.g. another provider instance, or tests that
+        # create + tear down providers).
         try:
             from mempalace.palace import _DEFAULT_BACKEND as _palace_backend
-            _palace_backend.close()
+            _palace_backend._clients.clear()
+            if hasattr(_palace_backend, "_freshness"):
+                _palace_backend._freshness.clear()
         except Exception:
             pass
 
@@ -1935,10 +1942,15 @@ class MemPalaceMemoryProvider(MemoryProvider):
     def _tool_reconnect(self, state: SessionState, args: Dict) -> str:
         with self._chroma_lock:
             # Drop cached PersistentClient inside mempalace backend so it
-            # reopens with any fresh settings on next access.
+            # reopens on next access. Use _clients.clear() rather than
+            # close() — close() sets _closed=True and makes the backend
+            # refuse further get_collection calls, which would break the
+            # very next tool invocation.
             try:
                 from mempalace.palace import _DEFAULT_BACKEND as _palace_backend
-                _palace_backend.close()
+                _palace_backend._clients.clear()
+                if hasattr(_palace_backend, "_freshness"):
+                    _palace_backend._freshness.clear()
             except Exception:
                 pass
             # Clear ChromaDB's global singleton registry so PersistentClient
@@ -2755,6 +2767,13 @@ class MemPalaceMemoryProvider(MemoryProvider):
             except Exception:
                 pass
             return _palace_get_collection(str(self._paths.palace_path), create=create)
+        except Exception:
+            # Collection doesn't exist yet (create=False on fresh palace) — the
+            # callers in this module all check for None, so swallow and return
+            # None rather than propagating ChromaDB's NotFoundError.
+            if not create:
+                return None
+            raise
 
     def _assistant_cache_dir(self) -> Path:
         if self._paths is None:
