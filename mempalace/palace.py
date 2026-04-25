@@ -44,14 +44,22 @@ _embedding_fn_cache: object = "UNSET"
 
 
 def _get_embedding_fn():
-    """Lazily resolve and cache the configured embedding function."""
+    """Lazily resolve and cache the configured embedding function.
+
+    Only successful EFs are cached. A ``None`` return (no MEMPAL_EMBEDDING_*
+    set, or transient lookup failure) does NOT pollute the cache, so the
+    next call after env stabilises can still resolve a real EF instead of
+    serving stale ``None`` for the whole process lifetime.
+    """
     global _embedding_fn_cache
     if _embedding_fn_cache != "UNSET":
         return _embedding_fn_cache
     from .embedding import get_embedding_function
 
-    _embedding_fn_cache = get_embedding_function()
-    return _embedding_fn_cache
+    ef = get_embedding_function()
+    if ef is not None:
+        _embedding_fn_cache = ef
+    return ef
 
 
 def _reset_embedding_cache():

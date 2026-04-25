@@ -218,7 +218,12 @@ def get_embedding_function():
     Otherwise requires ``MEMPAL_EMBEDDING_ENDPOINT`` and
     ``MEMPAL_EMBEDDING_KEY``; if either is missing, logs a warning and
     falls back to ``None`` (conservative — never crashes on misconfig).
-    Result is cached at module level.
+
+    Caching: only successful ``ProxyEmbeddingFunction`` instances are cached.
+    Returning ``None`` does NOT pollute the cache, so a subsequent call after
+    transient env-loading issues (e.g. launchd race during a concurrent
+    ``pip install -e``) can still resolve a real EF instead of silently
+    falling back to ChromaDB's 384-dim MiniLM forever.
     """
     global _cached_embedding_fn
     if _cached_embedding_fn != "UNSET":
@@ -227,7 +232,6 @@ def get_embedding_function():
     model = os.environ.get("MEMPAL_EMBEDDING_MODEL", "").strip()
 
     if not model or model.lower() == "default":
-        _cached_embedding_fn = None
         return None
 
     endpoint = os.environ.get("MEMPAL_EMBEDDING_ENDPOINT", "").strip()
@@ -239,7 +243,6 @@ def get_embedding_function():
             "MEMPAL_EMBEDDING_KEY is not set. Falling back to default embedding.",
             model,
         )
-        _cached_embedding_fn = None
         return None
 
     dims_str = os.environ.get("MEMPAL_EMBEDDING_DIMS", "")

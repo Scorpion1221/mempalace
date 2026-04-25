@@ -73,6 +73,36 @@ class TestGetEmbeddingFunction:
         b = embedding.get_embedding_function()
         assert a is b
 
+    def test_none_result_does_not_pollute_cache(self, monkeypatch):
+        # Bug: previously, calling get_embedding_function() while env was
+        # incomplete (e.g. launchd race during pip install -e) cached None
+        # forever — every later call served stale None even after env
+        # stabilised, silently falling back to ChromaDB's MiniLM (384-dim)
+        # against a Gemini (3072-dim) palace.
+        monkeypatch.delenv("MEMPAL_EMBEDDING_MODEL", raising=False)
+        assert embedding.get_embedding_function() is None
+
+        # Env appears (e.g. user fixed config and we re-call without restart).
+        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+        result = embedding.get_embedding_function()
+        assert isinstance(result, embedding.ProxyEmbeddingFunction)
+
+    def test_palace_layer_also_self_heals(self, monkeypatch):
+        # Same bug at the second cache layer in mempalace.palace.
+        from mempalace import palace
+
+        palace._reset_embedding_cache()
+        monkeypatch.delenv("MEMPAL_EMBEDDING_MODEL", raising=False)
+        assert palace._get_embedding_fn() is None
+
+        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+        result = palace._get_embedding_fn()
+        assert isinstance(result, embedding.ProxyEmbeddingFunction)
+
 
 class TestBackwardCompatAlias:
     """The deprecated GeminiEmbeddingFunction name must still resolve."""
