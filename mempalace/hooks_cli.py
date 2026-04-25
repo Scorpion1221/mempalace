@@ -19,6 +19,13 @@ from pathlib import Path
 SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "3"))
 SAVE_MIN_MESSAGES = int(os.environ.get("MEMPAL_SAVE_MIN_MESSAGES", "3"))
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
+
+# Metadata tag for async LLM-driven save (diary/drawer writes from the recall
+# LLM). Kept model-agnostic — the actual model name is recorded separately on
+# the `agent` field. ``ASYNC_SAVE_TAG_LEGACY`` matches pre-rename drawers so
+# `_build_palace_context` still sees them during the transition.
+ASYNC_SAVE_TAG = "async_llm_save"
+ASYNC_SAVE_TAG_LEGACY = "haiku_async_save"
 _RECENT_MSG_COUNT = 30  # how many recent user messages to summarize
 
 
@@ -1023,7 +1030,7 @@ def _build_palace_context():
         recent = col.get(
             limit=10,
             include=["documents", "metadatas"],
-            where={"added_by": "haiku_async_save"},
+            where={"added_by": {"$in": [ASYNC_SAVE_TAG, ASYNC_SAVE_TAG_LEGACY]}},
         )
         if recent and recent.get("documents"):
             previews = []
@@ -1169,7 +1176,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                         "hall": "hall_diary",
                         "topic": "auto-save",
                         "type": "diary_entry",
-                        "agent": "haiku",
+                        "agent": config.get("model", "unknown"),
                         "filed_at": now.isoformat(),
                         "date": now.strftime("%Y-%m-%d"),
                     }
@@ -1201,7 +1208,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                         "wing": d_wing,
                         "room": d_room,
                         "hall": d_hall,
-                        "added_by": "haiku_async_save",
+                        "added_by": ASYNC_SAVE_TAG,
                         "filed_at": now.isoformat(),
                     }
                 ],

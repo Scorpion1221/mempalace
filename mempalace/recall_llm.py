@@ -41,8 +41,9 @@ logger = logging.getLogger(__name__)
 # --- Configuration ---
 
 # Env var priority: MEMPAL_RECALL_ENDPOINT > Vertex AI > ANTHROPIC_API_KEY
-DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
-DEFAULT_VERTEX_MODEL = "claude-haiku-4-5"
+# `MEMPAL_RECALL_MODEL` is required for every backend — no implicit fallback.
+# When unset (or empty), the corresponding backend is treated as unconfigured
+# and skipped. This avoids silently locking users into a vendor default.
 VERTEX_LOCATION = "us-east5"
 REWRITE_TIMEOUT_S = 8
 RERANK_TIMEOUT_S = 8
@@ -170,10 +171,10 @@ def _get_llm_config() -> dict | None:
     # Priority 2: Vertex AI (Claude Code Vertex mode)
     if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
         project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
-        if project:
+        model = os.environ.get("MEMPAL_RECALL_MODEL", "").strip()
+        if project and model:
             token = _get_vertex_token()
             if token:
-                model = os.environ.get("MEMPAL_RECALL_MODEL", DEFAULT_VERTEX_MODEL)
                 location = os.environ.get("MEMPAL_VERTEX_LOCATION", "")
                 if not location:
                     cloud_region = os.environ.get("CLOUD_ML_REGION", "")
@@ -192,8 +193,8 @@ def _get_llm_config() -> dict | None:
 
     # Priority 3: Anthropic native API
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if api_key:
-        model = os.environ.get("MEMPAL_RECALL_MODEL", DEFAULT_ANTHROPIC_MODEL)
+    model = os.environ.get("MEMPAL_RECALL_MODEL", "").strip()
+    if api_key and model:
         return {"backend": "anthropic", "api_key": api_key, "model": model}
 
     return None
