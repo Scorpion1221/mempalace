@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
@@ -1047,7 +1048,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
             f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts)"
         )
     except Exception as e:
-        _log(f"async save error: {e}")
+        _log(f"async save error: {e}\n{traceback.format_exc()}")
 
 
 def hook_stop(data: dict, harness: str):
