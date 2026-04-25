@@ -6,7 +6,7 @@
 set -euo pipefail
 
 REPO="$HOME/git/mempalace"
-HERMES_REPO="$HOME/git/hermes-mempalace-plugin"
+HERMES_REPO="$REPO/integrations/hermes"
 
 # Smart copy: if target has local env var customizations, preserve them after update
 smart_copy_hook() {
@@ -105,8 +105,16 @@ fi
 HERMES_RUNTIME="$HOME/.hermes/hermes-agent/plugins/memory/mempalace"
 if [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     echo "[4/6] Syncing Hermes plugin..."
-    cp "$HERMES_REPO/plugins/memory/mempalace/__init__.py" "$HERMES_RUNTIME/__init__.py"
-    echo "  → __init__.py synced"
+    # Sync the whole plugin directory (not just __init__.py) so newly added
+    # submodules / plugin.yaml / README updates also land in the runtime.
+    # Skips __pycache__ and the runtime venv/dirs.
+    for f in "$HERMES_REPO/plugins/memory/mempalace/"*.py \
+             "$HERMES_REPO/plugins/memory/mempalace/"*.yaml \
+             "$HERMES_REPO/plugins/memory/mempalace/"*.md; do
+        [ -e "$f" ] || continue
+        cp "$f" "$HERMES_RUNTIME/$(basename "$f")"
+    done
+    echo "  → plugin files synced ($(ls "$HERMES_REPO/plugins/memory/mempalace/" | grep -vE '__pycache__|\.pyc$' | wc -l | tr -d ' ') files)"
 
     HERMES_VENV="$HOME/.hermes/hermes-agent/venv"
     if [ -f "$HERMES_VENV/bin/python" ]; then
