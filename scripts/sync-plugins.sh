@@ -102,6 +102,14 @@ if [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
     done
     cp "$REPO/.claude-plugin/plugin.json" "$CLAUDE_CACHE/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
 
+    # Deploy canonical skill (skills/mempalace/SKILL.md) into plugin cache.
+    # The .claude-plugin/skills/mempalace/SKILL.md in the repo is a symlink
+    # back to the canonical file — agents need a real file in their runtime
+    # cache, so we resolve and copy here instead of preserving the symlink.
+    mkdir -p "$CLAUDE_CACHE/skills/mempalace"
+    cp "$REPO/skills/mempalace/SKILL.md" "$CLAUDE_CACHE/skills/mempalace/SKILL.md" \
+        && echo "  → skills/mempalace/SKILL.md synced from canonical" || true
+
     # Upsert env vars into ~/.claude/settings.json
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     if [ -f "$CLAUDE_SETTINGS" ]; then
@@ -140,6 +148,19 @@ if [ -d "$CODEX_PLUGIN" ]; then
     done
     cp "$REPO/.codex-plugin/plugin.json" "$CODEX_PLUGIN/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
     cp "$REPO/.codex-plugin/hooks.json" "$CODEX_PLUGIN/hooks.json" 2>/dev/null && echo "  → hooks.json synced" || true
+
+    # Sync the 5 Codex skill stubs (search/status/mine/help/init). Each is a
+    # tiny SKILL.md that calls `mempalace instructions <name>` — the actual
+    # docstring lives in mempalace/instructions/*.md inside the Python package,
+    # which got refreshed by the snapshot install in [1/8]. So the stubs are
+    # the only thing to copy.
+    for s in "$REPO/.codex-plugin/skills/"*/SKILL.md; do
+        [ -f "$s" ] || continue
+        name=$(basename "$(dirname "$s")")
+        mkdir -p "$CODEX_PLUGIN/skills/$name"
+        cp "$s" "$CODEX_PLUGIN/skills/$name/SKILL.md"
+    done
+    echo "  → 5 codex skill stubs synced"
 
     # Upsert env vars into ~/.codex/config.toml in BOTH required locations:
     # [mcp_servers.mempalace].env and [shell_environment_policy.set]
@@ -455,6 +476,34 @@ if [ $DRIFT -eq 0 ]; then
 else
     echo "  ⚠ drift detected above — re-run this script or manually reconcile"
 fi
+
+# Skill drift check — canonical SKILL must match what's deployed in each
+# agent's runtime. Codex 5-stub structure is intentionally different and is
+# verified in-tree (the .codex-plugin/skills/* files are the canonical
+# source for Codex's slash-command stubs, not the main SKILL.md).
+echo "  Skill content check:"
+CANONICAL_SKILL="$REPO/skills/mempalace/SKILL.md"
+CANONICAL_MD5=$(md5 -q "$CANONICAL_SKILL" 2>/dev/null || md5sum "$CANONICAL_SKILL" | awk '{print $1}')
+SKILL_DRIFT=0
+# Repo-side: .claude-plugin must symlink-resolve to canonical content.
+REPO_CLAUDE_SKILL="$REPO/.claude-plugin/skills/mempalace/SKILL.md"
+if [ -f "$REPO_CLAUDE_SKILL" ]; then
+    actual_md5=$(md5 -q "$REPO_CLAUDE_SKILL" 2>/dev/null || md5sum "$REPO_CLAUDE_SKILL" | awk '{print $1}')
+    if [ "$actual_md5" != "$CANONICAL_MD5" ]; then
+        echo "    ⚠ .claude-plugin/skills/mempalace/SKILL.md content differs from canonical"
+        echo "      (it should be a symlink to ../../../skills/mempalace/SKILL.md)"
+        SKILL_DRIFT=1
+    fi
+fi
+# Runtime: Claude Code plugin cache.
+if [ -n "${CLAUDE_CACHE:-}" ] && [ -f "$CLAUDE_CACHE/skills/mempalace/SKILL.md" ]; then
+    actual_md5=$(md5 -q "$CLAUDE_CACHE/skills/mempalace/SKILL.md" 2>/dev/null || md5sum "$CLAUDE_CACHE/skills/mempalace/SKILL.md" | awk '{print $1}')
+    if [ "$actual_md5" != "$CANONICAL_MD5" ]; then
+        echo "    ⚠ Claude Code runtime SKILL.md drifted from canonical (CLAUDE_CACHE)"
+        SKILL_DRIFT=1
+    fi
+fi
+[ $SKILL_DRIFT -eq 0 ] && echo "    ✓ canonical SKILL.md matches .claude-plugin and Claude Code runtime"
 
 # --- [8/8] Summary ----------------------------------------------------------
 echo "[8/8] Summary"
