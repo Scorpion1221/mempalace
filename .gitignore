@@ -40,3 +40,7 @@ venv/
 # MemPalace per-project files (issue #185)
 mempalace.yaml
 entities.json
+
+# Benchmark raw outputs — reproducible via scripts in benchmarks/mempalace_eval/
+benchmarks/mempalace_eval/results_*.jsonl
+benchmarks/mempalace_eval/results_*.json
