@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 This section documents changes in the fork that are not yet in upstream.
 Based on upstream `3.3.2`.
 
+### Added
+
+- **Auto-load `~/.mempalace/env` via python-dotenv.** `mempalace.config` now loads the env file on import, so `mempalace-mcp` and CLI pick up `MEMPAL_*` without relying on shell rc files. This lets launchd / systemd / Docker-spawned instances share one source of truth with interactive terminals. Process env still wins on conflict. Adds `python-dotenv>=1.0,<2` to runtime dependencies.
+
 ### Breaking changes
 
 - **Embedding: Google direct-API path removed.** Embedding now goes exclusively through an OpenAI-compatible `/v1/embeddings` endpoint (LiteLLM proxy, Ollama, vLLM, etc.). The `https://generativelanguage.googleapis.com/.../batchEmbedContents` code path is gone.

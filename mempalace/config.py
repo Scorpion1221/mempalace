@@ -9,6 +9,28 @@ import os
 import re
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv as _load_dotenv
+except ImportError:  # dotenv is a runtime dependency; guard for source checkouts without it installed
+    _load_dotenv = None
+
+
+def _load_env_file() -> None:
+    """Load ~/.mempalace/env into os.environ without overriding existing values.
+
+    Why: interactive shells source .zshenv / .bashrc, but launchd and systemd
+    services do not. A single user-facing env file keeps config in one place
+    for terminal and service contexts. Process env always wins, so explicit
+    overrides from launchd plist / systemd unit / docker env still take effect.
+    """
+    env_file = Path(os.path.expanduser("~/.mempalace/env"))
+    if _load_dotenv is None or not env_file.is_file():
+        return
+    _load_dotenv(dotenv_path=env_file, override=False)
+
+
+_load_env_file()
+
 
 # ── Input validation ──────────────────────────────────────────────────────────
 # Shared sanitizers for wing/room/entity names. Prevents path traversal,

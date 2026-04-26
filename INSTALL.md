@@ -68,15 +68,19 @@ Same `~/.mempalace/` palace as Claude Code / Codex / Hermes — cross-agent memo
 
 ## Environment Variables (single-source workflow)
 
-There are 7 `MEMPAL_*` env vars driving embedding (3) and recall LLM (4). They live in **one** file: `~/.mempalace/env`. `scripts/sync-plugins.sh` propagates the values into each agent's native config format. **You only edit the source file.**
+There are 7 `MEMPAL_*` env vars driving embedding (3) and recall LLM (4). They live in **one** file: `~/.mempalace/env`.
+
+**As of 3.3.4**, the mempalace package itself loads this file on import via `python-dotenv`, so any process that imports `mempalace` (CLI, `mempalace-mcp`, hooks) sees the values automatically — even when started by launchd / systemd / Docker, which do not source shell rc files. Process env still wins over the file, so explicit overrides keep working.
+
+`scripts/sync-plugins.sh` is still useful when you want the values mirrored into each agent's native config (Claude Code `settings.json`, Codex `config.toml`, Hermes plist) for visibility or for non-mempalace consumers, but it is no longer required for mempalace itself to function.
 
 ```bash
-# First time? sync-plugins.sh creates ~/.mempalace/env from the shipped template:
-bash scripts/sync-plugins.sh
-
-# To change a value:
+# First time? Copy the shipped template:
+cp scripts/mempalace-env.template ~/.mempalace/env
 $EDITOR ~/.mempalace/env
-bash scripts/sync-plugins.sh   # propagates to all 4 agents + validates drift
+
+# Optional: mirror values into every agent's native config + validate drift
+bash scripts/sync-plugins.sh
 ```
 
 What gets propagated where:
