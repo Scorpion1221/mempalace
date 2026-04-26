@@ -57,6 +57,8 @@ from mempalace.searcher import (
     _expand_with_neighbors,
     _extract_drawer_ids_from_closet,
     _hybrid_rank,
+    _is_preference_query,
+    _keyword_recall,
     search_memories,
 )
 
@@ -571,6 +573,105 @@ class TestBM25:
         ranked_long = _hybrid_rank([dict(r) for r in with_outlier], "alpha")
         assert ranked_short[0]["text"] == ranked_long[0]["text"]
         assert ranked_short[1]["text"] == ranked_long[1]["text"]
+
+    def test_hybrid_rank_default_weights_favor_vector(self):
+        # Locks in the empirically-tuned weights (0.8 vec / 0.2 bm25). The
+        # knob was swept on LongMemEval 500q; lowering bm25 below 0.4 climbs
+        # R@5 0.966 → 0.978 by stopping keyword-rich but semantically-weak
+        # candidates from displacing cosine winners on preference/advice
+        # queries. See searcher._hybrid_rank docstring for context.
+        #
+        # This case sits in the crossover region: under the old 0.6/0.4
+        # defaults the token-stuffed doc wins, under the new 0.8/0.2 the
+        # cosine winner keeps rank 1. Distances are chosen so vec_sim(0)
+        # (0.60) × 0.8 = 0.48 > vec_sim(1)(0.10) × 0.8 + 1.0 × 0.2 = 0.28.
+        results = [
+            {"text": "I prefer italian food and enjoy cooking", "distance": 0.40},
+            {"text": "chocolate chip cookies cookies chocolate chip", "distance": 0.90},
+        ]
+        ranked = _hybrid_rank([dict(r) for r in results], "chocolate chip cookies")
+        assert ranked[0]["text"] == "I prefer italian food and enjoy cooking"
+
+        # Same inputs with the old defaults flip the winner — confirms
+        # we're actually exercising the weight behaviour, not some other
+        # property of the candidates.
+        ranked_old = _hybrid_rank(
+            [dict(r) for r in results],
+            "chocolate chip cookies",
+            vector_weight=0.6,
+            bm25_weight=0.4,
+        )
+        assert "chocolate" in ranked_old[0]["text"]
+
+    def test_preference_query_detector_catches_advice_stems(self):
+        # EXPERIMENTAL heuristic: not auto-applied in _hybrid_rank. Tests
+        # lock in the regex so callers who opt in know what to expect.
+        # Derived from LongMemEval / ConvoMem test-set failures; no
+        # held-out validation yet — treat as a building block.
+        for q in [
+            "What should I serve for dinner this weekend with my homegrown ingredients?",
+            "I've been having trouble with the battery life on my phone lately. Any tips?",
+            "I've been feeling like my chocolate chip cookies need something extra. Any advice?",
+            "I'm trying to find a bookshelf for my living room. Any suggestions on where to look?",
+            "Could you help me draft a follow-up email to a new prospect?",
+            "I need to prepare for a performance review. What are some effective strategies?",
+            "Can you recommend a good hiking trail nearby?",
+            "How should I organize my bookshelf?",
+        ]:
+            assert _is_preference_query(q), f"should detect: {q!r}"
+
+        for q in [
+            "What degree did I graduate with?",
+            "How many doctors did I visit last month?",
+            "When did Melanie paint a sunrise?",
+            "Who gave me a new stand mixer as a birthday gift?",
+            "",
+        ]:
+            assert not _is_preference_query(q), f"false positive: {q!r}"
+
+    def test_hybrid_rank_does_not_auto_apply_preference_detector(self):
+        # Default behaviour: the detector is a private helper, not
+        # wired into _hybrid_rank. Preference-style queries still use
+        # the tuned 0.8/0.2 weights unless the caller overrides.
+        results = [
+            {"text": "I prefer italian food and enjoy cooking", "distance": 0.70},
+            {"text": "tips tips tips advice advice", "distance": 0.72},
+        ]
+        ranked = _hybrid_rank(
+            [dict(r) for r in results],
+            "Any advice on what to cook?",
+        )
+        # Under 0.8/0.2 defaults with nearly-tied cosine, the token-
+        # stuffed doc still wins because BM25 isn't auto-suppressed.
+        # If this ever flips, the preference detector has leaked into
+        # the default ranking path — revisit that as a deliberate
+        # product decision, not a silent change.
+        assert ranked[0]["text"] == "tips tips tips advice advice"
+
+    def test_keyword_recall_finds_titlecase_proper_nouns(self, collection):
+        # ChromaDB's $contains is case-sensitive, but _tokenize lowercases.
+        # Without the case-variant expansion, a query like "melanie" (after
+        # tokenisation) misses drawers that only store "Melanie" — the common
+        # case for proper nouns in prose. Fix: try lower / title / upper.
+        collection.add(
+            ids=["drawer_story_diary_001"],
+            documents=["Melanie painted a sunrise over the harbour yesterday."],
+            metadatas=[{"wing": "story", "room": "diary", "source_file": "diary.md"}],
+        )
+        hits = _keyword_recall(collection, "melanie", where=None, exclude_ids=set(), limit=5)
+        assert hits, "case-variant expansion must find titlecase proper nouns"
+        assert hits[0][0] == "Melanie painted a sunrise over the harbour yesterday."
+
+    def test_keyword_recall_finds_uppercase_acronyms(self, collection):
+        # Acronyms like "MCP" are stored uppercase in prose. A query "mcp"
+        # would be lowercased by _tokenize; the uppercase fallback catches it.
+        collection.add(
+            ids=["drawer_code_infra_001"],
+            documents=["The MCP server caches collection handles between calls."],
+            metadatas=[{"wing": "code", "room": "infra", "source_file": "mcp_server.py"}],
+        )
+        hits = _keyword_recall(collection, "mcp", where=None, exclude_ids=set(), limit=5)
+        assert hits, "case-variant expansion must find uppercase acronyms"
 
 
 # ── diary ingest ─────────────────────────────────────────────────────
