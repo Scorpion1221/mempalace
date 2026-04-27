@@ -24,9 +24,18 @@ echo ""
 
 # ─── Step 1: Detect existing LiteLLM install ────────────────────────────────
 LITELLM_MODE=""
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q mempalace-litellm; then
-    LITELLM_MODE="docker-running"
-    ok "Detected: LiteLLM Docker container already running"
+# First check: is a LiteLLM proxy already responding on :4000? If so, whoever
+# started it (our Docker container, the user's existing Python install, or an
+# external proxy) is doing the job — don't start a competing one on the same
+# port.
+if curl -fs http://127.0.0.1:4000/health/readiness >/dev/null 2>&1; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q mempalace-litellm; then
+        LITELLM_MODE="docker-running"
+        ok "Detected: LiteLLM Docker container running (ours)"
+    else
+        LITELLM_MODE="external-running"
+        ok "Detected: LiteLLM proxy already responding on :4000 (not ours)"
+    fi
 elif docker ps -a --format '{{.Names}}' 2>/dev/null | grep -q mempalace-litellm; then
     LITELLM_MODE="docker-stopped"
     ok "Detected: LiteLLM Docker container exists (stopped)"
@@ -95,6 +104,18 @@ fi
 
 # ─── Step 4: Start/restart LiteLLM based on detected mode ───────────────────
 case "$LITELLM_MODE" in
+    external-running)
+        ok "LiteLLM proxy already running on :4000 (not managed by this script)"
+        echo ""
+        echo "The proxy is responding but wasn't started by this script's Docker"
+        echo "container. If you want to use the config in this directory:"
+        echo "  1. Stop the existing proxy"
+        echo "  2. Re-run: bash $0"
+        echo ""
+        echo "Or keep using your existing proxy — MemPalace will work as long as"
+        echo "~/.mempalace/env points to http://127.0.0.1:4000 with the right key."
+        exit 0
+        ;;
     docker-running)
         info "Restarting Docker container to pick up config changes..."
         docker compose -f "$COMPOSE_FILE" restart
