@@ -1,16 +1,53 @@
 #!/usr/bin/env bash
-# sync-mempalace-plugins.sh — One command to sync all 4 agents' plugin files
-# AND propagate env vars from a single source (~/.mempalace/env) into each
-# agent's native config format.
+# sync-mempalace-plugins.sh — One command to sync plugin files AND propagate
+# env vars from a single source (~/.mempalace/env) into each agent's native
+# config format.
 #
 # Agents covered: Claude Code, Codex, Hermes, Cursor.
-# One edit in ~/.mempalace/env → one run → all four agents aligned.
+# One edit in ~/.mempalace/env → one run → all selected agents aligned.
+#
+# Usage:
+#   bash sync-plugins.sh [--all] [--claude] [--codex] [--hermes] [--cursor]
+#
+#   No flags = --all (sync everything; Hermes/Cursor auto-skip if not installed).
+#   Mixing flags: bash sync-plugins.sh --claude --codex   (sync only those two).
 set -euo pipefail
 
 REPO="$HOME/git/mempalace"
 HERMES_REPO="$REPO/integrations/hermes"
 ENV_FILE="$HOME/.mempalace/env"
 ENV_TEMPLATE="$REPO/scripts/mempalace-env.template"
+
+# Parse flags — positive "which agents to sync" instead of skip list.
+SYNC_CLAUDE=false
+SYNC_CODEX=false
+SYNC_HERMES=false
+SYNC_CURSOR=false
+if [ $# -eq 0 ]; then
+    SYNC_CLAUDE=true; SYNC_CODEX=true; SYNC_HERMES=true; SYNC_CURSOR=true
+else
+    for arg in "$@"; do
+        case "$arg" in
+            --all)     SYNC_CLAUDE=true; SYNC_CODEX=true; SYNC_HERMES=true; SYNC_CURSOR=true ;;
+            --claude)  SYNC_CLAUDE=true ;;
+            --codex)   SYNC_CODEX=true ;;
+            --hermes)  SYNC_HERMES=true ;;
+            --cursor)  SYNC_CURSOR=true ;;
+            --help|-h)
+                echo "Usage: bash sync-plugins.sh [--all] [--claude] [--codex] [--hermes] [--cursor]"
+                echo "  No flags        Sync all four (Hermes/Cursor auto-skip if not installed)"
+                echo "  --all           Same as no flags"
+                echo "  --claude        Sync Claude Code only"
+                echo "  --codex         Sync Codex only"
+                echo "  --hermes        Sync Hermes only"
+                echo "  --cursor        Sync Cursor only"
+                echo "  Flags combine:  --claude --codex = sync just those two"
+                exit 0
+                ;;
+            *) echo "Unknown option: $arg (use --help)"; exit 1 ;;
+        esac
+    done
+fi
 
 # The 7 vars we propagate. Extra SSL_CERT_FILE handled separately where needed.
 PROPAGATED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY \
@@ -95,7 +132,9 @@ fi
 if [ -z "$CLAUDE_CACHE" ] || [ ! -d "$CLAUDE_CACHE" ]; then
     CLAUDE_CACHE=$(find "$HOME/.claude/plugins/cache/mempalace/mempalace" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)
 fi
-if [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
+if ! $SYNC_CLAUDE; then
+    echo "[2/8] Claude Code: skipped (not in sync list)"
+elif [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
     echo "[2/8] Syncing Claude Code plugin + settings.json env..."
     for f in "$REPO/.claude-plugin/hooks/"mempal-*.sh; do
         [ -f "$f" ] && smart_copy_hook "$f" "$CLAUDE_CACHE/hooks/$(basename "$f")"
@@ -152,7 +191,9 @@ fi
 
 # --- [3/8] Codex: sync plugin + upsert config.toml --------------------------
 CODEX_PLUGIN="$HOME/.agents/plugins/mempalace/.codex-plugin"
-if [ -d "$CODEX_PLUGIN" ]; then
+if ! $SYNC_CODEX; then
+    echo "[3/8] Codex: skipped (not in sync list)"
+elif [ -d "$CODEX_PLUGIN" ]; then
     echo "[3/8] Syncing Codex plugin + config.toml env..."
     for f in "$REPO/.codex-plugin/hooks/"*.sh; do
         [ -f "$f" ] && smart_copy_hook "$f" "$CODEX_PLUGIN/hooks/$(basename "$f")"
@@ -242,7 +283,9 @@ fi
 # --- [4/8] Hermes: sync plugin + upsert launchd plist env -------------------
 HERMES_RUNTIME="$HOME/.hermes/hermes-agent/plugins/memory/mempalace"
 HERMES_PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
-if [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
+if ! $SYNC_HERMES; then
+    echo "[4/8] Hermes: skipped (not in sync list)"
+elif [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     echo "[4/8] Syncing Hermes plugin + plist env..."
     for f in "$HERMES_REPO/plugins/memory/mempalace/"*.py \
              "$HERMES_REPO/plugins/memory/mempalace/"*.yaml \
@@ -273,6 +316,9 @@ else
 fi
 
 # --- [5/8] Cursor: symlink plugin + register hooks + launchctl env ---------
+if ! $SYNC_CURSOR; then
+    echo "[5/8] Cursor: skipped (not in sync list)"
+else
 CURSOR_PLUGIN="$HOME/.cursor/plugins/local/mempalace"
 CURSOR_HOOKS_JSON="$HOME/.cursor/hooks.json"
 echo "[5/8] Installing Cursor plugin..."
@@ -393,10 +439,11 @@ PYEOF
 # Reload so the plist is active immediately.
 launchctl unload "$ENV_PLIST" 2>/dev/null || true
 launchctl load "$ENV_PLIST" 2>/dev/null || true
+fi
 
 # --- [6/8] Restart Hermes if running ----------------------------------------
 echo "[6/8] Restarting Hermes gateway..."
-if pgrep -f "hermes_cli.main gateway" >/dev/null 2>&1; then
+if $SYNC_HERMES && pgrep -f "hermes_cli.main gateway" >/dev/null 2>&1; then
     kill $(pgrep -f "hermes_cli.main gateway") 2>/dev/null
     sleep 2
     if pgrep -f "hermes_cli.main gateway" >/dev/null 2>&1; then

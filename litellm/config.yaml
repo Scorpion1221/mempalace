@@ -1,0 +1,54 @@
+
+# LiteLLM proxy config for MemPalace
+#
+# Exposes an OpenAI-compatible endpoint on :4000 that MemPalace uses for:
+#   - Embedding  (Gemini gemini-embedding-2-preview, 3072 dims)
+#   - Recall LLM (Gemini 3.1 Flash Lite — recall rewrite + rerank + save extraction)
+#
+# Matches the defaults in scripts/mempalace-env.template:
+#   MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000
+#   MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1
+#   MEMPAL_*_KEY=sk-litellm-local   (the master_key below)
+#
+# Requires a Gemini API key — put it in litellm/.env as GEMINI_API_KEY=...
+
+model_list:
+  # --- Embedding (required — palace vectorisation) ---
+  - model_name: gemini-embedding-2-preview
+    litellm_params:
+      model: gemini/gemini-embedding-001
+      api_key: os.environ/GEMINI_API_KEY
+      # 3072 dims — MUST match the dimension the palace was initialised with.
+      # Changing this after the palace exists silently breaks every upsert.
+      output_dimensionality: 3072
+
+  # --- Recall LLM (recall rewrite + rerank + async save extraction) ---
+  - model_name: gemini-3.1-flash-lite-preview
+    litellm_params:
+      model: gemini/gemini-2.5-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+
+  # --- Optional: Flash (higher quality rerank, higher cost) ---
+  - model_name: gemini-2.5-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  # --- Optional: Pro (max quality, for benchmarks) ---
+  - model_name: gemini-2.5-pro
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: os.environ/GEMINI_API_KEY
+
+litellm_settings:
+  drop_params: true
+  # Cache embedding calls (same text → same vector) to save cost on re-ingest.
+  cache: true
+  cache_params:
+    type: local
+    ttl: 86400  # 24h
+
+general_settings:
+  # Master key — clients authenticate as Bearer sk-litellm-local.
+  # Change this to something random in production, and update ~/.mempalace/env.
+  master_key: sk-litellm-local
