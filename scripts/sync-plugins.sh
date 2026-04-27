@@ -49,12 +49,13 @@ else
     done
 fi
 
-# Vars we propagate to ~/.mempalace/env on install. Canonical MEMPAL_LLM_*;
-# legacy MEMPAL_RECALL_* still propagated so existing user envs don't lose
-# their values mid-upgrade. Extra SSL_CERT_FILE handled separately.
+# Vars REQUIRED to be present + non-empty in ~/.mempalace/env. Only canonical
+# MEMPAL_LLM_* / MEMPAL_EMBEDDING_*. Legacy MEMPAL_RECALL_* aliases are
+# still HONORED at runtime by mempalace.recall_llm for backward compat — but
+# they are NOT required, NOT validated, and NOT propagated by this sync. A
+# fresh install never needs to set them. Extra SSL_CERT_FILE handled separately.
 PROPAGATED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY \
-MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY \
-MEMPAL_RECALL_LLM MEMPAL_RECALL_ENDPOINT MEMPAL_RECALL_MODEL MEMPAL_RECALL_KEY"
+MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY"
 
 # Smart copy: preserve local env-var fallback defaults in hook scripts
 # (user's override survives a sync).
@@ -112,7 +113,7 @@ if [ -n "$MISSING" ]; then
     echo "    Edit $ENV_FILE and re-run. Aborting."
     exit 1
 fi
-echo "  ✓ 7 MEMPAL_* vars loaded from single source"
+echo "  ✓ 6 MEMPAL_* vars loaded from single source"
 
 # --- [1/8] Python package snapshot install ----------------------------------
 echo "[1/8] Installing Python package (snapshot, not editable)..."
@@ -133,7 +134,11 @@ for key, entries in data.get('plugins', {}).items():
 " 2>/dev/null)
 fi
 if [ -z "$CLAUDE_CACHE" ] || [ ! -d "$CLAUDE_CACHE" ]; then
-    CLAUDE_CACHE=$(find "$HOME/.claude/plugins/cache/mempalace/mempalace" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | head -1)
+    # `find` exits 1 when the dir doesn't exist; pipefail then kills the whole
+    # script under macOS bash 3.2 + `set -euo pipefail`. Suppress that — empty
+    # CLAUDE_CACHE is handled by the next branch and is the expected case
+    # before the user has installed the Claude Code plugin yet.
+    CLAUDE_CACHE=$( { find "$HOME/.claude/plugins/cache/mempalace/mempalace" -maxdepth 1 -mindepth 1 -type d 2>/dev/null || true; } | head -1)
 fi
 if ! $SYNC_CLAUDE; then
     echo "[2/8] Claude Code: skipped (not in sync list)"

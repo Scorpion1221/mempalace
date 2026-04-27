@@ -1,6 +1,6 @@
 services:
   litellm:
-    image: ghcr.io/berriai/litellm:main-v1.55.0-stable
+    image: ghcr.io/berriai/litellm:main-stable
     container_name: mempalace-litellm
     restart: unless-stopped
     ports:
