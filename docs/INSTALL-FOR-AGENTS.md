@@ -132,13 +132,23 @@ curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK" || e
 
 Tell the user what to do next based on their agent:
 
-**Claude Code**:
-- "Restart Claude Code to activate the plugin"
-- "Test recall: `/mempalace:search 'your query'`"
-- "Check status: `/mempalace:status`"
+**Claude Code** (requires one-time IDE-side install — Claude Code's plugin
+manager is gated on `/plugin marketplace add` + `/plugin install`, no shell
+equivalent exists):
 
-**Codex**:
-- "Restart Codex CLI to activate hooks"
+After `install.sh` finishes, tell the user:
+1. "Open Claude Code"
+2. "Run: `/plugin marketplace add ~/git/mempalace`"
+3. "Run: `/plugin install mempalace@mempalace`"
+4. "Then in shell: `bash ~/git/mempalace/scripts/sync-plugins.sh --claude`
+   to populate the env block in `settings.json` now that the plugin cache
+   exists"
+5. "Restart Claude Code"
+6. "Test recall: `/mempalace:search 'your query'`"
+
+**Codex** (fully automated — `install.sh` already installed the plugin and
+registered it in `~/.codex/config.toml`. No manual steps):
+- "Restart Codex CLI"
 - "Test recall: `$mempalace-search 'your query'`"
 - "Check status: `$mempalace-status`"
 
@@ -147,7 +157,8 @@ Tell the user what to do next based on their agent:
 - "MemPalace will inject a palace map at session start"
 - "Use MCP tool `mempalace_search` to query memories"
 
-**Hermes**:
+**Hermes** (only if `~/.hermes/` exists on the machine — otherwise the
+sync silently skipped this agent):
 - "Restart Hermes gateway: `hermes restart`"
 - "Check launchd plist env: `plutil -p ~/Library/LaunchAgents/ai.hermes.gateway.plist | grep MEMPAL`"
 

@@ -197,12 +197,22 @@ else
     echo "[2/8] Claude Code plugin cache not found, skipping"
 fi
 
-# --- [3/8] Codex: sync plugin + upsert config.toml --------------------------
+# --- [3/8] Codex: install/sync plugin + upsert config.toml ------------------
+# Codex's "plugin manager" is filesystem-based — there is no IDE-side
+# `/plugin install` step like Claude Code has. Plugins live in
+# ~/.agents/plugins/<name>/ and get registered in ~/.codex/config.toml under
+# [plugins."<name>"]. So this step does the full install: mkdir + copy +
+# register, not just refresh.
 CODEX_PLUGIN="$HOME/.agents/plugins/mempalace/.codex-plugin"
 if ! $SYNC_CODEX; then
     echo "[3/8] Codex: skipped (not in sync list)"
-elif [ -d "$CODEX_PLUGIN" ]; then
-    echo "[3/8] Syncing Codex plugin + config.toml env..."
+else
+    if [ ! -d "$CODEX_PLUGIN" ]; then
+        echo "[3/8] Installing Codex plugin (first time at $CODEX_PLUGIN)..."
+        mkdir -p "$CODEX_PLUGIN/hooks" "$CODEX_PLUGIN/skills"
+    else
+        echo "[3/8] Syncing Codex plugin + config.toml env..."
+    fi
     for f in "$REPO/.codex-plugin/hooks/"*.sh; do
         [ -f "$f" ] && smart_copy_hook "$f" "$CODEX_PLUGIN/hooks/$(basename "$f")"
     done
@@ -222,8 +232,11 @@ elif [ -d "$CODEX_PLUGIN" ]; then
     done
     echo "  → 5 codex skill stubs synced"
 
-    # Upsert env vars into ~/.codex/config.toml in BOTH required locations:
-    # [mcp_servers.mempalace].env and [shell_environment_policy.set]
+    # Upsert env vars + plugin registration into ~/.codex/config.toml.
+    # Three blocks managed:
+    #   - [mcp_servers.mempalace]   — command + env (created if missing)
+    #   - [shell_environment_policy.set] — newline KV (only MEMPAL_* touched)
+    #   - [plugins."mempalace"]      — enabled = true (created if missing)
     CODEX_CONFIG="$HOME/.codex/config.toml"
     if [ -f "$CODEX_CONFIG" ]; then
         python3 - <<PYEOF
@@ -233,6 +246,24 @@ with open(path) as f:
     content = f.read()
 vars_to_set = "$PROPAGATED_VARS".split() + ["SSL_CERT_FILE"]
 env_vals = {v: os.environ.get(v, "") for v in vars_to_set}
+
+# 0. [mcp_servers.mempalace] — bootstrap the block if missing so the env
+#    upsert below has something to write into. Without this, a fresh Codex
+#    config silently never gets the mempalace MCP server registered.
+if not re.search(r'^\[mcp_servers\.mempalace\]', content, re.MULTILINE):
+    if content and not content.endswith("\n"):
+        content += "\n"
+    content += "\n[mcp_servers.mempalace]\ncommand = \"mempalace-mcp\"\nenv = {}\n"
+    print("  → bootstrapped [mcp_servers.mempalace] block")
+
+# 0b. [plugins."mempalace"] — register the plugin so Codex picks it up at
+#     startup. Without this, the files in ~/.agents/plugins/mempalace/ are
+#     just dead weight on disk.
+if not re.search(r'^\[plugins\."mempalace"\]', content, re.MULTILINE):
+    if content and not content.endswith("\n"):
+        content += "\n"
+    content += "\n[plugins.\"mempalace\"]\nenabled = true\n"
+    print("  → registered [plugins.\"mempalace\"] enabled = true")
 
 # 1. [mcp_servers.mempalace] env = { ... } — one-line inline table.
 #    Rebuild the inline value entirely since single-line TOML is painful to
@@ -283,9 +314,10 @@ with open(path, "w") as f:
     f.write(content)
 print("  → config.toml env upserted in [mcp_servers.mempalace] and [shell_environment_policy.set]")
 PYEOF
+    else
+        echo "  ⚠ ~/.codex/config.toml not found — Codex CLI not installed?"
+        echo "    Install Codex first, then re-run: bash $REPO/scripts/sync-plugins.sh --codex"
     fi
-else
-    echo "[3/8] Codex plugin dir not found, skipping"
 fi
 
 # --- [4/8] Hermes: sync plugin + upsert launchd plist env -------------------
