@@ -239,12 +239,15 @@ else
     #   - [plugins."mempalace"]      — enabled = true (created if missing)
     CODEX_CONFIG="$HOME/.codex/config.toml"
     if [ -f "$CODEX_CONFIG" ]; then
-        python3 - <<PYEOF
+        # Quoted heredoc: bash does NOT interpolate inside, so Python comments
+        # may safely contain (), [], $, etc. Pass shell vars via env instead.
+        export CODEX_CONFIG PROPAGATED_VARS
+        python3 - <<'PYEOF'
 import os, re
-path = "$CODEX_CONFIG"
+path = os.environ["CODEX_CONFIG"]
 with open(path) as f:
     content = f.read()
-vars_to_set = "$PROPAGATED_VARS".split() + ["SSL_CERT_FILE"]
+vars_to_set = os.environ["PROPAGATED_VARS"].split() + ["SSL_CERT_FILE"]
 env_vals = {v: os.environ.get(v, "") for v in vars_to_set}
 
 # 0. [mcp_servers.mempalace] — bootstrap the block if missing so the env
