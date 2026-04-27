@@ -1,7 +1,6 @@
 """ChromaDB-backed MemPalace storage backend (RFC 001 reference implementation)."""
 
 import datetime as _dt
-import gc
 import logging
 import os
 import sqlite3
@@ -244,6 +243,16 @@ class ChromaCollection(BaseCollection):
     # Writes
     # ------------------------------------------------------------------
 
+    def _note_post_write(self) -> None:
+        """Forward post-write stat tracking to the backend, if wired.
+
+        Tracking is best-effort: when a unit test constructs ``ChromaCollection``
+        directly with a fake collection (no backend / palace_path), there is
+        nothing to record and we silently no-op.
+        """
+        if self._backend is not None and self._palace_path is not None:
+            self._backend._note_post_write(self._palace_path)
+
     def add(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {"documents": documents, "ids": ids}
         if metadatas is not None:
@@ -251,6 +260,7 @@ class ChromaCollection(BaseCollection):
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
         self._collection.add(**kwargs)
+        self._note_post_write()
 
     def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {"documents": documents, "ids": ids}
@@ -259,6 +269,7 @@ class ChromaCollection(BaseCollection):
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
         self._collection.upsert(**kwargs)
+        self._note_post_write()
 
     def update(
         self,
@@ -278,6 +289,7 @@ class ChromaCollection(BaseCollection):
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
         self._collection.update(**kwargs)
+        self._note_post_write()
 
     # ------------------------------------------------------------------
     # Reads
@@ -422,6 +434,7 @@ class ChromaCollection(BaseCollection):
         if where is not None:
             kwargs["where"] = where
         self._collection.delete(**kwargs)
+        self._note_post_write()
 
     def count(self):
         return self._collection.count()
@@ -573,9 +586,19 @@ class ChromaBackend(BaseBackend):
 
         Strategy: stat ``(size, mtime_ns, inode)`` of ``chroma.sqlite3``. If
         the tuple differs from what was cached on the previous write-path
-        rebuild, evict the cached client (force GC so the chromadb HNSW
-        memory map is released) and rebuild against the current on-disk
+        observation (post-rebuild OR post-write — see ``_note_post_write``),
+        evict the cached client and rebuild against the current on-disk
         state. Returns the fresh client.
+
+        Performance: the fast path (no stat change since the last call from
+        this process) is a single ``os.stat`` + tuple compare + dict get,
+        all sub-microsecond on modern hardware. The slow path (eviction +
+        rebuild) skips ``gc.collect()`` because empirical measurement
+        confirms ``chromadb.PersistentClient`` does not form reference
+        cycles — Python's refcount-based collector reclaims the dropped
+        client immediately when the strong reference is replaced.
+        Re-introducing ``gc.collect()`` would re-incur the ~9ms p50 cost
+        documented in the H-2 issue of the Wave 3 concurrency review.
         """
         if self._closed:
             from .base import BackendClosedError  # late import avoids cycles
@@ -603,10 +626,14 @@ class ChromaBackend(BaseBackend):
                     )
                     # Evict and drop strong refs so the underlying HNSW
                     # memory map is released before we open a new one.
+                    # Python's refcount-based GC reclaims the client
+                    # immediately on the assignment to ``cached_client``
+                    # below — chromadb clients have no reference cycles
+                    # (verified) so ``gc.collect()`` is not needed and would
+                    # add ~9ms p50 to every invalidation.
                     self._clients.pop(palace_path_str, None)
                     self._freshness.pop(palace_path_str, None)
                     cached_client = None
-                    gc.collect()
 
                 _fix_blob_seq_ids(palace_path_str)
                 cached_client = chromadb.PersistentClient(path=palace_path_str)
@@ -621,6 +648,41 @@ class ChromaBackend(BaseBackend):
             # chroma.sqlite3 lazily on first open).
             self._write_freshness[palace_path_str] = self._db_stat_full(palace_path_str)
             return cached_client
+
+    def _note_post_write(self, palace_path: str) -> None:
+        """Record ``chroma.sqlite3``'s stat tuple after a write committed by us.
+
+        Why: ``_client_for_write`` evicts the cached client whenever the
+        on-disk stat differs from the cached tuple. Without this hook, every
+        write we make changes ``chroma.sqlite3`` (size + mtime), so the very
+        next ``_client_for_write`` call from the SAME process would see
+        ``stat_changed=True`` and unnecessarily rebuild the client — even
+        though no other process touched the file.
+
+        Calling this method after our own write commits "pre-acknowledges"
+        the post-write stat. The next ``_client_for_write`` then sees the
+        stat we just recorded == the on-disk stat → cache hit, no rebuild.
+
+        If between our write and our next ``_client_for_write`` call ANOTHER
+        process has written, that process's write changes the stat past what
+        we recorded → ``stat_changed=True`` → eviction fires correctly.
+
+        This restores the "external-only invalidation" semantics the cache
+        was meant to provide while preserving cross-process safety.
+
+        Caller contract: invoke from a write method on ``ChromaCollection``
+        that mutated this palace, while still holding ``palace_write_lock``
+        (so no other process can race the stat update).
+        """
+        if self._closed:
+            return
+        palace_path_str = str(palace_path)
+        with self._cache_lock:
+            # Only update if we still have a cached client for this palace —
+            # otherwise the next ``_client_for_write`` call would hit the
+            # cold-cache branch anyway.
+            if palace_path_str in self._clients:
+                self._write_freshness[palace_path_str] = self._db_stat_full(palace_path_str)
 
     # ------------------------------------------------------------------
     # Public static helpers (legacy; prefer :meth:`get_collection`)

@@ -455,6 +455,43 @@ def test_zzz_print_lock_overhead_summary(bench_results):
     assert True
 
 
+# ── Regression guard ──────────────────────────────────────────────────
+
+# Hard ceiling on per-write lock overhead. Set with headroom: the H-2 fix
+# (drop ``gc.collect()``, track post-write stat) brought the measured p50
+# from 17.7 ms down to ~2.4 ms on Apple Silicon. We allow up to 8 ms p50
+# before failing — that absorbs CI noise and slower hardware while still
+# catching any future regression that would push us back into the
+# pre-fix neighbourhood (16+ ms).
+_PER_WRITE_OVERHEAD_REGRESSION_GUARD_MS_P50 = 8.0
+
+
+def test_zzz_per_write_overhead_regression_guard(bench_results):
+    """Fail the suite if per-write lock overhead p50 regresses past the ceiling.
+
+    This is the only assertion-bearing test in this file. It runs after
+    ``test_per_write_overhead_only`` populates the metric (alphabetical
+    ``zzz_`` ordering keeps it last). When the H-2 perf fix is intact the
+    measured p50 sits comfortably under the ceiling. A failure here means
+    something landed on top of the ``_client_for_write`` /
+    ``_note_post_write`` / ``ChromaCollection`` write paths that
+    re-introduces the per-write client rebuild — almost always a
+    regression worth investigating before merging.
+    """
+    overhead = bench_results.results.get("lock_overhead", {})
+    p50 = overhead.get("per_write_lock_overhead_ms_p50")
+    if p50 is None:
+        pytest.skip("per-write overhead not measured this run")
+    assert p50 < _PER_WRITE_OVERHEAD_REGRESSION_GUARD_MS_P50, (
+        f"per-write lock overhead regressed: p50={p50}ms exceeds "
+        f"{_PER_WRITE_OVERHEAD_REGRESSION_GUARD_MS_P50}ms ceiling. "
+        "Likely cause: a change to ChromaBackend._client_for_write, "
+        "_note_post_write, or ChromaCollection's write methods that "
+        "re-introduces per-write client rebuilds. See H-2 in "
+        "docs/CONCURRENCY_FIX_REVIEW.md for context."
+    )
+
+
 # ── Sanity checks ─────────────────────────────────────────────────────
 
 

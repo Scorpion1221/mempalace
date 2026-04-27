@@ -298,3 +298,125 @@ def test_close_palace_clears_write_freshness(tmp_path):
     assert str(palace) not in backend._write_freshness
     assert str(palace) not in backend._clients
     assert str(palace) not in backend._freshness
+
+
+# ── Post-write stat tracking ──────────────────────────────────────────
+
+
+def test_own_write_does_not_force_rebuild(tmp_path):
+    """Our own writes should NOT trigger a client rebuild on the next call.
+
+    Regression guard for the H-2 perf fix. Before ``_note_post_write`` was
+    introduced, every write changed ``chroma.sqlite3``'s size + mtime, so
+    the very next ``_client_for_write`` call from the same process would
+    see ``stat_changed=True`` and unnecessarily rebuild the client (paying
+    ~10ms per call for ``PersistentClient(...)`` reconstruction). With the
+    fix, our own writes update ``_write_freshness`` so the next
+    ``_client_for_write`` correctly observes "no external change" and
+    reuses the cached client.
+    """
+    palace = tmp_path / "palace"
+    _seed_palace(palace)
+
+    palace_ref = PalaceRef(id=str(palace), local_path=str(palace))
+    backend = ChromaBackend()
+    collection = backend.get_collection(
+        palace=palace_ref, collection_name="mempalace_drawers", create=True
+    )
+
+    # First refresh + write.
+    collection.refresh_for_write()
+    first_client = backend._clients[str(palace)]
+    collection.add(
+        ids=["doc-1"],
+        documents=["first doc"],
+        metadatas=[{"wing": "test"}],
+        embeddings=[[0.1, 0.2, 0.3]],
+    )
+
+    # Sanity: the write changed chroma.sqlite3's stat from before we wrote.
+    # But our `_note_post_write` should have updated `_write_freshness` to
+    # reflect the post-write stat — so the next refresh sees no change.
+    collection.refresh_for_write()
+    second_client = backend._clients[str(palace)]
+    assert second_client is first_client, (
+        "client was rebuilt after our own write — _note_post_write hook is broken"
+    )
+
+    # And a second write through the same client must still work.
+    collection.add(
+        ids=["doc-2"],
+        documents=["second doc"],
+        metadatas=[{"wing": "test"}],
+        embeddings=[[0.4, 0.5, 0.6]],
+    )
+    assert collection.count() == 2
+
+
+def test_external_write_still_triggers_rebuild_after_own_write(tmp_path):
+    """Even after recording our own post-write stat, an external mtime change must invalidate.
+
+    Confirms the H-2 perf fix did not weaken the cross-process safety guarantee.
+    """
+    palace = tmp_path / "palace"
+    _seed_palace(palace)
+
+    palace_ref = PalaceRef(id=str(palace), local_path=str(palace))
+    backend = ChromaBackend()
+    collection = backend.get_collection(
+        palace=palace_ref, collection_name="mempalace_drawers", create=True
+    )
+
+    collection.refresh_for_write()
+    collection.add(
+        ids=["doc-own"],
+        documents=["our doc"],
+        metadatas=[{"wing": "test"}],
+        embeddings=[[0.1, 0.2, 0.3]],
+    )
+    own_client = backend._clients[str(palace)]
+    own_stat = backend._write_freshness[str(palace)]
+
+    # Simulate another process writing to chroma.sqlite3 — pure mtime bump.
+    _bump_db_mtime(palace / "chroma.sqlite3", seconds=2.0)
+    new_stat_on_disk = ChromaBackend._db_stat_full(str(palace))
+    assert new_stat_on_disk != own_stat, "test setup failed: stat did not advance"
+
+    # Next refresh MUST see the external change and rebuild.
+    collection.refresh_for_write()
+    after_external_client = backend._clients[str(palace)]
+    assert after_external_client is not own_client, (
+        "external mtime bump did not trigger client rebuild — cache invalidation broken"
+    )
+
+
+def test_note_post_write_no_op_when_no_cached_client(tmp_path):
+    """``_note_post_write`` must silently no-op when there is nothing to track.
+
+    Edge case: if ``close_palace`` ran between a write attempt and the
+    post-write notification (very narrow race), ``_clients`` no longer has
+    an entry for this palace. Recording a freshness tuple in that state
+    would resurrect a stale entry the next ``_client_for_write`` call would
+    have to clear, so we skip it.
+    """
+    palace = tmp_path / "palace"
+    _seed_palace(palace)
+
+    backend = ChromaBackend()
+    # Never call _client_for_write, so _clients[palace] does not exist.
+    backend._note_post_write(str(palace))
+    assert str(palace) not in backend._write_freshness
+
+
+def test_note_post_write_after_close_is_silent(tmp_path):
+    """``_note_post_write`` after ``close()`` must not raise."""
+    palace = tmp_path / "palace"
+    _seed_palace(palace)
+
+    backend = ChromaBackend()
+    backend._client_for_write(str(palace))
+    backend.close()
+
+    # Should not raise (e.g., a stale collection in a different thread
+    # finishing its write after the backend was closed).
+    backend._note_post_write(str(palace))
