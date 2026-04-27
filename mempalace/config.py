@@ -310,8 +310,23 @@ class MempalaceConfig:
 
     @property
     def hall_keywords(self):
-        """Mapping of hall names to keyword lists."""
-        return self._file_config.get("hall_keywords", DEFAULT_HALL_KEYWORDS)
+        """Mapping of hall names to keyword lists.
+
+        Auto-migration: if the on-disk config still has the legacy
+        taxonomy (emotions/consciousness/technical/etc.), return the
+        new doc-aligned defaults instead. The legacy mapping never
+        produces hall_facts/events/discoveries/preferences/advice and
+        leaving it active would silently keep new-installs on the old
+        labels. Disk file is left untouched — `mempalace init` rewrites
+        it on the next explicit init call.
+        """
+        stored = self._file_config.get("hall_keywords")
+        if not stored:
+            return DEFAULT_HALL_KEYWORDS
+        if any(key not in VALID_HALLS for key in stored):
+            # Legacy taxonomy — silently swap to current defaults.
+            return DEFAULT_HALL_KEYWORDS
+        return stored
 
     @property
     def entity_languages(self):

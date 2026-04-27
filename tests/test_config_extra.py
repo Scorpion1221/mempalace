@@ -44,6 +44,50 @@ def test_hall_keywords_default(tmp_path):
     assert "hall_events" in cfg.hall_keywords
 
 
+def test_hall_keywords_auto_migrates_legacy_taxonomy(tmp_path):
+    """An existing config.json with the legacy taxonomy must transparently
+    fall back to the doc-aligned defaults, so existing users get the new
+    classification without any manual migration step."""
+    legacy = {
+        "palace_path": str(tmp_path / "palace"),
+        "collection_name": "drawers",
+        "topic_wings": ["emotions", "technical"],
+        "hall_keywords": {
+            "emotions": ["happy", "sad"],
+            "consciousness": ["aware"],
+            "technical": ["bug", "code"],
+            "family": ["kids"],
+            "creative": ["game"],
+            "memory": ["remember"],
+            "identity": ["who am i"],
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(legacy))
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+
+    # Legacy taxonomy on disk, but the getter returns the new defaults.
+    assert "hall_facts" in cfg.hall_keywords
+    assert "emotions" not in cfg.hall_keywords
+
+
+def test_hall_keywords_respects_user_override_in_new_taxonomy(tmp_path):
+    """If the user customizes keywords using the new taxonomy, that wins
+    — auto-migration only triggers on the legacy taxonomy."""
+    custom = {
+        "hall_keywords": {
+            "hall_facts": ["my-custom-fact-keyword"],
+            "hall_events": ["my-custom-event-keyword"],
+            "hall_discoveries": ["..."],
+            "hall_preferences": ["..."],
+            "hall_advice": ["..."],
+        },
+    }
+    (tmp_path / "config.json").write_text(json.dumps(custom))
+    cfg = MempalaceConfig(config_dir=str(tmp_path))
+
+    assert cfg.hall_keywords == custom["hall_keywords"]
+
+
 def test_init_idempotent(tmp_path):
     cfg = MempalaceConfig(config_dir=str(tmp_path))
     cfg.init()
