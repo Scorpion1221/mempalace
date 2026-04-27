@@ -292,8 +292,72 @@ def cmd_status(args):
     status(palace_path=palace_path)
 
 
+def cmd_doctor(args):
+    """Run non-destructive palace health diagnostics.
+
+    Exit codes:
+        0 = ok
+        1 = warn (operational issues, not data loss)
+        2 = corrupt (data integrity issues — repair recommended)
+    """
+    from .health import check_palace_health
+
+    palace_path = os.path.abspath(
+        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    )
+
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace directory at {palace_path}", file=sys.stderr)
+        sys.exit(2)
+
+    try:
+        report = check_palace_health(palace_path)
+    except ValueError as exc:
+        # Programmer-error path — palace path doesn't exist (we already
+        # guarded above, so this is highly unusual). Keep the same exit
+        # code shape as a corrupt palace so wrappers don't have to
+        # special-case it.
+        print(f"\n  ERROR: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Doctor")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace:                  {report.palace_path}")
+    print(f"  Status:                  {report.status.upper()}")
+    print(f"  SQLite integrity ok:     {report.sqlite_integrity_ok}")
+    print(f"  Drawers (sqlite):        {report.drawer_count_sqlite}")
+    print(f"  Drawers (verbatim):      {report.drawer_count_verbatim}")
+    print(f"  Drawers (HNSW):          {report.drawer_count_hnsw}")
+    print(f"  Checked at:              {report.checked_at.isoformat(timespec='seconds')}")
+
+    if report.issues:
+        print("\n  Issues:")
+        for issue in report.issues:
+            print(f"    [{issue.severity.upper()}] {issue.code}: {issue.message}")
+    else:
+        print("\n  No issues detected.")
+
+    if report.status == "corrupt":
+        print("\n  Recommended: mempalace repair --rebuild-from-verbatim")
+        sys.exit(2)
+    if report.status == "warn":
+        sys.exit(1)
+    sys.exit(0)
+
+
 def cmd_repair(args):
-    """Rebuild palace vector index from SQLite metadata."""
+    """Rebuild palace vector index from SQLite metadata.
+
+    With ``--rebuild-from-verbatim`` (Layer 4): quarantines the existing
+    HNSW segments, then rebuilds the index from the verbatim text stored
+    in ``chroma.sqlite3``. Use this when the palace is too damaged for
+    the standard ``repair`` path (which still requires ChromaDB to open
+    cleanly) to complete.
+    """
+    if getattr(args, "rebuild_from_verbatim", False):
+        return _cmd_repair_rebuild_from_verbatim(args)
+
     import shutil
     from .backends.chroma import ChromaBackend
     from .embedding import get_embedding_function
@@ -385,6 +449,72 @@ def cmd_repair(args):
     print(f"\n  Repair complete. {filed} drawers rebuilt.")
     print(f"  Backup saved at {backup_path}")
     print(f"\n{'=' * 55}\n")
+
+
+def _cmd_repair_rebuild_from_verbatim(args):
+    """Implementation for ``mempalace repair --rebuild-from-verbatim``.
+
+    Quarantines HNSW segments, then re-ingests every drawer from the
+    verbatim text stored in chroma.sqlite3. Always non-interactive
+    (the verbatim text is preserved end-to-end so this does not
+    destroy data — the existing HNSW segments are quarantined, not
+    deleted, so a forensic copy survives in
+    ``~/.mempalace/quarantine/`` if anything goes wrong).
+    """
+    from .repair import rebuild_from_verbatim
+
+    palace_path = os.path.abspath(
+        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    )
+
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace directory at {palace_path}", file=sys.stderr)
+        sys.exit(2)
+    db_path = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db_path):
+        print(
+            f"\n  No chroma.sqlite3 at {db_path}; nothing to rebuild from",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Repair — Rebuild from Verbatim")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace: {palace_path}")
+    print("  Step 1: quarantining HNSW segment files...")
+
+    last_progress = {"phase": ""}
+
+    def _progress(phase: str, processed: int, total: int) -> None:
+        # Throttle: only print when the phase changes or every 500 drawers.
+        if phase != last_progress["phase"]:
+            if phase == "writing":
+                print(f"  Step 2: re-ingesting {total} drawers...")
+            last_progress["phase"] = phase
+        if phase == "writing" and total and (processed % 500 == 0 or processed == total):
+            print(f"    {processed}/{total} drawers re-filed")
+        if phase == "done":
+            print(f"  Step 3: rebuild complete ({processed} drawers).")
+
+    try:
+        report = rebuild_from_verbatim(palace_path, progress_cb=_progress)
+    except Exception as exc:  # pragma: no cover - defensive top-level CLI guard
+        print(f"\n  ERROR: rebuild_from_verbatim failed: {exc}", file=sys.stderr)
+        sys.exit(2)
+
+    print(f"\n  Drawers processed: {report.drawers_processed}")
+    if report.drawers_failed:
+        print(f"  Drawers failed:    {report.drawers_failed}")
+        for path, err in report.failures[:5]:
+            print(f"    - {path}: {err}")
+        if len(report.failures) > 5:
+            print(f"    ... and {len(report.failures) - 5} more")
+    if report.quarantine_path is not None:
+        print(f"  Quarantine path:   {report.quarantine_path}")
+    print(f"  Duration:          {report.duration_seconds:.1f}s")
+    print(f"\n{'=' * 55}\n")
+    sys.exit(0)
 
 
 def cmd_hook(args):
@@ -753,10 +883,29 @@ def main():
         instructions_sub.add_parser(instr_name, help=f"Output {instr_name} instructions")
 
     # repair
-    sub.add_parser(
+    p_repair = sub.add_parser(
         "repair",
         help="Rebuild palace vector index from stored data (fixes segfaults after corruption)",
-    ).add_argument("--yes", action="store_true", help="Skip confirmation for destructive changes")
+    )
+    p_repair.add_argument(
+        "--yes", action="store_true", help="Skip confirmation for destructive changes"
+    )
+    p_repair.add_argument(
+        "--rebuild-from-verbatim",
+        action="store_true",
+        help=(
+            "Quarantine the existing HNSW segments and rebuild the index from "
+            "the verbatim text in chroma.sqlite3 (Layer 4 recovery). Use when "
+            "the standard repair path can't open the palace. Quarantined "
+            "segments are MOVED, not deleted, so a forensic copy survives."
+        ),
+    )
+
+    # doctor
+    sub.add_parser(
+        "doctor",
+        help=("Run non-destructive palace health diagnostics. Exit 0 ok, 1 warn, 2 corrupt."),
+    )
 
     # mcp
     sub.add_parser(
@@ -814,6 +963,7 @@ def main():
         "compress": cmd_compress,
         "wake-up": cmd_wakeup,
         "repair": cmd_repair,
+        "doctor": cmd_doctor,
         "migrate": cmd_migrate,
         "status": cmd_status,
     }

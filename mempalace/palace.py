@@ -8,6 +8,8 @@ import contextlib
 import hashlib
 import os
 import re
+import time
+from pathlib import Path
 
 from .backends.chroma import ChromaBackend
 
@@ -339,6 +341,105 @@ def mine_lock(source_file: str):
         except Exception:
             pass
         lf.close()
+
+
+class PalaceWriteLockTimeout(TimeoutError):
+    """Raised when palace_write_lock cannot be acquired within timeout."""
+
+
+# Polling interval for non-blocking lock acquisition. Kept tight (50ms) so
+# legitimate writers aren't penalised for waiting on a contended palace.
+_PALACE_LOCK_POLL_INTERVAL_S = 0.05
+
+
+@contextlib.contextmanager
+def palace_write_lock(palace_path: str | Path, timeout: float = 30.0):
+    """Palace-wide exclusive write lock. All ChromaDB write paths MUST hold this.
+
+    Why: ChromaDB's HNSW writer is not multi-process safe. Concurrent writes
+    from different MCP servers / mine subprocesses / async_save_worker
+    processes can corrupt segment files (the palace then fails to load).
+    ``mine_lock`` only serialises writes to the SAME source file — it does
+    not stop two unrelated mines from hitting the same ChromaDB at once.
+    This lock closes that gap by providing a single palace-wide gate.
+
+    Crash-safe: ``fcntl.flock`` (Unix) and ``msvcrt.locking`` (Windows) are
+    advisory kernel-level locks. They are released automatically when the
+    holding process exits, even on SIGKILL — so a crashed writer cannot
+    permanently wedge the palace.
+
+    Per-palace: the lock file name is derived from ``Path.resolve()`` of
+    ``palace_path``, so two different palaces NEVER block each other, while
+    symlinks and relative paths to the SAME palace map to the same lock.
+
+    Args:
+        palace_path: Path to the palace directory (any form — absolute,
+            relative, or symlink — is normalised via ``Path.resolve()``).
+        timeout: Maximum seconds to wait for the lock. Acquisition uses
+            non-blocking probes with a 50ms backoff; a real timeout raises
+            ``PalaceWriteLockTimeout`` instead of blocking the caller.
+
+    Raises:
+        PalaceWriteLockTimeout: If the lock could not be acquired within
+            ``timeout`` seconds.
+    """
+    resolved = str(Path(palace_path).resolve())
+    palace_hash = hashlib.sha256(resolved.encode()).hexdigest()[:16]
+
+    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, f"palace_write_{palace_hash}.lock")
+
+    lf = open(lock_path, "w")
+    acquired = False
+    deadline = time.monotonic() + timeout
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            while True:
+                try:
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise PalaceWriteLockTimeout(
+                            f"Could not acquire palace write lock for {resolved} within {timeout}s"
+                        ) from None
+                    time.sleep(_PALACE_LOCK_POLL_INTERVAL_S)
+        else:
+            import fcntl
+
+            while True:
+                try:
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        raise PalaceWriteLockTimeout(
+                            f"Could not acquire palace write lock for {resolved} within {timeout}s"
+                        ) from None
+                    time.sleep(_PALACE_LOCK_POLL_INTERVAL_S)
+        yield
+    finally:
+        if acquired:
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+        try:
+            lf.close()
+        except Exception:
+            pass
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:

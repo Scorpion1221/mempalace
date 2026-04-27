@@ -1,9 +1,11 @@
 """ChromaDB-backed MemPalace storage backend (RFC 001 reference implementation)."""
 
 import datetime as _dt
+import gc
 import logging
 import os
 import sqlite3
+import threading
 from typing import Any, Optional
 
 import chromadb
@@ -179,8 +181,64 @@ def _as_list(v: Any) -> list:
 class ChromaCollection(BaseCollection):
     """Thin adapter translating ChromaDB dict returns into typed results."""
 
-    def __init__(self, collection):
+    def __init__(
+        self,
+        collection,
+        *,
+        backend: Optional["ChromaBackend"] = None,
+        palace_path: Optional[str] = None,
+        collection_name: Optional[str] = None,
+        embedding_function: Any = None,
+        hnsw_space: str = "cosine",
+        create: bool = False,
+    ):
         self._collection = collection
+        # Optional refresh-for-write context — only populated by ChromaBackend
+        # when it knows enough to rehydrate the underlying collection later
+        # (we need backend handle, palace path, and collection name).
+        self._backend = backend
+        self._palace_path = palace_path
+        self._collection_name = collection_name
+        self._embedding_function = embedding_function
+        self._hnsw_space = hnsw_space
+        self._create = create
+
+    # ------------------------------------------------------------------
+    # Cache freshness
+    # ------------------------------------------------------------------
+
+    def refresh_for_write(self) -> None:
+        """Re-bind the underlying chroma collection through a guaranteed-fresh client.
+
+        Callers MUST hold ``mempalace.palace.palace_write_lock`` for this palace
+        before invoking this method. Without that mutual exclusion, two
+        processes could each refresh, then race writes — undoing the protection
+        Layer 1 provides.
+
+        After this returns, the next ``add``/``upsert``/``update``/``delete``
+        on this collection will go through a chromadb client whose in-memory
+        HNSW state was rebuilt against the current on-disk segment files.
+        """
+        if self._backend is None or self._palace_path is None or self._collection_name is None:
+            # Collection wasn't created through ChromaBackend.get_collection
+            # (e.g. unit tests instantiate ChromaCollection directly with a
+            # fake). Nothing to refresh — return without surprising the caller.
+            return
+
+        client = self._backend._client_for_write(self._palace_path)
+
+        ef_kwargs: dict[str, Any] = {}
+        if self._embedding_function is not None:
+            ef_kwargs["embedding_function"] = self._embedding_function
+
+        if self._create:
+            self._collection = client.get_or_create_collection(
+                self._collection_name,
+                metadata={"hnsw:space": self._hnsw_space},
+                **ef_kwargs,
+            )
+        else:
+            self._collection = client.get_collection(self._collection_name, **ef_kwargs)
 
     # ------------------------------------------------------------------
     # Writes
@@ -403,6 +461,16 @@ class ChromaBackend(BaseBackend):
         self._clients: dict[str, Any] = {}
         # palace_path -> (inode, mtime) of chroma.sqlite3 at cache time.
         self._freshness: dict[str, tuple[int, float]] = {}
+        # palace_path -> (size, mtime_ns, inode) at last write-path refresh.
+        # Distinct from ``_freshness`` so the read path's coarse mtime
+        # invalidation cannot disturb write-path freshness tracking.
+        self._write_freshness: dict[str, tuple[int, int, int]] = {}
+        # Process-local lock guarding ``_clients``/``_freshness``/
+        # ``_write_freshness`` mutations. Cross-process safety is the caller's
+        # responsibility (see ``palace_write_lock``); this lock only prevents
+        # the dicts from racing against themselves when multiple threads in
+        # the same MCP server call write paths concurrently.
+        self._cache_lock = threading.RLock()
         self._closed = False
 
     # ------------------------------------------------------------------
@@ -418,6 +486,22 @@ class ChromaBackend(BaseBackend):
             return (st.st_ino, st.st_mtime)
         except OSError:
             return (0, 0.0)
+
+    @staticmethod
+    def _db_stat_full(palace_path: str) -> Optional[tuple[int, int, int]]:
+        """Return ``(st_size, st_mtime_ns, st_ino)`` of ``chroma.sqlite3`` or ``None``.
+
+        Used by the write-path freshness check: ``st_mtime_ns`` exposes finer
+        resolution than ``st_mtime`` (no float-epsilon comparisons), and
+        ``st_size`` catches in-place writes that happen within a single
+        nanosecond of the cached stat (rare in practice, but cheap to detect).
+        """
+        db_path = os.path.join(palace_path, "chroma.sqlite3")
+        try:
+            st = os.stat(db_path)
+            return (st.st_size, st.st_mtime_ns, st.st_ino)
+        except OSError:
+            return None
 
     def _client(self, palace_path: str):
         """Return a cached ``PersistentClient``, rebuilding on inode/mtime change.
@@ -472,6 +556,71 @@ class ChromaBackend(BaseBackend):
             # may still be (0, 0.0) on first open.
             self._freshness[palace_path] = self._db_stat(palace_path)
         return cached
+
+    def _client_for_write(self, palace_path: str):
+        """Return a fresh ``PersistentClient`` for writing.
+
+        MUST be called only inside ``mempalace.palace.palace_write_lock``
+        (caller responsibility — this method assumes mutual exclusion is
+        already held across processes).
+
+        Why distinct from :meth:`_client`: writes need a guaranteed-fresh
+        in-memory HNSW state. After acquiring the cross-process write lock,
+        another process may have just modified ``chroma.sqlite3`` and segment
+        files while we were waiting. Our cached client doesn't know — it
+        would persist its stale memory state and overwrite the other writer's
+        changes.
+
+        Strategy: stat ``(size, mtime_ns, inode)`` of ``chroma.sqlite3``. If
+        the tuple differs from what was cached on the previous write-path
+        rebuild, evict the cached client (force GC so the chromadb HNSW
+        memory map is released) and rebuild against the current on-disk
+        state. Returns the fresh client.
+        """
+        if self._closed:
+            from .base import BackendClosedError  # late import avoids cycles
+
+            raise BackendClosedError("ChromaBackend has been closed")
+
+        # Accept ``Path`` as well as ``str`` for caller convenience —
+        # internal cache keys remain strings.
+        palace_path_str = str(palace_path)
+
+        with self._cache_lock:
+            current_stat = self._db_stat_full(palace_path_str)
+            cached_stat = self._write_freshness.get(palace_path_str)
+            cached_client = self._clients.get(palace_path_str)
+
+            stat_changed = current_stat != cached_stat
+
+            if cached_client is None or stat_changed:
+                if cached_client is not None and stat_changed:
+                    logger.debug(
+                        "Invalidating chroma write client for %s: stat changed %r -> %r",
+                        palace_path_str,
+                        cached_stat,
+                        current_stat,
+                    )
+                    # Evict and drop strong refs so the underlying HNSW
+                    # memory map is released before we open a new one.
+                    self._clients.pop(palace_path_str, None)
+                    self._freshness.pop(palace_path_str, None)
+                    cached_client = None
+                    gc.collect()
+
+                _fix_blob_seq_ids(palace_path_str)
+                cached_client = chromadb.PersistentClient(path=palace_path_str)
+                self._clients[palace_path_str] = cached_client
+                # Update both freshness dicts so a subsequent _client() read
+                # path call doesn't trigger another (unnecessary) rebuild
+                # against the same on-disk state.
+                self._freshness[palace_path_str] = self._db_stat(palace_path_str)
+
+            # Always refresh the write-freshness tuple post-rebuild so the
+            # next call sees the post-construction stat (chromadb creates
+            # chroma.sqlite3 lazily on first open).
+            self._write_freshness[palace_path_str] = self._db_stat_full(palace_path_str)
+            return cached_client
 
     # ------------------------------------------------------------------
     # Public static helpers (legacy; prefer :meth:`get_collection`)
@@ -543,20 +692,32 @@ class ChromaBackend(BaseBackend):
             )
         else:
             collection = client.get_collection(collection_name, **ef_kwargs)
-        return ChromaCollection(collection)
+        return ChromaCollection(
+            collection,
+            backend=self,
+            palace_path=palace_path,
+            collection_name=collection_name,
+            embedding_function=embedding_function,
+            hnsw_space=hnsw_space,
+            create=create,
+        )
 
     def close_palace(self, palace) -> None:
         """Drop cached handles for ``palace``. Accepts ``PalaceRef`` or legacy path str."""
         path = palace.local_path if isinstance(palace, PalaceRef) else palace
         if path is None:
             return
-        self._clients.pop(path, None)
-        self._freshness.pop(path, None)
+        with self._cache_lock:
+            self._clients.pop(path, None)
+            self._freshness.pop(path, None)
+            self._write_freshness.pop(path, None)
 
     def close(self) -> None:
-        self._clients.clear()
-        self._freshness.clear()
-        self._closed = True
+        with self._cache_lock:
+            self._clients.clear()
+            self._freshness.clear()
+            self._write_freshness.clear()
+            self._closed = True
 
     def health(self, palace: Optional[PalaceRef] = None) -> HealthStatus:
         if self._closed:
@@ -571,18 +732,23 @@ class ChromaBackend(BaseBackend):
     # Legacy (pre-RFC 001) surface — retained while callers migrate.
     # ------------------------------------------------------------------
 
-    def get_or_create_collection(self, palace_path: str, collection_name: str,
-                                  embedding_function=None) -> ChromaCollection:
+    def get_or_create_collection(
+        self, palace_path: str, collection_name: str, embedding_function=None
+    ) -> ChromaCollection:
         """Legacy shim for ``get_collection(..., create=True)`` by path string."""
-        return self.get_collection(palace_path, collection_name, create=True,
-                                   embedding_function=embedding_function)
+        return self.get_collection(
+            palace_path, collection_name, create=True, embedding_function=embedding_function
+        )
 
     def delete_collection(self, palace_path: str, collection_name: str) -> None:
         """Delete ``collection_name`` from the palace at ``palace_path``."""
         self._client(palace_path).delete_collection(collection_name)
 
     def create_collection(
-        self, palace_path: str, collection_name: str, hnsw_space: str = "cosine",
+        self,
+        palace_path: str,
+        collection_name: str,
+        hnsw_space: str = "cosine",
         embedding_function=None,
     ) -> ChromaCollection:
         """Create (not get-or-create) ``collection_name`` with the given HNSW space."""
