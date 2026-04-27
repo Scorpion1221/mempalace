@@ -217,7 +217,82 @@ else
         [ -f "$f" ] && smart_copy_hook "$f" "$CODEX_PLUGIN/hooks/$(basename "$f")"
     done
     cp "$REPO/.codex-plugin/plugin.json" "$CODEX_PLUGIN/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
-    cp "$REPO/.codex-plugin/hooks.json" "$CODEX_PLUGIN/hooks.json" 2>/dev/null && echo "  → hooks.json synced" || true
+    cp "$REPO/.codex-plugin/hooks.json" "$CODEX_PLUGIN/hooks.json" 2>/dev/null && echo "  → hooks.json synced (plugin-local)" || true
+
+    # Merge mempalace's hook entries into ~/.codex/hooks.json (USER-LEVEL).
+    # Codex reads user-level hooks from ~/.codex/hooks.json with absolute
+    # paths; the plugin-local hooks.json is not enough on its own. Without
+    # this merge, codex_hooks=true and the plugin being registered still
+    # leaves the UserPromptSubmit/SessionStart/Stop hooks unfired.
+    #
+    # Merge semantics:
+    #   - Replace existing mempalace entries (identified by command path
+    #     containing the absolute mempalace plugin path) before appending —
+    #     keeps re-runs idempotent.
+    #   - Preserve unrelated hook entries the user has for the same events.
+    #   - Resolve ${CODEX_PLUGIN_ROOT} → absolute $CODEX_PLUGIN.
+    USER_HOOKS_JSON="$HOME/.codex/hooks.json"
+    SRC_HOOKS_JSON="$REPO/.codex-plugin/hooks.json"
+    if [ -f "$SRC_HOOKS_JSON" ]; then
+        export USER_HOOKS_JSON SRC_HOOKS_JSON CODEX_PLUGIN
+        python3 - <<'PYEOF'
+import json, os, pathlib
+src_path = pathlib.Path(os.environ["SRC_HOOKS_JSON"])
+dst_path = pathlib.Path(os.environ["USER_HOOKS_JSON"])
+plugin_root = os.environ["CODEX_PLUGIN"]
+
+src = json.loads(src_path.read_text())
+src_hooks = src.get("hooks", {})
+
+# Resolve ${CODEX_PLUGIN_ROOT} placeholder to absolute path so user-level
+# hooks.json doesn't depend on Codex's plugin-context env expansion.
+def resolve(obj):
+    if isinstance(obj, dict):
+        return {k: resolve(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [resolve(v) for v in obj]
+    if isinstance(obj, str):
+        return obj.replace("${CODEX_PLUGIN_ROOT}", plugin_root)
+    return obj
+src_hooks = resolve(src_hooks)
+
+# Load existing user hooks (or initialise).
+if dst_path.exists():
+    try:
+        dst = json.loads(dst_path.read_text() or "{}")
+    except json.JSONDecodeError:
+        # Don't clobber a broken user file; back it up and start fresh.
+        backup = dst_path.with_suffix(".json.broken")
+        dst_path.rename(backup)
+        print(f"  ⚠ {dst_path} was not valid JSON — backed up to {backup}")
+        dst = {}
+else:
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    dst = {}
+
+dst.setdefault("hooks", {})
+
+# Mempalace entries are identified by the absolute path of our plugin dir
+# appearing in the inner "command" string. Anything else is left alone.
+def is_mempalace(matcher_block):
+    for h in matcher_block.get("hooks", []):
+        if plugin_root in str(h.get("command", "")):
+            return True
+    return False
+
+events_changed = 0
+for event, src_matchers in src_hooks.items():
+    existing = dst["hooks"].get(event, [])
+    # Strip our previous entries (by command-path identity) — preserves any
+    # unrelated entries the user added for the same event.
+    kept = [m for m in existing if not is_mempalace(m)]
+    dst["hooks"][event] = kept + src_matchers
+    events_changed += 1
+
+dst_path.write_text(json.dumps(dst, indent=2, ensure_ascii=False) + "\n")
+print(f"  → merged {events_changed} hook event(s) into {dst_path}")
+PYEOF
+    fi
 
     # Sync the 5 Codex skill stubs (search/status/mine/help/init). Each is a
     # tiny SKILL.md that calls `mempalace instructions <name>` — the actual
