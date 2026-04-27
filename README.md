@@ -45,10 +45,35 @@ Architecture, concepts, and mining flows:
 
 ## Install
 
+### Quick Install (2 steps)
+
 ```bash
-pip install mempalace
-mempalace init ~/projects/myapp
+# Step 1: Install MemPalace
+git clone git@github.com:Scorpion1221/mempalace.git ~/git/mempalace
+cd ~/git/mempalace
+bash install.sh                 # Python package + Claude Code/Codex plugins
+
+# Step 2: Set up LiteLLM proxy (for embedding + recall LLM)
+cd litellm
+bash setup.sh                   # Auto-detects Docker/Python, guides through config
 ```
+
+That's it! The scripts handle Python package, CLI, palace init, plugin sync, and
+LiteLLM proxy setup. See [INSTALL.md](INSTALL.md) for details.
+
+### AI Agent-Assisted Install
+
+If you're using Claude Code, Codex, or Cursor, just ask:
+
+> "Help me install MemPalace"
+
+Your AI assistant will:
+1. Ask 3 questions (which agent? Gemini API or Vertex AI? install path?)
+2. Run the right commands for you
+3. Guide you through editing `.env` for your API key
+4. Verify the install
+
+See [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md) for the agent workflow.
 
 ## Quickstart
 
