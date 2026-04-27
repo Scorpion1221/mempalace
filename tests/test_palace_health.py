@@ -334,6 +334,67 @@ def test_rebuild_from_verbatim_raises_on_missing_palace(tmp_path):
         rebuild_from_verbatim(tmp_path / "does-not-exist")
 
 
+def test_rebuild_from_verbatim_uses_chroma_collection_adapter(tmp_path, monkeypatch):
+    """``rebuild_from_verbatim`` must write through the ``ChromaCollection``
+    adapter, not the raw chromadb collection.
+
+    Why this matters: writing through the adapter calls
+    ``ChromaBackend._note_post_write`` after every upsert. Without that
+    hook, the next ``_client_for_write`` call from the same process sees
+    the on-disk stat tuple change against its cached copy and rebuilds
+    the chromadb client unnecessarily — a real cost path documented in
+    commit cb6c483 that this test guards against regressing for the
+    rebuild path. It also keeps the rebuild on the same
+    ``_validate_where`` / embeddings handling the rest of the codebase
+    uses.
+
+    Strategy: spy on ``ChromaBackend._note_post_write`` and assert it
+    fires at least once per upsert during the rebuild. We use a real
+    palace + real ChromaDB so the wiring is verified end-to-end (raw
+    collection upserts would never reach the spy).
+    """
+    palace = tmp_path / "rebuild_adapter"
+    _seed_palace(palace, drawers=4)
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setenv("HOME", str(fake_home))
+
+    # Pre-quarantine so the rebuild has to do real upserts (not skip them).
+    quarantine_corrupt_segments(palace, reason="adapter-test")
+    assert _list_segment_dirs(palace) == []
+
+    # Spy on ChromaBackend._note_post_write — this is the bypass surface
+    # that the raw-collection bug used to hit.
+    from mempalace.backends.chroma import ChromaBackend
+
+    call_log: list[str] = []
+    original = ChromaBackend._note_post_write
+
+    def spy(self, palace_path: str) -> None:
+        call_log.append(str(palace_path))
+        original(self, palace_path)
+
+    monkeypatch.setattr(ChromaBackend, "_note_post_write", spy)
+
+    report = rebuild_from_verbatim(palace)
+    assert report.drawers_processed == 4
+    assert report.drawers_failed == 0
+
+    # The adapter MUST have called _note_post_write at least once during
+    # the rebuild — proving the upsert flowed through ChromaCollection
+    # rather than the raw chromadb collection.
+    assert call_log, (
+        "_note_post_write was never called during rebuild_from_verbatim — "
+        "the rebuild path is bypassing the ChromaCollection adapter"
+    )
+    # Every recorded call should target the palace under test (no stray
+    # writes to other paths). String-resolve for symlink-safety.
+    resolved = str(palace.resolve())
+    for path in call_log:
+        assert path == resolved, f"unexpected post-write target {path!r}, expected {resolved!r}"
+
+
 # ── 9. doctor CLI exit codes ──────────────────────────────────────────
 
 

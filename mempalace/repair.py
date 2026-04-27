@@ -508,6 +508,7 @@ def rebuild_from_verbatim(
         ValueError: when ``palace_path/chroma.sqlite3`` is missing
             (nothing to rebuild from).
     """
+    from .backends.chroma import ChromaCollection
     from .health import quarantine_corrupt_segments
     from .palace import palace_write_lock
 
@@ -563,10 +564,25 @@ def rebuild_from_verbatim(
 
         client = backend._client_for_write(str(palace_path_p))
         ef_kwargs = {"embedding_function": ef} if ef is not None else {}
-        new_col = client.get_or_create_collection(
+        raw_collection = client.get_or_create_collection(
             COLLECTION_NAME,
             metadata={"hnsw:space": "cosine"},
             **ef_kwargs,
+        )
+        # Wrap the raw chromadb collection in ChromaCollection so upserts go
+        # through the adapter layer: this triggers _note_post_write (so the
+        # backend's write-freshness cache stays consistent and the next
+        # _client_for_write call from this process doesn't see a spurious
+        # "stat changed" eviction), and applies the same _validate_where /
+        # embeddings handling the rest of the codebase uses. See bffe779.
+        new_col = ChromaCollection(
+            raw_collection,
+            backend=backend,
+            palace_path=str(palace_path_p),
+            collection_name=COLLECTION_NAME,
+            embedding_function=ef,
+            hnsw_space="cosine",
+            create=True,
         )
 
         insert_batch = (

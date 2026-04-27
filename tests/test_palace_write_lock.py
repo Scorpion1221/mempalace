@@ -8,6 +8,7 @@ The lock must be enforced across PROCESSES (not just threads), because
 from __future__ import annotations
 
 import hashlib
+import inspect
 import multiprocessing as mp
 import os
 import signal
@@ -365,3 +366,90 @@ def test_symlink_resolves_to_same_lock(tmp_path):
         if holder.is_alive():  # pragma: no cover - defensive cleanup
             holder.terminate()
             holder.join(timeout=2.0)
+
+
+# ── Docstring scope documentation ─────────────────────────────────────
+
+
+def test_palace_write_lock_docstring_lists_excluded_stores():
+    """``palace_write_lock``'s docstring must explicitly call out which palace
+    stores are NOT covered by this lock.
+
+    Future maintainers reading the docstring should not walk away with the
+    impression that "any palace mutation goes through palace_write_lock" —
+    the tunnel JSON, the knowledge graph SQLite, and the per-source
+    verbatim file locks are all governed by their own primitives. Failing
+    to document the boundary led to the original M-2 review finding; this
+    test exists so the boundary cannot silently regress.
+    """
+    doc = palace_write_lock.__doc__
+    assert doc is not None, "palace_write_lock has no docstring"
+    lower = doc.lower()
+    # Every store outside the lock's scope must be named.
+    assert "tunnel" in lower, "docstring must mention tunnel JSON exclusion"
+    assert "knowledge graph" in lower or "kg" in lower, (
+        "docstring must mention knowledge graph (SQLite) exclusion"
+    )
+    assert "verbatim" in lower or "drawer file" in lower or "source" in lower, (
+        "docstring must mention verbatim/source-file lock exclusion"
+    )
+
+
+def test_palace_write_lock_excluded_stores_actually_use_their_own_locks():
+    """Verify the docstring's claims are TRUE — each cited store really does
+    use the lock primitive named in the docstring.
+
+    If any of these imports/attribute lookups fails, the docstring claim is
+    stale and must be updated alongside the code.
+    """
+    # Tunnel JSON — claim: protected by mine_lock(_TUNNEL_FILE).
+    from mempalace import palace_graph as _pg
+    from mempalace.palace import mine_lock as _mine_lock
+
+    assert hasattr(_pg, "_TUNNEL_FILE"), (
+        "palace_graph._TUNNEL_FILE must exist for the docstring claim to hold"
+    )
+    assert hasattr(_pg, "create_tunnel"), "palace_graph.create_tunnel must exist"
+    assert callable(_mine_lock), "mine_lock must be importable from palace"
+
+    # Knowledge graph SQLite — claim: WAL + threading.Lock.
+    import threading
+
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    # The init path enables WAL and creates a self._lock; verify both via
+    # construction so we don't rely on private attribute names that could
+    # be renamed. The attribute name itself is part of the documented
+    # protection though, so we still check it.
+    assert (
+        hasattr(KnowledgeGraph, "_lock") or "_lock" in KnowledgeGraph.__init__.__code__.co_names
+    ), "KnowledgeGraph must hold a threading.Lock attribute named in the docstring"
+    # Cheap proof that the lock attribute is the right type after init.
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".sqlite3", delete=False) as tmp:
+        kg_path = tmp.name
+    try:
+        kg = KnowledgeGraph(db_path=kg_path)
+        try:
+            assert isinstance(kg._lock, type(threading.Lock())), (
+                "KnowledgeGraph._lock must be a threading.Lock instance"
+            )
+        finally:
+            kg.close()
+    finally:
+        import os as _os
+
+        try:
+            _os.unlink(kg_path)
+        except OSError:
+            pass
+
+    # Verbatim source files — claim: mine_lock(source_file) inside
+    # miner.process_file.
+    from mempalace import miner
+
+    src = inspect.getsource(miner.process_file)
+    assert "mine_lock(source_file)" in src, (
+        "miner.process_file must use mine_lock(source_file) per the docstring claim"
+    )
