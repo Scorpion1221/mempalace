@@ -7,7 +7,7 @@
 #
 # Matches the defaults in scripts/mempalace-env.template:
 #   MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000
-#   MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1
+#   MEMPAL_LLM_ENDPOINT=http://127.0.0.1:4000/v1
 #   MEMPAL_*_KEY=sk-litellm-local   (the master_key below)
 #
 # ─── Backend selection ──────────────────────────────────────────────────────
@@ -26,56 +26,36 @@
 # The dimension warning at the bottom applies to BOTH backends.
 
 model_list:
-  # ─── (A) Gemini API backend ──────────────────────────────────────────────
-  - model_name: gemini-embedding-2-preview
-    litellm_params:
-      model: gemini/gemini-embedding-001
-      api_key: os.environ/GEMINI_API_KEY
-      output_dimensionality: 3072  # see "Dimension warning" at bottom
-
-  - model_name: gemini-3.1-flash-lite-preview
-    litellm_params:
-      model: gemini/gemini-2.5-flash-lite
-      api_key: os.environ/GEMINI_API_KEY
-
-  - model_name: gemini-2.5-flash
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      api_key: os.environ/GEMINI_API_KEY
-
-  - model_name: gemini-2.5-pro
-    litellm_params:
-      model: gemini/gemini-2.5-pro
-      api_key: os.environ/GEMINI_API_KEY
-
-  # ─── (B) Vertex AI backend — uncomment to use instead of (A) ────────────
-  # Duplicate entries with the same model_name are NOT allowed; comment out
-  # the matching (A) entry above when enabling a (B) entry below.
+  # MemPalace only needs two models: an embedding model (for vector storage)
+  # and a small/cheap LLM (for save extraction + recall rewrite/rerank).
+  # No need to expose gemini-2.5-flash / gemini-2.5-pro — those are for
+  # general-purpose chat, not the mempalace pipeline.
   #
+  # ─── (A) Gemini API backend — DISABLED, using Vertex AI instead ─────────
   # - model_name: gemini-embedding-2-preview
   #   litellm_params:
-  #     model: vertex_ai/gemini-embedding-001
-  #     vertex_project: os.environ/VERTEXAI_PROJECT
-  #     vertex_location: os.environ/VERTEXAI_LOCATION
+  #     model: gemini/gemini-embedding-001
+  #     api_key: os.environ/GEMINI_API_KEY
   #     output_dimensionality: 3072
   #
   # - model_name: gemini-3.1-flash-lite-preview
   #   litellm_params:
-  #     model: vertex_ai/gemini-2.5-flash-lite
-  #     vertex_project: os.environ/VERTEXAI_PROJECT
-  #     vertex_location: os.environ/VERTEXAI_LOCATION
-  #
-  # - model_name: gemini-2.5-flash
-  #   litellm_params:
-  #     model: vertex_ai/gemini-2.5-flash
-  #     vertex_project: os.environ/VERTEXAI_PROJECT
-  #     vertex_location: os.environ/VERTEXAI_LOCATION
-  #
-  # - model_name: gemini-2.5-pro
-  #   litellm_params:
-  #     model: vertex_ai/gemini-2.5-pro
-  #     vertex_project: os.environ/VERTEXAI_PROJECT
-  #     vertex_location: os.environ/VERTEXAI_LOCATION
+  #     model: gemini/gemini-2.5-flash-lite
+  #     api_key: os.environ/GEMINI_API_KEY
+
+  # ─── (B) Vertex AI backend — ACTIVE ─────────────────────────────────────
+  - model_name: gemini-embedding-2-preview
+    litellm_params:
+      model: vertex_ai/gemini-embedding-001
+      vertex_project: os.environ/VERTEXAI_PROJECT
+      vertex_location: os.environ/VERTEXAI_LOCATION
+      output_dimensionality: 3072
+
+  - model_name: gemini-3.1-flash-lite-preview
+    litellm_params:
+      model: vertex_ai/gemini-2.5-flash-lite
+      vertex_project: os.environ/VERTEXAI_PROJECT
+      vertex_location: os.environ/VERTEXAI_LOCATION
 
 litellm_settings:
   drop_params: true

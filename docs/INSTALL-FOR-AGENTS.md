@@ -17,12 +17,11 @@ Use `AskUserQuestion` to gather install configuration. Ask 2-3 questions:
 **Question 1: Which AI agent(s) are you using?**
 - Header: "AI Agent"
 - Options:
-  - "Claude Code" (description: "Anthropic's official CLI and desktop app")
+  - "Claude Code" (description: "Anthropic's official CLI and desktop app (Recommended)")
   - "Codex" (description: "Codex CLI by Anthropic")
-  - "Both Claude Code + Codex" (description: "Install for both (Recommended)")
   - "Cursor" (description: "Cursor IDE — requires manual setup after install")
   - "Hermes" (description: "Hermes agent — advanced users only")
-- Multi-select: true
+- Multi-select: true (user can pick multiple — e.g., Claude Code + Codex)
 
 **Question 2: Do you have a Gemini API key?**
 - Header: "LiteLLM Backend"
@@ -54,15 +53,19 @@ Or if custom path, ask for it and use that.
 
 ### Step 3: Run install.sh
 
-Map user's agent selection to install.sh flags:
+Map user's agent selection (multi-select) to install.sh flags:
 
 | User selected | Command |
 |---|---|
 | Claude Code only | `bash install.sh --claude` |
 | Codex only | `bash install.sh --codex` |
-| Both Claude + Codex | `bash install.sh --all` |
-| Cursor | `bash install.sh --claude` (Cursor shares Claude plugin) |
-| Hermes | `bash install.sh --claude && bash scripts/sync-plugins.sh --hermes` |
+| Claude Code + Codex | `bash install.sh --all` |
+| Cursor (any combination) | `bash install.sh --claude` (Cursor shares Claude plugin) |
+| Hermes (any combination) | `bash install.sh --claude && bash scripts/sync-plugins.sh --hermes` |
+
+If the user picked multiple agents, combine flags accordingly — `--all` covers
+Claude + Codex; add `sync-plugins.sh --hermes` if Hermes was also selected;
+Cursor needs no extra flag beyond `--claude`.
 
 Run the command and show output to user.
 

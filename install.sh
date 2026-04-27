@@ -2,11 +2,16 @@
 set -euo pipefail
 
 # MemPalace installer — one command for Claude Code + Codex CLI
-# Usage: bash install.sh [--claude] [--codex] [--all]
+# Usage: bash install.sh [--claude] [--codex] [--all] [--dev]
 #   No flags = --all (install both)
+#   --dev    = editable install (`pip install -e`) for contributors who want
+#              source edits to take effect without reinstalling. Default is
+#              a pinned, non-editable install from the remote git URL at the
+#              exact commit currently checked out in this clone.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$SCRIPT_DIR"
+REPO_URL="https://github.com/Scorpion1221/mempalace.git"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -22,6 +27,7 @@ fail()  { echo -e "${RED}[mempalace]${NC} $*"; exit 1; }
 # ─── Parse args ───
 INSTALL_CLAUDE=false
 INSTALL_CODEX=false
+DEV_MODE=false
 
 if [[ $# -eq 0 ]]; then
   INSTALL_CLAUDE=true
@@ -32,11 +38,13 @@ else
       --claude) INSTALL_CLAUDE=true ;;
       --codex)  INSTALL_CODEX=true ;;
       --all)    INSTALL_CLAUDE=true; INSTALL_CODEX=true ;;
+      --dev)    DEV_MODE=true ;;
       --help|-h)
-        echo "Usage: bash install.sh [--claude] [--codex] [--all]"
+        echo "Usage: bash install.sh [--claude] [--codex] [--all] [--dev]"
         echo "  --claude   Install for Claude Code only"
         echo "  --codex    Install for Codex CLI only"
         echo "  --all      Install for both (default)"
+        echo "  --dev      Editable install for contributors (default: pinned remote)"
         exit 0
         ;;
       *) fail "Unknown option: $arg" ;;
@@ -44,13 +52,38 @@ else
   done
 fi
 
-# ─── Step 1: Python package (editable) ───
-info "Installing Python package (editable mode)..."
-if command -v python3 &>/dev/null; then
-  pip3 install -e "$REPO_DIR" --quiet 2>&1 | tail -1
-  ok "Python package installed: $(python3 -c 'import mempalace; print(mempalace.__file__)')"
-else
+# ─── Step 1: Python package ───
+if ! command -v python3 &>/dev/null; then
   fail "python3 not found"
+fi
+
+if $DEV_MODE; then
+  info "Installing Python package in editable mode (--dev)..."
+  pip3 install -e "$REPO_DIR" --quiet 2>&1 | tail -1
+  ok "Python package installed (editable): $(python3 -c 'import mempalace; print(mempalace.__file__)')"
+else
+  # Pin to the exact ref currently checked out in this clone so the installed
+  # Python package matches the auxiliary files (hooks, plugin manifests,
+  # litellm config) shipped from this same source tree. Prefer the tag if
+  # HEAD is exactly on one (cleaner `pip show mempalace` output); else fall
+  # back to the commit hash.
+  if ! command -v git &>/dev/null; then
+    fail "git not found (needed to resolve the pinned ref; or use --dev)"
+  fi
+  TAG=$(git -C "$REPO_DIR" describe --tags --exact-match HEAD 2>/dev/null || true)
+  COMMIT=$(git -C "$REPO_DIR" rev-parse HEAD 2>/dev/null || true)
+  if [[ -n "$TAG" ]]; then
+    PIN="$TAG"
+    PIN_DESC="tag $TAG"
+  elif [[ -n "$COMMIT" ]]; then
+    PIN="$COMMIT"
+    PIN_DESC="commit ${COMMIT:0:8}"
+  else
+    fail "Cannot determine git ref for pinning. Run from a git checkout, or use --dev."
+  fi
+  info "Installing Python package from ${REPO_URL} @ ${PIN_DESC}..."
+  pip3 install --quiet --upgrade "git+${REPO_URL}@${PIN}" 2>&1 | tail -1
+  ok "Python package installed: $(python3 -c 'import mempalace, mempalace.version; print(f\"v{mempalace.version.__version__} ({mempalace.__file__})\")')"
 fi
 
 # ─── Step 2: CLI + MCP server on PATH ───
