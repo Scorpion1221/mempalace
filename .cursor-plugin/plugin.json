@@ -24,10 +24,9 @@
         "MEMPAL_EMBEDDING_MODEL": "gemini-embedding-2-preview",
         "MEMPAL_EMBEDDING_ENDPOINT": "http://127.0.0.1:4000",
         "MEMPAL_EMBEDDING_KEY": "sk-litellm-local",
-        "MEMPAL_RECALL_LLM": "1",
-        "MEMPAL_RECALL_ENDPOINT": "http://127.0.0.1:4000/v1",
-        "MEMPAL_RECALL_MODEL": "gemini-3.1-flash-lite-preview",
-        "MEMPAL_RECALL_KEY": "sk-litellm-local",
+        "MEMPAL_LLM_ENDPOINT": "http://127.0.0.1:4000/v1",
+        "MEMPAL_LLM_MODEL": "gemini-3.1-flash-lite-preview",
+        "MEMPAL_LLM_KEY": "sk-litellm-local",
         "SSL_CERT_FILE": "/opt/homebrew/etc/openssl@3/cert.pem"
       }
     }

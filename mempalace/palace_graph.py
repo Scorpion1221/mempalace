@@ -277,6 +277,117 @@ def _fuzzy_match(query: str, nodes: dict, n: int = 5):
     return [r for r, _ in scored[:n]]
 
 
+# Generic rooms — names so common across wings that auto-linking them
+# would just connect every wing to every other wing and pollute traversal.
+# These are skipped by ``auto_link_shared_rooms``. The LLM can still emit
+# explicit tunnels for them in the save prompt when there's a real
+# causal/constraint linkage; this stoplist only blocks the deterministic
+# auto-pass.
+_AUTO_TUNNEL_GENERIC_ROOMS = frozenset(
+    {
+        "general",
+        "diary",
+        "notes",
+        "general_thoughts",
+        "decisions",
+        "code",
+        "bugs",
+        "configuration",
+        "operations",
+        "architecture",
+        "issues",
+    }
+)
+
+# A room appearing in more than this many wings is treated as too-popular
+# to auto-link — most likely a generic room name slipping past the
+# stoplist (e.g. "performance", "security"). The threshold is intentionally
+# lenient: 5 wings means 4 LLM-style room-name collisions in a single
+# palace are still allowed to auto-link.
+_AUTO_TUNNEL_POPULARITY_CAP = 5
+
+
+def auto_link_shared_rooms(
+    saved_pairs,
+    col=None,
+    config=None,
+    max_per_save: int = 5,
+):
+    """Deterministically tunnel-link drawers when the same room appears in
+    multiple wings.
+
+    Called from ``_async_save_worker`` after the LLM-driven save completes.
+    For each ``(wing, room)`` just written, scan the palace for OTHER wings
+    that already have ``room`` and create symmetric tunnels via
+    ``create_tunnel`` (which is idempotent on the canonical tunnel ID).
+
+    Skipped:
+        - rooms in ``_AUTO_TUNNEL_GENERIC_ROOMS`` (too generic to be a real
+          cross-wing topic)
+        - rooms appearing in more than ``_AUTO_TUNNEL_POPULARITY_CAP`` wings
+          (suggests a global generic room; auto-linking would explode)
+        - same-wing pairs (tunnels are cross-wing only)
+
+    The LLM tunnel path in the save prompt remains independent — this
+    function complements it by guaranteeing same-room cross-wing links
+    even when the LLM forgets to emit them.
+
+    Args:
+        saved_pairs: iterable of ``(wing, room)`` tuples just saved.
+        col: ChromaDB collection (passes through to ``build_graph``).
+        config: optional config (passes through to ``build_graph``).
+        max_per_save: cap on tunnels created in one auto-link pass.
+
+    Returns:
+        list of newly created/updated tunnel dicts (subset of
+        ``create_tunnel`` returns), capped at ``max_per_save``.
+    """
+    pairs = [(w, r) for (w, r) in saved_pairs if w and r]
+    if not pairs:
+        return []
+
+    nodes, _edges = build_graph(col, config)
+    if not nodes:
+        return []
+
+    created: list = []
+    seen_ids: set = set()
+    for this_wing, this_room in pairs:
+        if len(created) >= max_per_save:
+            break
+        if this_room in _AUTO_TUNNEL_GENERIC_ROOMS:
+            continue
+        node = nodes.get(this_room)
+        if not node:
+            continue
+        wings = node.get("wings", [])
+        if len(wings) > _AUTO_TUNNEL_POPULARITY_CAP:
+            continue
+        for other_wing in wings:
+            if other_wing == this_wing:
+                continue
+            if len(created) >= max_per_save:
+                break
+            tid = _canonical_tunnel_id(this_wing, this_room, other_wing, this_room)
+            if tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+            try:
+                tunnel = create_tunnel(
+                    source_wing=this_wing,
+                    source_room=this_room,
+                    target_wing=other_wing,
+                    target_room=this_room,
+                    label=f"auto:shared room {this_room}",
+                )
+                created.append(tunnel)
+            except ValueError:
+                # Bad endpoint name — skip silently, the LLM-side validator
+                # would have caught it but defense-in-depth.
+                continue
+    return created
+
+
 # =============================================================================
 # EXPLICIT TUNNELS — agent-created cross-wing links
 # =============================================================================

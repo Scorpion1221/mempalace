@@ -22,8 +22,16 @@ import os
 import pytest
 
 for _var in (
-    "MEMPAL_EMBEDDING_MODEL", "MEMPALACE_EMBEDDING_MODEL",
+    "MEMPAL_EMBEDDING_MODEL",
+    "MEMPALACE_EMBEDDING_MODEL",
+    "MEMPAL_LLM",
+    "MEMPAL_LLM_ENDPOINT",
+    "MEMPAL_LLM_MODEL",
+    "MEMPAL_LLM_KEY",
     "MEMPAL_RECALL_LLM",
+    "MEMPAL_RECALL_ENDPOINT",
+    "MEMPAL_RECALL_MODEL",
+    "MEMPAL_RECALL_KEY",
 ):
     os.environ.pop(_var, None)
 

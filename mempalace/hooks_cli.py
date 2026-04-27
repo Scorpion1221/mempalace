@@ -43,7 +43,6 @@ def _mempalace_python() -> str:
     return sys.executable
 
 
-
 # Matches any CJK character (Chinese, Japanese kana, Korean hangul syllables).
 # Used so the KG recall path keeps 2-char CJK bigrams from ``_tokenize``,
 # which would otherwise be dropped by a plain ``len(t) >= 3`` filter.
@@ -1198,6 +1197,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
             )
             written += 1
 
+        saved_pairs: list = []
         for drawer in data.get("drawers", []):
             content = drawer.get("content", "")
             if not content or len(content.strip()) < 20:
@@ -1227,6 +1227,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                     }
                 ],
             )
+            saved_pairs.append((d_wing, d_room))
             written += 1
 
         kg_facts = data.get("kg", [])
@@ -1281,19 +1282,37 @@ def _async_save_worker(transcript_text, session_id, cwd):
                         )
                         tunnels_written += 1
                     except Exception as e:
-                        _log(
-                            f"async save: tunnel write error "
-                            f"({sw}/{sr} -> {tw}/{tr}): {e}"
-                        )
+                        _log(f"async save: tunnel write error ({sw}/{sr} -> {tw}/{tr}): {e}")
             except Exception as e:
                 _log(f"async save: tunnel block failed: {e}")
 
+        # Deterministic auto-tunnel pass — independent of the LLM's tunnel
+        # output. If a (wing, room) just saved appears in another wing too,
+        # link them. The LLM may have missed it (or produced same-wing
+        # tunnels we filtered out); this guarantees the doc-promised
+        # behavior of "same room across wings → tunnel bridge".
+        auto_tunnels_written = 0
+        if saved_pairs:
+            try:
+                from .palace_graph import auto_link_shared_rooms, invalidate_graph_cache
+
+                # Drop the cached graph so the auto-link sees the rooms
+                # we just upserted.
+                invalidate_graph_cache()
+                auto_links = auto_link_shared_rooms(saved_pairs, col=col, max_per_save=5)
+                auto_tunnels_written = len(auto_links)
+            except Exception as e:
+                _log(f"async save: auto-link tunnel block failed: {e}")
+
         _log(
             f"async save: wrote {written} entries "
-            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts + {tunnels_written} tunnels)"
+            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts + "
+            f"{tunnels_written} llm tunnels + {auto_tunnels_written} auto tunnels)"
         )
     except Exception as e:
         _log(f"async save error: {e}\n{traceback.format_exc()}")
+
+
 def _wing_from_transcript_path(transcript_path: str) -> str:
     """Derive a project wing name from a Claude Code transcript path.
 
@@ -1379,7 +1398,12 @@ def hook_stop(data: dict, harness: str):
             return
 
         transcript_text = _extract_recent_exchanges(transcript_path, since_exchange=last_save)
-        if transcript_text and os.environ.get("MEMPAL_RECALL_LLM", "") == "1":
+        # Auto-save and recall share the same LLM gate: enabled by default
+        # whenever an endpoint+model is configured. Set MEMPAL_LLM=0 to
+        # opt out. See recall_llm.is_enabled() for the full probe rules.
+        from .recall_llm import is_enabled as _llm_is_enabled
+
+        if transcript_text and _llm_is_enabled():
             cwd = parsed.get("cwd", "") or data.get("cwd", "")
             try:
                 proc = subprocess.Popen(
@@ -1835,7 +1859,8 @@ def hook_userprompt(data: dict, harness: str):
         search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
         original_query = search_query
 
-    # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
+    # --- Stage 1: LLM query rewrite (default-on when an LLM endpoint is
+    # configured; opt out via MEMPAL_LLM=0). ---
     llm_config = None
     time_after = None
     rewrite_filters: dict = {}

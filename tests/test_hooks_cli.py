@@ -1330,6 +1330,93 @@ class TestAsyncSavePromptHardening:
         assert "MUST be escaped as" in _ASYNC_SAVE_PROMPT
 
 
+class TestAsyncSaveTriggersAutoLink:
+    """After writing drawers, the save worker must call auto_link_shared_rooms
+    with the (wing, room) pairs it just wrote — this is the deterministic
+    'same room across wings → tunnel bridge' guarantee."""
+
+    def test_auto_link_called_with_saved_pairs(self, tmp_path, monkeypatch):
+        from mempalace import hooks_cli, recall_llm
+        from mempalace import palace as palace_mod
+        from mempalace import palace_graph as graph_mod
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+
+        response = (
+            '{"diary": "", '
+            '"drawers": ['
+            '{"wing": "alpha", "room": "auth-migration", '
+            '"content": "Long enough drawer content describing the auth migration"},'
+            '{"wing": "alpha", "room": "graphql-switch", '
+            '"content": "Long enough drawer content for graphql switch decision"}'
+            '], "kg": [], "tunnels": []}'
+        )
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: response)
+
+        class _FakeCol:
+            def add(self, **kw):
+                pass
+
+            def upsert(self, **kw):
+                pass
+
+        monkeypatch.setattr(palace_mod, "get_collection", lambda *a, **kw: _FakeCol())
+
+        seen_pairs = []
+
+        def _stub_auto_link(saved_pairs, col=None, config=None, max_per_save=5):
+            seen_pairs.append(list(saved_pairs))
+            return []
+
+        monkeypatch.setattr(graph_mod, "auto_link_shared_rooms", _stub_auto_link)
+        monkeypatch.setattr(graph_mod, "invalidate_graph_cache", lambda: None)
+
+        hooks_cli._async_save_worker("user: ...\nassistant: ...", "test-session", str(tmp_path))
+
+        assert len(seen_pairs) == 1, "auto_link_shared_rooms should be called exactly once"
+        assert ("alpha", "auth-migration") in seen_pairs[0]
+        assert ("alpha", "graphql-switch") in seen_pairs[0]
+
+    def test_auto_link_skipped_when_no_drawers_saved(self, tmp_path, monkeypatch):
+        from mempalace import hooks_cli, recall_llm
+        from mempalace import palace as palace_mod
+        from mempalace import palace_graph as graph_mod
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+        response = (
+            '{"diary": "Long enough diary entry to be worth storing right here", '
+            '"drawers": [], "kg": [], "tunnels": []}'
+        )
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: response)
+
+        class _FakeCol:
+            def add(self, **kw):
+                pass
+
+            def upsert(self, **kw):
+                pass
+
+        monkeypatch.setattr(palace_mod, "get_collection", lambda *a, **kw: _FakeCol())
+
+        called = {"n": 0}
+
+        def _stub_auto_link(*a, **kw):
+            called["n"] += 1
+            return []
+
+        monkeypatch.setattr(graph_mod, "auto_link_shared_rooms", _stub_auto_link)
+        monkeypatch.setattr(graph_mod, "invalidate_graph_cache", lambda: None)
+
+        hooks_cli._async_save_worker("user: ...\nassistant: ...", "test-session", str(tmp_path))
+
+        # No drawers → saved_pairs is empty → auto_link is not invoked.
+        assert called["n"] == 0
+
+
 # --- preferred_wing propagation + hook-side wing validation ---
 
 

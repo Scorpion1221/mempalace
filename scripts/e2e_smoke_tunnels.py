@@ -157,10 +157,10 @@ def test_recall_hook(col) -> bool:
     _banner("TEST 2: full UserPromptSubmit hook end-to-end")
 
     if not (
-        os.environ.get("MEMPAL_RECALL_ENDPOINT")
-        and os.environ.get("MEMPAL_RECALL_MODEL")
+        (os.environ.get("MEMPAL_LLM_ENDPOINT") or os.environ.get("MEMPAL_RECALL_ENDPOINT"))
+        and (os.environ.get("MEMPAL_LLM_MODEL") or os.environ.get("MEMPAL_RECALL_MODEL"))
     ):
-        print("  skipped — MEMPAL_RECALL_* not configured (decide_recall needs an LLM)")
+        print("  skipped — MEMPAL_LLM_* / MEMPAL_RECALL_* not configured (decide_recall needs an LLM)")
         return True  # skip ≠ fail
 
     from mempalace.palace_graph import create_tunnel, delete_tunnel, list_tunnels
