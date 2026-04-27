@@ -39,7 +39,9 @@ def test_topic_wings_default(tmp_path):
 def test_hall_keywords_default(tmp_path):
     cfg = MempalaceConfig(config_dir=str(tmp_path))
     assert isinstance(cfg.hall_keywords, dict)
-    assert "technical" in cfg.hall_keywords
+    # Doc-aligned 5-class taxonomy (hall_facts/events/discoveries/preferences/advice)
+    assert "hall_facts" in cfg.hall_keywords
+    assert "hall_events" in cfg.hall_keywords
 
 
 def test_init_idempotent(tmp_path):

@@ -567,10 +567,18 @@ _HALL_KEYWORDS_CACHE = None
 
 
 def detect_hall(content: str) -> str:
-    """Route content to a hall based on keyword scoring.
+    """Route content to a hall based on keyword scoring (fallback path).
 
-    Halls connect rooms within a wing — they categorize the TYPE of content
-    (emotional, technical, family, etc.) while rooms categorize the TOPIC.
+    Halls describe how a memory connects within a wing — ``hall_facts``
+    (decisions), ``hall_events`` (sessions/debugging), ``hall_discoveries``
+    (insights), ``hall_preferences`` (habits), ``hall_advice``
+    (recommendations). Rooms still categorize the TOPIC; halls categorize
+    the SHAPE.
+
+    Used as a fallback only — auto-save prefers the LLM's per-drawer hall
+    when it returns one. Default when no keywords match is
+    ``DEFAULT_HALL_FALLBACK`` (``hall_events``), since most conversation
+    chunks describe something that happened.
     """
     global _HALL_KEYWORDS_CACHE
     if _HALL_KEYWORDS_CACHE is None:
@@ -587,7 +595,9 @@ def detect_hall(content: str) -> str:
 
     if scores:
         return max(scores, key=scores.get)
-    return "general"
+    from .config import DEFAULT_HALL_FALLBACK
+
+    return DEFAULT_HALL_FALLBACK
 
 
 def _extract_entities_for_metadata(content: str) -> str:

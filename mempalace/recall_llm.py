@@ -15,15 +15,26 @@ Stage 2 — Rerank/Filter:
     irrelevant entries (diary, task logs).
 
 Supports three API backends (in priority order):
-    1. MEMPAL_RECALL_ENDPOINT (explicit — LiteLLM proxy, Ollama, etc.)
+    1. MEMPAL_LLM_ENDPOINT (explicit — LiteLLM proxy, Ollama, etc.)
+       Legacy alias: MEMPAL_RECALL_ENDPOINT (still read for backward compat)
     2. Vertex AI (CLAUDE_CODE_USE_VERTEX=1 + gcloud credentials)
     3. Anthropic native API (ANTHROPIC_API_KEY)
 
 All stages gracefully degrade on failure — the caller falls back to the
 original query / original ranking.
 
-Opt-in via environment variable:
-    MEMPAL_RECALL_LLM=1   — enable LLM-enhanced recall (default: off)
+Activation (since v3.4):
+    LLM features are enabled by default whenever an endpoint+model is
+    configured (probe-based). The same backend powers async save AND
+    recall enhancement — there is one LLM, not two.
+
+    Kill-switch (any one disables):
+        MEMPAL_LLM=0           — canonical opt-out
+        MEMPAL_RECALL_LLM=0    — legacy alias (still honored)
+
+    Legacy MEMPAL_RECALL_LLM=1 is harmless: probe still runs, behavior
+    unchanged. Users who previously set MEMPAL_RECALL_LLM=1 do not need
+    to update anything.
 """
 
 from collections.abc import Mapping
@@ -40,10 +51,14 @@ logger = logging.getLogger(__name__)
 
 # --- Configuration ---
 
-# Env var priority: MEMPAL_RECALL_ENDPOINT > Vertex AI > ANTHROPIC_API_KEY
-# `MEMPAL_RECALL_MODEL` is required for every backend — no implicit fallback.
+# Env var priority: MEMPAL_LLM_ENDPOINT > Vertex AI > ANTHROPIC_API_KEY.
+# `MEMPAL_LLM_MODEL` is required for every backend — no implicit fallback.
 # When unset (or empty), the corresponding backend is treated as unconfigured
 # and skipped. This avoids silently locking users into a vendor default.
+#
+# Backward compat: MEMPAL_RECALL_ENDPOINT / MEMPAL_RECALL_MODEL /
+# MEMPAL_RECALL_KEY are still read when their MEMPAL_LLM_* counterpart is
+# unset, so existing user envs keep working without migration.
 VERTEX_LOCATION = "us-east5"
 REWRITE_TIMEOUT_S = 8
 RERANK_TIMEOUT_S = 8
@@ -111,9 +126,41 @@ _HISTORY_REFERENCE_HINTS = (
 )
 
 
+def _read_llm_env(canonical: str, legacy: str) -> str:
+    """Read an LLM-stack env var, preferring the canonical MEMPAL_LLM_*
+    name over the legacy MEMPAL_RECALL_* alias.
+
+    The canonical name was introduced in v3.4 to reflect that one LLM
+    powers both auto-save and recall. The legacy name is still read so
+    pre-v3.4 user envs keep working untouched.
+    """
+    val = os.environ.get(canonical, "").strip()
+    if val:
+        return val
+    return os.environ.get(legacy, "").strip()
+
+
 def is_enabled() -> bool:
-    """Check if LLM-enhanced recall is enabled. Opt-in via MEMPAL_RECALL_LLM=1."""
-    return os.environ.get("MEMPAL_RECALL_LLM", "") == "1"
+    """Auto-save and LLM-enhanced recall are enabled when an LLM endpoint
+    is configured AND not explicitly disabled.
+
+    Default (since v3.4): ON when endpoint+model are present. Was opt-in
+    via ``MEMPAL_RECALL_LLM=1`` before; now opt-out via ``MEMPAL_LLM=0``.
+
+    Kill-switches (either disables, takes priority over probe):
+        MEMPAL_LLM=0           — canonical
+        MEMPAL_RECALL_LLM=0    — legacy alias
+
+    Vertex/Anthropic backends are detected by ``_get_llm_config()`` based
+    on their own credentials and also count as "configured" for this
+    probe.
+    """
+    if (
+        os.environ.get("MEMPAL_LLM", "").strip() == "0"
+        or os.environ.get("MEMPAL_RECALL_LLM", "").strip() == "0"
+    ):
+        return False
+    return _get_llm_config() is not None
 
 
 # Cache gcloud access token within a single hook invocation
@@ -156,22 +203,23 @@ def _get_llm_config() -> dict | None:
     Returns dict with keys: backend ("vertex" | "anthropic" | "openai_compat"),
     plus backend-specific fields, or None if no API is configured.
     """
-    # Priority 1: MEMPAL_RECALL_ENDPOINT (explicit override — LiteLLM, Ollama, etc.)
-    # When set, always use this regardless of Vertex or Anthropic config.
-    endpoint = os.environ.get("MEMPAL_RECALL_ENDPOINT", "")
-    llm_model = os.environ.get("MEMPAL_RECALL_MODEL", "")
+    # Priority 1: MEMPAL_LLM_ENDPOINT / MEMPAL_RECALL_ENDPOINT (explicit
+    # override — LiteLLM, Ollama, etc.). When set, always use this
+    # regardless of Vertex or Anthropic config.
+    endpoint = _read_llm_env("MEMPAL_LLM_ENDPOINT", "MEMPAL_RECALL_ENDPOINT")
+    llm_model = _read_llm_env("MEMPAL_LLM_MODEL", "MEMPAL_RECALL_MODEL")
     if endpoint and llm_model:
         return {
             "backend": "openai_compat",
             "endpoint": endpoint.rstrip("/"),
             "model": llm_model,
-            "key": os.environ.get("MEMPAL_RECALL_KEY", ""),
+            "key": _read_llm_env("MEMPAL_LLM_KEY", "MEMPAL_RECALL_KEY"),
         }
 
     # Priority 2: Vertex AI (Claude Code Vertex mode)
     if os.environ.get("CLAUDE_CODE_USE_VERTEX") == "1":
         project = os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID", "")
-        model = os.environ.get("MEMPAL_RECALL_MODEL", "").strip()
+        model = _read_llm_env("MEMPAL_LLM_MODEL", "MEMPAL_RECALL_MODEL")
         if project and model:
             token = _get_vertex_token()
             if token:
@@ -193,7 +241,7 @@ def _get_llm_config() -> dict | None:
 
     # Priority 3: Anthropic native API
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    model = os.environ.get("MEMPAL_RECALL_MODEL", "").strip()
+    model = _read_llm_env("MEMPAL_LLM_MODEL", "MEMPAL_RECALL_MODEL")
     if api_key and model:
         return {"backend": "anthropic", "api_key": api_key, "model": model}
 

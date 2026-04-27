@@ -11,7 +11,9 @@ from pathlib import Path
 
 try:
     from dotenv import load_dotenv as _load_dotenv
-except ImportError:  # dotenv is a runtime dependency; guard for source checkouts without it installed
+except (
+    ImportError
+):  # dotenv is a runtime dependency; guard for source checkouts without it installed
     _load_dotenv = None
 
 
@@ -105,15 +107,13 @@ def sanitize_content(value: str, max_length: int = 100_000) -> str:
         raise ValueError("content must be a non-empty string")
     value = value.strip()
     # Remove null bytes and non-printable control characters (keep \n \t)
-    value = "".join(
-        c for c in value
-        if c in ("\n", "\t") or (ord(c) >= 32) or (ord(c) > 127)
-    )
+    value = "".join(c for c in value if c in ("\n", "\t") or (ord(c) >= 32) or (ord(c) > 127))
     # Collapse runs of 3+ blank lines to 2
     import re
+
     value = re.sub(r"\n{4,}", "\n\n\n", value)
     if len(value) > max_length:
-        value = value[:max_length - 20] + "\n[truncated at limit]"
+        value = value[: max_length - 20] + "\n[truncated at limit]"
     if not value.strip():
         raise ValueError("content is empty after sanitization")
     return value
@@ -132,44 +132,120 @@ DEFAULT_TOPIC_WINGS = [
     "creative",
 ]
 
+# Hall taxonomy — aligned with the official MemPalace doc
+# (https://mempalaceofficial.com/concepts/the-palace.html). Halls describe
+# how a memory connects to other memories within a wing, NOT what topic
+# the memory is about (room handles topic). Valid hall values:
+#
+#   hall_facts        — decisions made, choices locked in, configurations
+#   hall_events       — sessions, milestones, debugging, deployments, runs
+#   hall_discoveries  — breakthroughs, new insights, surprising findings
+#   hall_preferences  — habits, likes/dislikes, opinions, style choices
+#   hall_advice       — recommendations, approvals, suggestions, solutions
+#   hall_diary        — auto-save diary entries (one per save cycle)
+#
+# Auto-save prefers the LLM's hall judgment per drawer; detect_hall() in
+# miner.py is a bilingual keyword-stem fallback for when the LLM omits or
+# supplies an invalid value. Default fallback: hall_events (the most
+# common shape of a conversation chunk — something happened).
+VALID_HALLS = frozenset(
+    {
+        "hall_facts",
+        "hall_events",
+        "hall_discoveries",
+        "hall_preferences",
+        "hall_advice",
+        "hall_diary",
+    }
+)
+DEFAULT_HALL_FALLBACK = "hall_events"
+
 DEFAULT_HALL_KEYWORDS = {
-    "emotions": [
-        "scared",
-        "afraid",
-        "worried",
-        "happy",
-        "sad",
-        "love",
+    "hall_facts": [
+        "decided",
+        "chose",
+        "locked in",
+        "agreed",
+        "selected",
+        "committed",
+        "决定",
+        "选择",
+        "确定",
+        "采用",
+        "敲定",
+        "同意",
+    ],
+    "hall_events": [
+        "debugged",
+        "fixed",
+        "ran",
+        "deployed",
+        "encountered",
+        "merged",
+        "shipped",
+        "rolled out",
+        "executed",
+        "triggered",
+        "修复",
+        "部署",
+        "运行",
+        "排查",
+        "出现",
+        "上线",
+        "执行",
+        "触发",
+        "合并",
+    ],
+    "hall_discoveries": [
+        "realized",
+        "found out",
+        "discovered",
+        "breakthrough",
+        "learned",
+        "turns out",
+        "noticed",
+        "spotted",
+        "发现",
+        "原来",
+        "意识到",
+        "突破",
+        "察觉",
+        "注意到",
+    ],
+    "hall_preferences": [
+        "prefer",
+        "like",
         "hate",
-        "feel",
-        "cry",
-        "tears",
+        "always",
+        "never",
+        "favor",
+        "dislike",
+        "偏好",
+        "喜欢",
+        "讨厌",
+        "总是",
+        "从不",
+        "习惯",
+        "倾向",
+        "更愿意",
     ],
-    "consciousness": [
-        "consciousness",
-        "conscious",
-        "aware",
-        "real",
-        "genuine",
-        "soul",
-        "exist",
-        "alive",
+    "hall_advice": [
+        "recommend",
+        "should",
+        "suggest",
+        "approved",
+        "rejected",
+        "advise",
+        "propose",
+        "best practice",
+        "建议",
+        "推荐",
+        "应该",
+        "批准",
+        "驳回",
+        "提议",
+        "最佳实践",
     ],
-    "memory": ["memory", "remember", "forget", "recall", "archive", "palace", "store"],
-    "technical": [
-        "code",
-        "python",
-        "script",
-        "bug",
-        "error",
-        "function",
-        "api",
-        "database",
-        "server",
-    ],
-    "identity": ["identity", "name", "who am i", "persona", "self"],
-    "family": ["family", "kids", "children", "daughter", "son", "parent", "mother", "father"],
-    "creative": ["game", "gameplay", "player", "app", "design", "art", "music", "story"],
 }
 
 

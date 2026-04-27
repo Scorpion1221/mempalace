@@ -135,3 +135,131 @@ class TestExplicitTunnels:
         connections = palace_graph.follow_tunnels("wing_code", "auth", col=col)
         assert len(connections) == 1
         assert "drawer_preview" not in connections[0]
+
+
+class TestAutoLinkSharedRooms:
+    """Deterministic auto-tunnel pass after async-save drawer writes."""
+
+    def _stub_build_graph(self, monkeypatch, nodes):
+        """Replace build_graph with a stub returning fixed nodes/edges."""
+        monkeypatch.setattr(palace_graph, "build_graph", lambda col=None, config=None: (nodes, []))
+
+    def test_links_two_wings_sharing_a_room(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "auth-migration": {
+                    "wings": ["wing_alice", "wing_bob"],
+                    "halls": [],
+                    "count": 2,
+                    "dates": [],
+                },
+            },
+        )
+        created = palace_graph.auto_link_shared_rooms(
+            [("wing_alice", "auth-migration")], col=MagicMock()
+        )
+        assert len(created) == 1
+        t = created[0]
+        assert {t["source"]["wing"], t["target"]["wing"]} == {"wing_alice", "wing_bob"}
+        assert t["source"]["room"] == "auth-migration"
+        assert t["target"]["room"] == "auth-migration"
+        assert t["label"].startswith("auto:")
+
+    def test_skips_when_room_only_in_one_wing(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "graphql-switch": {"wings": ["wing_alice"], "halls": [], "count": 1, "dates": []},
+            },
+        )
+        created = palace_graph.auto_link_shared_rooms(
+            [("wing_alice", "graphql-switch")], col=MagicMock()
+        )
+        assert created == []
+
+    def test_skips_generic_room_in_stoplist(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        # 'decisions' is in the generic stoplist — even if it shows up
+        # across many wings, no auto-tunnel.
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "decisions": {
+                    "wings": ["wing_a", "wing_b", "wing_c"],
+                    "halls": [],
+                    "count": 5,
+                    "dates": [],
+                },
+            },
+        )
+        created = palace_graph.auto_link_shared_rooms([("wing_a", "decisions")], col=MagicMock())
+        assert created == []
+
+    def test_skips_when_room_too_popular(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        # 6 wings (> _AUTO_TUNNEL_POPULARITY_CAP=5) — auto-link would
+        # explode N×N edges, so skip.
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "perf-tuning": {
+                    "wings": ["w1", "w2", "w3", "w4", "w5", "w6"],
+                    "halls": [],
+                    "count": 30,
+                    "dates": [],
+                },
+            },
+        )
+        created = palace_graph.auto_link_shared_rooms([("w1", "perf-tuning")], col=MagicMock())
+        assert created == []
+
+    def test_idempotent_across_repeated_calls(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "auth-migration": {
+                    "wings": ["wing_alice", "wing_bob"],
+                    "halls": [],
+                    "count": 2,
+                    "dates": [],
+                },
+            },
+        )
+        palace_graph.auto_link_shared_rooms([("wing_alice", "auth-migration")], col=MagicMock())
+        palace_graph.auto_link_shared_rooms([("wing_alice", "auth-migration")], col=MagicMock())
+        # Symmetric tunnel ID dedupes — only one record on disk.
+        assert len(palace_graph.list_tunnels()) == 1
+
+    def test_max_per_save_caps_output(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        # 5 wings sharing the room — under popularity cap (5), so auto-link.
+        # max_per_save=2 should cap created tunnels.
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "billing": {
+                    "wings": ["w1", "w2", "w3", "w4", "w5"],
+                    "halls": [],
+                    "count": 5,
+                    "dates": [],
+                },
+            },
+        )
+        created = palace_graph.auto_link_shared_rooms(
+            [("w1", "billing")], col=MagicMock(), max_per_save=2
+        )
+        assert len(created) == 2
+
+    def test_skips_when_saved_pairs_empty(self, tmp_path, monkeypatch):
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+        self._stub_build_graph(
+            monkeypatch,
+            {
+                "anything": {"wings": ["w1", "w2"], "halls": [], "count": 2, "dates": []},
+            },
+        )
+        assert palace_graph.auto_link_shared_rooms([], col=MagicMock()) == []

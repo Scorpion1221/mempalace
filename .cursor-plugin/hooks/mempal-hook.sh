@@ -18,14 +18,14 @@ export MEMPAL_EMBEDDING_MODEL="${MEMPAL_EMBEDDING_MODEL:-gemini-embedding-2-prev
 export MEMPAL_EMBEDDING_ENDPOINT="${MEMPAL_EMBEDDING_ENDPOINT:-http://127.0.0.1:4000}"
 export MEMPAL_EMBEDDING_KEY="${MEMPAL_EMBEDDING_KEY:-sk-litellm-local}"
 
-# Recall LLM quartet — gates async save + recall rewrite/rerank. Missing
-# any of these silently drops buffered turns and falls back to raw vector
-# search (no rewrite, no rerank). Defaults point at the same LiteLLM
-# proxy used by embedding so a fresh install works out of the box.
-export MEMPAL_RECALL_LLM="${MEMPAL_RECALL_LLM:-1}"
-export MEMPAL_RECALL_ENDPOINT="${MEMPAL_RECALL_ENDPOINT:-http://127.0.0.1:4000/v1}"
-export MEMPAL_RECALL_MODEL="${MEMPAL_RECALL_MODEL:-gemini-3.1-flash-lite-preview}"
-export MEMPAL_RECALL_KEY="${MEMPAL_RECALL_KEY:-sk-litellm-local}"
+# LLM endpoint — shared by async save + recall (Stage 1 rewrite, Stage
+# 5 rerank). Missing endpoint+model silently drops save and falls back to
+# raw vector search. Defaults point at the same LiteLLM proxy used by
+# embedding so a fresh install works out of the box. Canonical
+# MEMPAL_LLM_*; legacy MEMPAL_RECALL_* aliases set for backward compat.
+export MEMPAL_LLM_ENDPOINT="${MEMPAL_LLM_ENDPOINT:-${MEMPAL_RECALL_ENDPOINT:-http://127.0.0.1:4000/v1}}"
+export MEMPAL_LLM_MODEL="${MEMPAL_LLM_MODEL:-${MEMPAL_RECALL_MODEL:-gemini-3.1-flash-lite-preview}}"
+export MEMPAL_LLM_KEY="${MEMPAL_LLM_KEY:-${MEMPAL_RECALL_KEY:-sk-litellm-local}}"
 
 run_mempalace_hook() {
   if command -v mempalace >/dev/null 2>&1; then

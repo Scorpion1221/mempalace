@@ -22,8 +22,16 @@ import os
 import pytest
 
 for _var in (
-    "MEMPAL_EMBEDDING_MODEL", "MEMPALACE_EMBEDDING_MODEL",
+    "MEMPAL_EMBEDDING_MODEL",
+    "MEMPALACE_EMBEDDING_MODEL",
+    "MEMPAL_LLM",
+    "MEMPAL_LLM_ENDPOINT",
+    "MEMPAL_LLM_MODEL",
+    "MEMPAL_LLM_KEY",
     "MEMPAL_RECALL_LLM",
+    "MEMPAL_RECALL_ENDPOINT",
+    "MEMPAL_RECALL_MODEL",
+    "MEMPAL_RECALL_KEY",
 ):
     os.environ.pop(_var, None)
 
@@ -61,6 +69,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
 
     try:
         from mempalace.palace import _DEFAULT_BACKEND
+
         _DEFAULT_BACKEND._clients.clear()
         if hasattr(_DEFAULT_BACKEND, "_freshness"):
             _DEFAULT_BACKEND._freshness.clear()
@@ -69,6 +78,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
         pass
     try:
         from chromadb.api.shared_system_client import SharedSystemClient
+
         SharedSystemClient.clear_system_cache()
     except Exception:
         pass
@@ -77,6 +87,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
 
     try:
         from mempalace.palace import _DEFAULT_BACKEND
+
         _DEFAULT_BACKEND._clients.clear()
         if hasattr(_DEFAULT_BACKEND, "_freshness"):
             _DEFAULT_BACKEND._freshness.clear()
@@ -85,6 +96,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
         pass
     try:
         from chromadb.api.shared_system_client import SharedSystemClient
+
         SharedSystemClient.clear_system_cache()
     except Exception:
         pass

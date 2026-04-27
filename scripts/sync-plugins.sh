@@ -49,8 +49,11 @@ else
     done
 fi
 
-# The 7 vars we propagate. Extra SSL_CERT_FILE handled separately where needed.
+# Vars we propagate to ~/.mempalace/env on install. Canonical MEMPAL_LLM_*;
+# legacy MEMPAL_RECALL_* still propagated so existing user envs don't lose
+# their values mid-upgrade. Extra SSL_CERT_FILE handled separately.
 PROPAGATED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY \
+MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY \
 MEMPAL_RECALL_LLM MEMPAL_RECALL_ENDPOINT MEMPAL_RECALL_MODEL MEMPAL_RECALL_KEY"
 
 # Smart copy: preserve local env-var fallback defaults in hook scripts

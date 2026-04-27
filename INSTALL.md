@@ -114,11 +114,16 @@ export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"
 export MEMPAL_EMBEDDING_ENDPOINT="http://127.0.0.1:4000"
 export MEMPAL_EMBEDDING_KEY="sk-litellm-local"
 
-export MEMPAL_RECALL_LLM="1"
-export MEMPAL_RECALL_ENDPOINT="http://127.0.0.1:4000/v1"
-export MEMPAL_RECALL_MODEL="gemini-3.1-flash-lite-preview"
-export MEMPAL_RECALL_KEY="sk-litellm-local"
+# One LLM endpoint, shared by async-save and recall enhancement.
+# Default-on whenever endpoint+model are set. Opt out with MEMPAL_LLM=0.
+export MEMPAL_LLM_ENDPOINT="http://127.0.0.1:4000/v1"
+export MEMPAL_LLM_MODEL="gemini-3.1-flash-lite-preview"
+export MEMPAL_LLM_KEY="sk-litellm-local"
 ```
+
+> **Backward compat**: pre-3.4 envs that set `MEMPAL_RECALL_ENDPOINT` /
+> `MEMPAL_RECALL_MODEL` / `MEMPAL_RECALL_KEY` (or `MEMPAL_RECALL_LLM=1`)
+> are still honored as legacy aliases — no migration needed.
 
 After editing `~/.mempalace/env`, run:
 ```bash

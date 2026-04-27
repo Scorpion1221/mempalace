@@ -43,7 +43,6 @@ def _mempalace_python() -> str:
     return sys.executable
 
 
-
 # Matches any CJK character (Chinese, Japanese kana, Korean hangul syllables).
 # Used so the KG recall path keeps 2-char CJK bigrams from ``_tokenize``,
 # which would otherwise be dropped by a plain ``len(t) >= 3`` filter.
@@ -868,13 +867,20 @@ Write in the SAME LANGUAGE as the conversation (Chinese→Chinese, English→Eng
 ## Palace Structure
 - **wing**: project or domain name, lowercase with underscores (e.g. "backend_api", "infra_deploy"). Use "{wing}" as default. **IMPORTANT**: if the conversation is clearly about a project that already exists in the "Current Palace State" wings list, override the default and use that existing wing — this lets memories from different agents on this machine pool into the same project wing.
 - **room**: topic category, lowercase (e.g. "decisions", "code", "configuration", "bugs", "architecture", "general", "issues", "operations", or any fitting short name)
+- **hall**: one of EXACTLY these five values, picked per drawer based on the SHAPE of the memory (NOT the topic — the topic is room):
+    - **hall_facts**       — a decision was made, a choice locked in, a config value committed
+    - **hall_events**      — something happened: a session, a deploy, a debug, a milestone
+    - **hall_discoveries** — a breakthrough, an insight, a surprising finding, "turns out X"
+    - **hall_preferences** — a habit, a like/dislike, a stylistic preference, "always do X"
+    - **hall_advice**      — a recommendation, an approval, a suggestion, "should do Y"
+  Default to `hall_events` when ambiguous (most conversation chunks describe something that happened).
 - **diary**: natural language summary of the session segment — include specific decisions, file paths, commands, technical details. Not just "discussed X", but WHAT was decided/changed/found.
 - **drawers**: discrete pieces of knowledge worth remembering in future sessions. Each drawer should be self-contained — readable without the conversation context.
 
 ## Output Format
 - All `"` inside JSON string values MUST be escaped as `\\"`. All newlines inside string values MUST be escaped as `\\n`. Never emit a literal newline inside a JSON string.
 Return ONLY valid JSON:
-{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "content": "<verbatim knowledge>"}}], "kg": [{{"subject": "<entity>", "predicate": "<relationship>", "object": "<entity>"}}], "tunnels": [{{"source_wing": "<wing>", "source_room": "<room>", "target_wing": "<wing>", "target_room": "<room>", "label": "<why linked>"}}]}}
+{{"diary": "<session summary>", "drawers": [{{"wing": "<project>", "room": "<topic>", "hall": "hall_events", "content": "<verbatim knowledge>"}}], "kg": [{{"subject": "<entity>", "predicate": "<relationship>", "object": "<entity>"}}], "tunnels": [{{"source_wing": "<wing>", "source_room": "<room>", "target_wing": "<wing>", "target_room": "<room>", "label": "<why linked>"}}]}}
 
 ## Rules
 - diary: 2-5 sentences, include WHY not just WHAT
@@ -906,31 +912,31 @@ Return ONLY valid JSON:
 
 Input: User asks how to connect to the staging database, assistant provides connection string requiring VPN.
 Output:
-{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}], "kg": [{{"subject": "backend_api", "predicate": "endpoint", "object": "staging-db.internal:5432/app_staging"}}]}}
+{{"diary": "Provided staging database connection details. Requires VPN access on port 5432.", "drawers": [{{"wing": "backend_api", "room": "configuration", "hall": "hall_facts", "content": "Staging DB connection: postgres://readonly@staging-db.internal:5432/app_staging (requires VPN, read-only credentials)"}}], "kg": [{{"subject": "backend_api", "predicate": "endpoint", "object": "staging-db.internal:5432/app_staging"}}]}}
 
 Input: 用户报告搜索接口返回504超时，助手排查发现是缺少索引导致全表扫描，添加了复合索引修复。
 Output:
-{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}], "kg": [{{"subject": "backend_api", "predicate": "修复", "object": "复合索引_user_id_created_at"}}]}}
+{{"diary": "修复了搜索接口504超时问题。根因是 orders 表缺少 (user_id, created_at) 复合索引导致全表扫描，添加索引后响应时间从12s降到50ms。", "drawers": [{{"wing": "backend_api", "room": "bugs", "hall": "hall_events", "content": "搜索接口504超时：orders 表缺少 (user_id, created_at) 复合索引，添加后响应从12s→50ms。migration: 20260423_add_orders_search_index.sql"}}, {{"wing": "backend_api", "room": "decisions", "hall": "hall_facts", "content": "决定对所有按 user_id 查询的表添加 (user_id, created_at) 复合索引作为默认规范"}}], "kg": [{{"subject": "backend_api", "predicate": "修复", "object": "复合索引_user_id_created_at"}}]}}
 
 Input: Team decides to switch from REST to GraphQL for the mobile app API, with a 2-week migration plan.
 Output:
-{{"diary": "Architecture decision: mobile API switching from REST to GraphQL. Migration plan is 2 weeks, starting with read-only queries. Apollo Server chosen over Yoga for better caching.", "drawers": [{{"wing": "mobile_app", "room": "architecture", "content": "Mobile API migration: REST → GraphQL. Apollo Server (not Yoga) for caching. Phase 1: read-only queries (week 1), Phase 2: mutations (week 2). Existing REST endpoints kept until v3.0."}}, {{"wing": "mobile_app", "room": "decisions", "content": "Chose Apollo Server over GraphQL Yoga for mobile API — better built-in response caching and dataloader integration"}}], "kg": [{{"subject": "mobile_app", "predicate": "uses", "object": "GraphQL"}}, {{"subject": "mobile_app", "predicate": "uses", "object": "Apollo Server"}}]}}
+{{"diary": "Architecture decision: mobile API switching from REST to GraphQL. Migration plan is 2 weeks, starting with read-only queries. Apollo Server chosen over Yoga for better caching.", "drawers": [{{"wing": "mobile_app", "room": "architecture", "hall": "hall_facts", "content": "Mobile API migration: REST → GraphQL. Apollo Server (not Yoga) for caching. Phase 1: read-only queries (week 1), Phase 2: mutations (week 2). Existing REST endpoints kept until v3.0."}}, {{"wing": "mobile_app", "room": "decisions", "hall": "hall_facts", "content": "Chose Apollo Server over GraphQL Yoga for mobile API — better built-in response caching and dataloader integration"}}], "kg": [{{"subject": "mobile_app", "predicate": "uses", "object": "GraphQL"}}, {{"subject": "mobile_app", "predicate": "uses", "object": "Apollo Server"}}]}}
 
 Input: 助手帮用户重构了认证模块，从 JWT 改成了 session-based，修改了 src/auth/middleware.ts 和 src/auth/session.ts。
 Output:
-{{"diary": "重构认证模块：JWT → session-based auth。修改了 middleware.ts 和新建了 session.ts，session 存储在 Redis 中，TTL 24小时。", "drawers": [{{"wing": "{wing}", "room": "code", "content": "认证重构 JWT→session: 修改 src/auth/middleware.ts（移除 JWT 验证，改用 session cookie），新建 src/auth/session.ts（Redis session store, TTL=24h）"}}, {{"wing": "{wing}", "room": "decisions", "content": "认证从 JWT 改为 session-based：原因是需要支持即时吊销（JWT 无法做到），session 存 Redis，cookie httpOnly+secure"}}], "kg": [{{"subject": "{wing}", "predicate": "migrated_to", "object": "session_based_auth"}}, {{"subject": "{wing}", "predicate": "uses", "object": "Redis"}}]}}
+{{"diary": "重构认证模块：JWT → session-based auth。修改了 middleware.ts 和新建了 session.ts，session 存储在 Redis 中，TTL 24小时。", "drawers": [{{"wing": "{wing}", "room": "code", "hall": "hall_events", "content": "认证重构 JWT→session: 修改 src/auth/middleware.ts（移除 JWT 验证，改用 session cookie），新建 src/auth/session.ts（Redis session store, TTL=24h）"}}, {{"wing": "{wing}", "room": "decisions", "hall": "hall_facts", "content": "认证从 JWT 改为 session-based：原因是需要支持即时吊销（JWT 无法做到），session 存 Redis，cookie httpOnly+secure"}}], "kg": [{{"subject": "{wing}", "predicate": "migrated_to", "object": "session_based_auth"}}, {{"subject": "{wing}", "predicate": "uses", "object": "Redis"}}]}}
 
 Input: User configures CI/CD pipeline, sets up GitHub Actions with Docker build and deploy to AWS ECS.
 Output:
-{{"diary": "Set up CI/CD: GitHub Actions workflow builds Docker image, pushes to ECR, deploys to ECS Fargate. Added .github/workflows/deploy.yml with staging and production environments.", "drawers": [{{"wing": "{wing}", "room": "operations", "content": "CI/CD pipeline: .github/workflows/deploy.yml — build Docker → push to ECR (123456.dkr.ecr.us-east-1) → deploy ECS Fargate. Staging auto-deploys on push to develop, production requires manual approval."}}, {{"wing": "{wing}", "room": "configuration", "content": "ECS Fargate config: task def in infra/ecs-task.json, 512 CPU / 1024 MB, health check /api/health, min 2 / max 8 tasks"}}], "kg": [{{"subject": "{wing}", "predicate": "deployed_to", "object": "AWS ECS Fargate"}}, {{"subject": "{wing}", "predicate": "uses", "object": "GitHub Actions"}}]}}
+{{"diary": "Set up CI/CD: GitHub Actions workflow builds Docker image, pushes to ECR, deploys to ECS Fargate. Added .github/workflows/deploy.yml with staging and production environments.", "drawers": [{{"wing": "{wing}", "room": "operations", "hall": "hall_facts", "content": "CI/CD pipeline: .github/workflows/deploy.yml — build Docker → push to ECR (123456.dkr.ecr.us-east-1) → deploy ECS Fargate. Staging auto-deploys on push to develop, production requires manual approval."}}, {{"wing": "{wing}", "room": "configuration", "hall": "hall_facts", "content": "ECS Fargate config: task def in infra/ecs-task.json, 512 CPU / 1024 MB, health check /api/health, min 2 / max 8 tasks"}}], "kg": [{{"subject": "{wing}", "predicate": "deployed_to", "object": "AWS ECS Fargate"}}, {{"subject": "{wing}", "predicate": "uses", "object": "GitHub Actions"}}]}}
 
 Input: 用户和助手讨论了项目的技术选型，最终选择了 Next.js + tRPC + Prisma 的技术栈。
 Output:
-{{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}], "kg": [{{"subject": "{wing}", "predicate": "tech_stack", "object": "Next.js + tRPC + Prisma + PostgreSQL"}}]}}
+{{"diary": "完成技术选型讨论。最终确定：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。选择 tRPC 而非 REST 是因为端到端类型安全。", "drawers": [{{"wing": "{wing}", "room": "architecture", "hall": "hall_facts", "content": "技术栈选型：Next.js 14 (App Router) + tRPC v11 + Prisma ORM + PostgreSQL。前端 Tailwind CSS + shadcn/ui。部署 Vercel (frontend) + Railway (database)。"}}, {{"wing": "{wing}", "room": "decisions", "hall": "hall_facts", "content": "选择 tRPC 而非 REST/GraphQL：端到端类型安全，无需手写 schema，和 Next.js Server Components 集成好。trade-off: 仅限 TypeScript 客户端"}}], "kg": [{{"subject": "{wing}", "predicate": "tech_stack", "object": "Next.js + tRPC + Prisma + PostgreSQL"}}]}}
 
 Input: 用户说自己在北京生活了五年，目前在一家叫 Acme 的公司做高级工程师。
 Output:
-{{"diary": "用户提供个人信息：在北京生活 5 年，在 Acme 公司任高级工程师。", "drawers": [{{"wing": "{wing}", "room": "diary", "content": "用户现居北京，已 5 年；就职于 Acme 公司，职位高级工程师"}}], "kg": [{{"subject": "用户", "predicate": "居住于", "object": "北京"}}, {{"subject": "用户", "predicate": "就职于", "object": "Acme"}}, {{"subject": "用户", "predicate": "职位", "object": "高级工程师"}}]}}
+{{"diary": "用户提供个人信息：在北京生活 5 年，在 Acme 公司任高级工程师。", "drawers": [{{"wing": "{wing}", "room": "diary", "hall": "hall_facts", "content": "用户现居北京，已 5 年；就职于 Acme 公司，职位高级工程师"}}], "kg": [{{"subject": "用户", "predicate": "居住于", "object": "北京"}}, {{"subject": "用户", "predicate": "就职于", "object": "Acme"}}, {{"subject": "用户", "predicate": "职位", "object": "高级工程师"}}]}}
 
 Input: User says "ok" / "继续" / "sounds good" with no new information.
 Output:
@@ -940,13 +946,25 @@ Input: User asks assistant to run tests and they all pass. No bugs found, no dec
 Output:
 {{"diary": "Ran test suite, all tests passed.", "drawers": [], "kg": [], "tunnels": []}}
 
+Input: After hours of profiling, the team realizes the GraphQL N+1 problem on the orders.lineItems field is the actual root cause of dashboard slowness, not the database — adding a DataLoader cuts p95 from 4.2s to 380ms.
+Output:
+{{"diary": "Discovered root cause of dashboard slowness: GraphQL N+1 on orders.lineItems, not the DB. Added DataLoader, p95 4.2s → 380ms.", "drawers": [{{"wing": "backend_api", "room": "performance", "hall": "hall_discoveries", "content": "Dashboard slowness root cause: GraphQL N+1 on orders.lineItems (NOT the database, as previously suspected). DataLoader on the lineItems resolver cut p95 from 4.2s → 380ms. The DB was a red herring — slow query log showed only 30ms per query, but resolver fired 200x per request."}}], "kg": [{{"subject": "backend_api", "predicate": "fixed_by", "object": "lineItems_DataLoader"}}]}}
+
+Input: User notes they always want PRs squash-merged with conventional-commit titles, never merge commits or rebase.
+Output:
+{{"diary": "User clarified team merge policy preference: squash-merge with conventional-commit title only.", "drawers": [{{"wing": "{wing}", "room": "operations", "hall": "hall_preferences", "content": "PR merge policy: ALWAYS squash-merge with conventional-commit title (feat:/fix:/docs:/etc). Never use merge commits. Never use rebase-merge. Squash keeps `main` history linear and one-commit-per-feature."}}], "kg": [{{"subject": "{wing}", "predicate": "merge_strategy", "object": "squash_with_conventional_title"}}]}}
+
+Input: Priya the staff engineer reviews the auth library shortlist and recommends Clerk over Auth0 because of better React Native SDK and lower per-MAU pricing past 10k users.
+Output:
+{{"diary": "Priya recommended Clerk over Auth0 for the new auth migration. Reasons: better React Native SDK and cheaper at >10k MAU.", "drawers": [{{"wing": "auth_service", "room": "vendor-eval", "hall": "hall_advice", "content": "Priya (staff eng) recommended Clerk over Auth0 for upcoming migration. Justification: (1) better React Native SDK — Auth0's RN integration requires extra wrapper code; (2) Clerk's pricing curve is cheaper above 10k MAU. Decision still pending Driftwood final approval."}}], "kg": [{{"subject": "Priya", "predicate": "recommends", "object": "Clerk"}}, {{"subject": "Clerk", "predicate": "evaluated_against", "object": "Auth0"}}]}}
+
 Input: Team lowers the public API rate limit from 1000 to 100 req/min to protect the shared PostgreSQL pool. Palace already has wings `backend_api` (with rooms decisions, configuration) and `backend_db` (with rooms configuration, architecture).
 Output:
-{{"diary": "Lowered public API rate limit from 1000 → 100 req/min. The previous 1000 limit was saturating the PostgreSQL connection pool (max 200), causing backend_db to queue. New limit is sized to stay under the DB pool ceiling.", "drawers": [{{"wing": "backend_api", "room": "decisions", "content": "Public API rate limit: 1000 → 100 req/min. Reason: 1000 was saturating the shared PostgreSQL pool (max 200 connections) and causing request queueing in backend_db. 100 req/min keeps us safely below pool capacity."}}, {{"wing": "backend_db", "room": "configuration", "content": "PostgreSQL pool size: 200 connections (shared with backend_api). Do not raise without coordinating a matching change to the API rate limit — the limit is calibrated to this pool ceiling."}}], "kg": [{{"subject": "backend_api", "predicate": "config_value", "object": "rate_limit=100/min"}}, {{"subject": "backend_db", "predicate": "config_value", "object": "pg_pool=200"}}], "tunnels": [{{"source_wing": "backend_api", "source_room": "decisions", "target_wing": "backend_db", "target_room": "configuration", "label": "API rate limit of 100 req/min is calibrated to the backend_db PostgreSQL pool size of 200 — raising either in isolation will break the other"}}]}}
+{{"diary": "Lowered public API rate limit from 1000 → 100 req/min. The previous 1000 limit was saturating the PostgreSQL connection pool (max 200), causing backend_db to queue. New limit is sized to stay under the DB pool ceiling.", "drawers": [{{"wing": "backend_api", "room": "decisions", "hall": "hall_facts", "content": "Public API rate limit: 1000 → 100 req/min. Reason: 1000 was saturating the shared PostgreSQL pool (max 200 connections) and causing request queueing in backend_db. 100 req/min keeps us safely below pool capacity."}}, {{"wing": "backend_db", "room": "configuration", "hall": "hall_facts", "content": "PostgreSQL pool size: 200 connections (shared with backend_api). Do not raise without coordinating a matching change to the API rate limit — the limit is calibrated to this pool ceiling."}}], "kg": [{{"subject": "backend_api", "predicate": "config_value", "object": "rate_limit=100/min"}}, {{"subject": "backend_db", "predicate": "config_value", "object": "pg_pool=200"}}], "tunnels": [{{"source_wing": "backend_api", "source_room": "decisions", "target_wing": "backend_db", "target_room": "configuration", "label": "API rate limit of 100 req/min is calibrated to the backend_db PostgreSQL pool size of 200 — raising either in isolation will break the other"}}]}}
 
 Input: 用户决定把移动端 App 从 Firebase Auth 迁到自建认证服务。Palace 已有 wings `mobile_app`（rooms: decisions, architecture）和 `auth_service`（rooms: architecture, configuration）。
 Output:
-{{"diary": "决定移动端认证从 Firebase Auth 迁移到自建 auth_service。迁移原因是 Firebase 定价在用户量增长后变得不可控，以及需要在 auth_service 统一多端的会话策略。auth_service 需新增 /mobile/token 端点并支持刷新令牌 30 天。", "drawers": [{{"wing": "mobile_app", "room": "decisions", "content": "移动端认证迁移：Firebase Auth → 自建 auth_service。理由：Firebase 按 MAU 计费在高增长下不可控；统一多端会话策略；自主控制登录风控逻辑"}}, {{"wing": "auth_service", "room": "architecture", "content": "为移动端新增端点 POST /mobile/token（access token 1h / refresh token 30d），需在 auth_service 的 OAuth 流程基础上扩展 device_id 绑定"}}], "kg": [{{"subject": "mobile_app", "predicate": "migrated_to", "object": "auth_service"}}, {{"subject": "auth_service", "predicate": "endpoint", "object": "/mobile/token"}}], "tunnels": [{{"source_wing": "mobile_app", "source_room": "decisions", "target_wing": "auth_service", "target_room": "architecture", "label": "移动端迁移到自建认证，直接要求 auth_service 新增 /mobile/token 端点与 device_id 绑定"}}]}}
+{{"diary": "决定移动端认证从 Firebase Auth 迁移到自建 auth_service。迁移原因是 Firebase 定价在用户量增长后变得不可控，以及需要在 auth_service 统一多端的会话策略。auth_service 需新增 /mobile/token 端点并支持刷新令牌 30 天。", "drawers": [{{"wing": "mobile_app", "room": "decisions", "hall": "hall_facts", "content": "移动端认证迁移：Firebase Auth → 自建 auth_service。理由：Firebase 按 MAU 计费在高增长下不可控；统一多端会话策略；自主控制登录风控逻辑"}}, {{"wing": "auth_service", "room": "architecture", "hall": "hall_facts", "content": "为移动端新增端点 POST /mobile/token（access token 1h / refresh token 30d），需在 auth_service 的 OAuth 流程基础上扩展 device_id 绑定"}}], "kg": [{{"subject": "mobile_app", "predicate": "migrated_to", "object": "auth_service"}}, {{"subject": "auth_service", "predicate": "endpoint", "object": "/mobile/token"}}], "tunnels": [{{"source_wing": "mobile_app", "source_room": "decisions", "target_wing": "auth_service", "target_room": "architecture", "label": "移动端迁移到自建认证，直接要求 auth_service 新增 /mobile/token 端点与 device_id 绑定"}}]}}
 
 ## Conversation to process:
 {transcript}"""
@@ -1198,6 +1216,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
             )
             written += 1
 
+        saved_pairs: list = []
         for drawer in data.get("drawers", []):
             content = drawer.get("content", "")
             if not content or len(content.strip()) < 20:
@@ -1206,9 +1225,20 @@ def _async_save_worker(transcript_text, session_id, cwd):
             d_room = sanitize_name(drawer.get("room", "general"))
             import hashlib
 
+            from .config import VALID_HALLS
             from .miner import detect_hall
 
-            d_hall = detect_hall(content)
+            # Prefer the LLM's per-drawer hall judgment; fall back to the
+            # bilingual keyword scorer when the LLM omits it or returns
+            # something outside the canonical 5-class taxonomy
+            # (hall_facts/events/discoveries/preferences/advice). Keeping
+            # invalid values out of metadata avoids polluting the palace
+            # with one-off hall names that confuse search filters.
+            d_hall_raw = (drawer.get("hall") or "").strip().lower()
+            if d_hall_raw in VALID_HALLS:
+                d_hall = d_hall_raw
+            else:
+                d_hall = detect_hall(content)
 
             d_id = (
                 f"drawer_{d_wing}_{d_room}"
@@ -1227,6 +1257,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                     }
                 ],
             )
+            saved_pairs.append((d_wing, d_room))
             written += 1
 
         kg_facts = data.get("kg", [])
@@ -1281,19 +1312,40 @@ def _async_save_worker(transcript_text, session_id, cwd):
                         )
                         tunnels_written += 1
                     except Exception as e:
-                        _log(
-                            f"async save: tunnel write error "
-                            f"({sw}/{sr} -> {tw}/{tr}): {e}"
-                        )
+                        _log(f"async save: tunnel write error ({sw}/{sr} -> {tw}/{tr}): {e}")
             except Exception as e:
                 _log(f"async save: tunnel block failed: {e}")
 
+        # Deterministic auto-tunnel pass — independent of the LLM's tunnel
+        # output. If a (wing, room) just saved appears in another wing too,
+        # link them. The LLM may have missed it (or produced same-wing
+        # tunnels we filtered out); this guarantees the doc-promised
+        # behavior of "same room across wings → tunnel bridge".
+        auto_tunnels_written = 0
+        if saved_pairs:
+            try:
+                from .palace_graph import (
+                    auto_link_shared_rooms,
+                    invalidate_graph_cache,
+                )
+
+                # Drop the cached graph so the auto-link sees the rooms
+                # we just upserted.
+                invalidate_graph_cache()
+                auto_links = auto_link_shared_rooms(saved_pairs, col=col, max_per_save=5)
+                auto_tunnels_written = len(auto_links)
+            except Exception as e:
+                _log(f"async save: auto-link tunnel block failed: {e}")
+
         _log(
             f"async save: wrote {written} entries "
-            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts + {tunnels_written} tunnels)"
+            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts + "
+            f"{tunnels_written} llm tunnels + {auto_tunnels_written} auto tunnels)"
         )
     except Exception as e:
         _log(f"async save error: {e}\n{traceback.format_exc()}")
+
+
 def _wing_from_transcript_path(transcript_path: str) -> str:
     """Derive a project wing name from a Claude Code transcript path.
 
@@ -1379,7 +1431,12 @@ def hook_stop(data: dict, harness: str):
             return
 
         transcript_text = _extract_recent_exchanges(transcript_path, since_exchange=last_save)
-        if transcript_text and os.environ.get("MEMPAL_RECALL_LLM", "") == "1":
+        # Auto-save and recall share the same LLM gate: enabled by default
+        # whenever an endpoint+model is configured. Set MEMPAL_LLM=0 to
+        # opt out. See recall_llm.is_enabled() for the full probe rules.
+        from .recall_llm import is_enabled as _llm_is_enabled
+
+        if transcript_text and _llm_is_enabled():
             cwd = parsed.get("cwd", "") or data.get("cwd", "")
             try:
                 proc = subprocess.Popen(
@@ -1835,7 +1892,8 @@ def hook_userprompt(data: dict, harness: str):
         search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
         original_query = search_query
 
-    # --- Stage 1: LLM query rewrite (opt-in via MEMPAL_RECALL_LLM=1) ---
+    # --- Stage 1: LLM query rewrite (default-on when an LLM endpoint is
+    # configured; opt out via MEMPAL_LLM=0). ---
     llm_config = None
     time_after = None
     rewrite_filters: dict = {}

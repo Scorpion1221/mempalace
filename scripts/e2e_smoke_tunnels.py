@@ -144,8 +144,10 @@ def test_backfill_path(col) -> bool:
             )
             return False
 
-        _ok(f"backfill surfaced {len(preview)} chars of real content from "
-            f"{c.get('connected_wing')}/{c.get('connected_room')}")
+        _ok(
+            f"backfill surfaced {len(preview)} chars of real content from "
+            f"{c.get('connected_wing')}/{c.get('connected_room')}"
+        )
         print(f"   preview (first 120): {preview[:120]!r}")
         return True
     finally:
@@ -157,10 +159,12 @@ def test_recall_hook(col) -> bool:
     _banner("TEST 2: full UserPromptSubmit hook end-to-end")
 
     if not (
-        os.environ.get("MEMPAL_RECALL_ENDPOINT")
-        and os.environ.get("MEMPAL_RECALL_MODEL")
+        (os.environ.get("MEMPAL_LLM_ENDPOINT") or os.environ.get("MEMPAL_RECALL_ENDPOINT"))
+        and (os.environ.get("MEMPAL_LLM_MODEL") or os.environ.get("MEMPAL_RECALL_MODEL"))
     ):
-        print("  skipped — MEMPAL_RECALL_* not configured (decide_recall needs an LLM)")
+        print(
+            "  skipped — MEMPAL_LLM_* / MEMPAL_RECALL_* not configured (decide_recall needs an LLM)"
+        )
         return True  # skip ≠ fail
 
     from mempalace.palace_graph import create_tunnel, delete_tunnel, list_tunnels
@@ -187,9 +191,7 @@ def test_recall_hook(col) -> bool:
         # Phrase the prompt so decide_recall is likely to filter by src[0]/src[1].
         # The "之前" (previous) keyword triggers should_recall=True, and the room
         # hint steers filters toward the test tunnel's source.
-        prompt_text = (
-            f"之前在 {src[0]} 的 {src[1]} 讨论里面,我们是怎么处理那个问题的?"
-        )
+        prompt_text = f"之前在 {src[0]} 的 {src[1]} 讨论里面,我们是怎么处理那个问题的?"
         payload = {
             "hook_event_name": "UserPromptSubmit",
             "prompt": prompt_text,
@@ -202,8 +204,15 @@ def test_recall_hook(col) -> bool:
         offset = _log_tail(0)
         proc = subprocess.run(
             [
-                sys.executable, "-m", "mempalace",
-                "hook", "run", "--hook", "userprompt", "--harness", "claude-code",
+                sys.executable,
+                "-m",
+                "mempalace",
+                "hook",
+                "run",
+                "--hook",
+                "userprompt",
+                "--harness",
+                "claude-code",
             ],
             input=json.dumps(payload),
             capture_output=True,
@@ -233,9 +242,11 @@ def test_recall_hook(col) -> bool:
             print("  (LLM skipped recall or found 0 hits — expansion unreachable, not a failure)")
             return True
         if any("LLM decided recall" in ln for ln in new_lines):
-            print("  ⚠ decide_recall fired but expansion did not. Likely LLM "
-                  "chose filters that don't match the test tunnel's src. "
-                  "Coverage gap, not a code regression.")
+            print(
+                "  ⚠ decide_recall fired but expansion did not. Likely LLM "
+                "chose filters that don't match the test tunnel's src. "
+                "Coverage gap, not a code regression."
+            )
             return True
         _fail(f"unexpected hook behavior — no recall / skip / expansion in log")
         return False
@@ -260,26 +271,28 @@ def test_auto_save(col) -> bool:
         _fail(f"palace has no second wing (only {src[0]})")
         return False
 
-    fake_response = json.dumps({
-        "diary": f"{TEST_SENTINEL} — test-3 save probe. Simulating an LLM emitting a tunnel.",
-        "drawers": [
-            {
-                "wing": src[0],
-                "room": src[1],
-                "content": f"{TEST_SENTINEL} test-3 drawer content",
-            }
-        ],
-        "kg": [],
-        "tunnels": [
-            {
-                "source_wing": src[0],
-                "source_room": src[1],
-                "target_wing": tgt[0],
-                "target_room": tgt[1],
-                "label": f"{TEST_SENTINEL} — test-3 emitted tunnel",
-            }
-        ],
-    })
+    fake_response = json.dumps(
+        {
+            "diary": f"{TEST_SENTINEL} — test-3 save probe. Simulating an LLM emitting a tunnel.",
+            "drawers": [
+                {
+                    "wing": src[0],
+                    "room": src[1],
+                    "content": f"{TEST_SENTINEL} test-3 drawer content",
+                }
+            ],
+            "kg": [],
+            "tunnels": [
+                {
+                    "source_wing": src[0],
+                    "source_room": src[1],
+                    "target_wing": tgt[0],
+                    "target_room": tgt[1],
+                    "label": f"{TEST_SENTINEL} — test-3 emitted tunnel",
+                }
+            ],
+        }
+    )
 
     before_ids = {t.get("id") for t in list_tunnels()}
     offset = _log_tail(0)
@@ -288,7 +301,10 @@ def test_auto_save(col) -> bool:
     real_cfg = recall_llm._get_llm_config
     recall_llm._call_llm = lambda *a, **k: fake_response
     recall_llm._get_llm_config = lambda: {
-        "backend": "openai_compat", "endpoint": "x", "model": "stub", "key": "x",
+        "backend": "openai_compat",
+        "endpoint": "x",
+        "model": "stub",
+        "key": "x",
     }
     try:
         _async_save_worker(
@@ -312,9 +328,7 @@ def test_auto_save(col) -> bool:
     for tid in created:
         delete_tunnel(tid)
     try:
-        sentinels = col.get(
-            where_document={"$contains": TEST_SENTINEL}, include=[]
-        )
+        sentinels = col.get(where_document={"$contains": TEST_SENTINEL}, include=[])
         sids = sentinels.get("ids") or []
         if sids:
             col.delete(ids=sids)

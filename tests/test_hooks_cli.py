@@ -1329,6 +1329,198 @@ class TestAsyncSavePromptHardening:
 
         assert "MUST be escaped as" in _ASYNC_SAVE_PROMPT
 
+    def test_async_save_prompt_documents_canonical_5_class_hall_taxonomy(self):
+        """Prompt must teach the model the doc-aligned 5-class hall vocabulary."""
+        from mempalace.hooks_cli import _ASYNC_SAVE_PROMPT
+
+        for hall in (
+            "hall_facts",
+            "hall_events",
+            "hall_discoveries",
+            "hall_preferences",
+            "hall_advice",
+        ):
+            assert hall in _ASYNC_SAVE_PROMPT, f"Save prompt missing hall {hall}"
+
+        # Old taxonomy must NOT leak into the prompt
+        for old_hall in (
+            "hall_emotions",
+            "hall_consciousness",
+            "hall_technical",
+            "hall_creative",
+            "hall_identity",
+        ):
+            assert old_hall not in _ASYNC_SAVE_PROMPT, f"Stale hall {old_hall} still in save prompt"
+
+    def test_async_save_prompt_drawer_schema_includes_hall_field(self):
+        """The output-format JSON schema in the prompt must include `hall`."""
+        from mempalace.hooks_cli import _ASYNC_SAVE_PROMPT
+
+        # The literal schema line in the prompt has `"hall": "hall_events"` as example.
+        assert '"hall":' in _ASYNC_SAVE_PROMPT
+
+
+class TestAsyncSaveHallExtraction:
+    """LLM-first hall classification with detect_hall fallback."""
+
+    def _stub_save(self, monkeypatch, tmp_path, llm_response):
+        """Run _async_save_worker with a stubbed LLM response and return the
+        drawers actually upserted into the collection."""
+        from mempalace import hooks_cli, recall_llm
+        from mempalace import palace as palace_mod
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: llm_response)
+
+        captured = []
+
+        class _FakeCol:
+            def add(self, ids, documents, metadatas):
+                captured.append(("add", ids, documents, metadatas))
+
+            def upsert(self, ids, documents, metadatas):
+                captured.append(("upsert", ids, documents, metadatas))
+
+        # _async_save_worker imports get_collection locally from .palace —
+        # patch the source module so the local import picks up our stub.
+        monkeypatch.setattr(palace_mod, "get_collection", lambda *a, **kw: _FakeCol())
+
+        hooks_cli._async_save_worker(
+            "user: do the thing\nassistant: did the thing",
+            "test-session",
+            str(tmp_path),
+        )
+        # Filter for upsert-of-drawers (not the diary `add`)
+        drawer_meta = []
+        for op, _ids, _docs, metas in captured:
+            if op == "upsert":
+                drawer_meta.extend(metas)
+        return drawer_meta
+
+    def test_llm_supplied_valid_hall_is_used(self, tmp_path, monkeypatch):
+        response = (
+            '{"diary": "session", '
+            '"drawers": [{"wing": "w", "room": "r", "hall": "hall_advice", '
+            '"content": "long enough drawer content for the 20-char min"}], '
+            '"kg": [], "tunnels": []}'
+        )
+        metas = self._stub_save(monkeypatch, tmp_path, response)
+        assert len(metas) == 1
+        assert metas[0]["hall"] == "hall_advice"
+
+    def test_llm_supplied_invalid_hall_falls_back_to_detect(self, tmp_path, monkeypatch):
+        # "hall_bogus" is not in VALID_HALLS — fallback should run detect_hall
+        # on the content. The content has "decided" → hall_facts.
+        response = (
+            '{"diary": "", '
+            '"drawers": [{"wing": "w", "room": "r", "hall": "hall_bogus", '
+            '"content": "We decided to migrate the auth service to Clerk this quarter"}], '
+            '"kg": [], "tunnels": []}'
+        )
+        metas = self._stub_save(monkeypatch, tmp_path, response)
+        assert len(metas) == 1
+        assert metas[0]["hall"] == "hall_facts"
+
+    def test_llm_omits_hall_falls_back_to_detect(self, tmp_path, monkeypatch):
+        # Content keyword "deployed" → hall_events
+        response = (
+            '{"diary": "", '
+            '"drawers": [{"wing": "w", "room": "r", '
+            '"content": "Deployed the new gateway to staging without rollback issues"}], '
+            '"kg": [], "tunnels": []}'
+        )
+        metas = self._stub_save(monkeypatch, tmp_path, response)
+        assert len(metas) == 1
+        assert metas[0]["hall"] == "hall_events"
+
+
+class TestAsyncSaveTriggersAutoLink:
+    """After writing drawers, the save worker must call auto_link_shared_rooms
+    with the (wing, room) pairs it just wrote — this is the deterministic
+    'same room across wings → tunnel bridge' guarantee."""
+
+    def test_auto_link_called_with_saved_pairs(self, tmp_path, monkeypatch):
+        from mempalace import hooks_cli, recall_llm
+        from mempalace import palace as palace_mod
+        from mempalace import palace_graph as graph_mod
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+
+        response = (
+            '{"diary": "", '
+            '"drawers": ['
+            '{"wing": "alpha", "room": "auth-migration", "hall": "hall_events", '
+            '"content": "Long enough drawer content describing the auth migration"},'
+            '{"wing": "alpha", "room": "graphql-switch", "hall": "hall_facts", '
+            '"content": "Long enough drawer content for graphql switch decision"}'
+            '], "kg": [], "tunnels": []}'
+        )
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: response)
+
+        class _FakeCol:
+            def add(self, **kw):
+                pass
+
+            def upsert(self, **kw):
+                pass
+
+        monkeypatch.setattr(palace_mod, "get_collection", lambda *a, **kw: _FakeCol())
+
+        seen_pairs = []
+
+        def _stub_auto_link(saved_pairs, col=None, config=None, max_per_save=5):
+            seen_pairs.append(list(saved_pairs))
+            return []
+
+        monkeypatch.setattr(graph_mod, "auto_link_shared_rooms", _stub_auto_link)
+        monkeypatch.setattr(graph_mod, "invalidate_graph_cache", lambda: None)
+
+        hooks_cli._async_save_worker("user: ...\nassistant: ...", "test-session", str(tmp_path))
+
+        assert len(seen_pairs) == 1, "auto_link_shared_rooms should be called exactly once"
+        # Both saved drawers' pairs should be passed in.
+        assert ("alpha", "auth-migration") in seen_pairs[0]
+        assert ("alpha", "graphql-switch") in seen_pairs[0]
+
+    def test_auto_link_skipped_when_no_drawers_saved(self, tmp_path, monkeypatch):
+        from mempalace import hooks_cli, recall_llm
+        from mempalace import palace as palace_mod
+        from mempalace import palace_graph as graph_mod
+
+        monkeypatch.setattr(hooks_cli, "STATE_DIR", tmp_path)
+        monkeypatch.setattr(hooks_cli, "_build_palace_context", lambda: "")
+        monkeypatch.setattr(recall_llm, "_get_llm_config", lambda: {"backend": "stub"})
+        # No drawers — only diary
+        response = '{"diary": "Long enough diary entry to be worth storing right here", "drawers": [], "kg": [], "tunnels": []}'
+        monkeypatch.setattr(recall_llm, "_call_llm", lambda *a, **kw: response)
+
+        class _FakeCol:
+            def add(self, **kw):
+                pass
+
+            def upsert(self, **kw):
+                pass
+
+        monkeypatch.setattr(palace_mod, "get_collection", lambda *a, **kw: _FakeCol())
+
+        called = {"n": 0}
+
+        def _stub_auto_link(*a, **kw):
+            called["n"] += 1
+            return []
+
+        monkeypatch.setattr(graph_mod, "auto_link_shared_rooms", _stub_auto_link)
+        monkeypatch.setattr(graph_mod, "invalidate_graph_cache", lambda: None)
+
+        hooks_cli._async_save_worker("user: ...\nassistant: ...", "test-session", str(tmp_path))
+
+        # No drawers → saved_pairs is empty → auto_link is not invoked.
+        assert called["n"] == 0
+
 
 # --- preferred_wing propagation + hook-side wing validation ---
 
