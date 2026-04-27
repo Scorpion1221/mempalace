@@ -180,7 +180,9 @@ def ingest(palace_path, corpus, corpus_ids):
 # across all ~200 QA pairs for that conversation.
 
 
-def run_conversation(sample, search_mode, granularity, top_k, n_results):
+def run_conversation(
+    sample, search_mode, granularity, top_k, n_results, llm_rerank_fn=None, llm_args=None
+):
     """Run all QA pairs against one LoCoMo conversation. Yields per-QA rows."""
     sample_id = sample.get("sample_id", "conv-?")
     conversation = sample["conversation"]
@@ -214,6 +216,23 @@ def run_conversation(sample, search_mode, granularity, top_k, n_results):
                 ranked = retrieve_prod(palace_dir, question, n_results, corpus_ids)
             else:
                 ranked = retrieve_raw(palace_dir, question, n_results, corpus_ids)
+
+            if llm_rerank_fn is not None and ranked:
+                try:
+                    ranked = llm_rerank_fn(
+                        question,
+                        ranked,
+                        corpus,
+                        corpus_ids,
+                        api_key=(llm_args or {}).get("api_key", ""),
+                        top_k=(llm_args or {}).get("top_k", 10),
+                        model=(llm_args or {}).get("model", ""),
+                        backend=(llm_args or {}).get("backend", "ollama"),
+                        base_url=(llm_args or {}).get("base_url", ""),
+                    )
+                except Exception as e:
+                    print(f"    LLM RERANK ERROR ({sample_id}): {e}", flush=True)
+                    # Fall through with the original (pre-rerank) rankings.
 
             retrieved_ids = [corpus_ids[idx] for idx in ranked[:top_k]]
 
@@ -275,9 +294,39 @@ def patch_hybrid_weights(bm25_weight):
     print(f"  Patched _hybrid_rank: bm25_weight={bm25_weight}, vector_weight={1 - bm25_weight:.2f}")
 
 
+def _load_llm_rerank():
+    """Import llm_rerank from the legacy bench so all eval scripts share one
+    apples-to-apples LLM reranker implementation. Done lazily so callers
+    not using --llm-rerank pay no import cost."""
+    bench_path = _BENCH_DIR / "longmemeval_bench.py"
+    spec = importlib.util.spec_from_file_location("_legacy_bench", bench_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load {bench_path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.llm_rerank
+
+
 def run(args):
+    # Capture LLM bearer token BEFORE apply_embed_mode — baseline mode pops
+    # MEMPAL_EMBEDDING_KEY from env, which would strip the LLM proxy auth.
+    _llm_bearer = args.llm_key or os.environ.get("MEMPAL_EMBEDDING_KEY", "")
+
     apply_embed_mode(args.embed)
     patch_hybrid_weights(args.bm25_weight)
+
+    llm_rerank_fn = _load_llm_rerank() if args.llm_rerank else None
+    llm_args = (
+        {
+            "api_key": _llm_bearer,
+            "top_k": args.llm_top_k,
+            "model": args.llm_model,
+            "backend": args.llm_backend,
+            "base_url": args.llm_base_url,
+        }
+        if args.llm_rerank
+        else None
+    )
 
     with open(args.data_file) as f:
         data = json.load(f)
@@ -307,6 +356,8 @@ def run(args):
     print(f"  QA pairs:     {total_qa}")
     print(f"  Granularity:  {args.granularity}")
     print(f"  Top-k:        {args.top_k}")
+    if args.llm_rerank:
+        print(f"  LLM rerank:   {args.llm_backend}:{args.llm_model} (top-{args.llm_top_k})")
     print(f"  Out:          {out_file}")
     print(f"{'─' * 60}\n")
 
@@ -337,6 +388,8 @@ def run(args):
                     granularity=args.granularity,
                     top_k=args.top_k,
                     n_results=n_results,
+                    llm_rerank_fn=llm_rerank_fn,
+                    llm_args=llm_args,
                 )
             )
         except Exception as e:
@@ -444,6 +497,25 @@ def main():
         help="Override searcher._hybrid_rank's bm25_weight. "
         "vector_weight is set to 1 - bm25_weight. Only applies to --search prod.",
     )
+    p.add_argument(
+        "--llm-rerank",
+        action="store_true",
+        default=False,
+        help="After backbone retrieval, ask an LLM to promote the best of the top-k "
+        "to rank 1. Apples-to-apples comparison: pair with --search raw vs prod to "
+        "measure which backbone hands the LLM a better candidate pool.",
+    )
+    p.add_argument("--llm-model", default="gemini-3.1-flash-lite-preview")
+    p.add_argument(
+        "--llm-backend",
+        choices=["anthropic", "ollama"],
+        default="ollama",
+        help="ollama backend hits {base_url}/v1/chat/completions — works with the "
+        "LiteLLM proxy on port 4000 (the default for prod embedding here).",
+    )
+    p.add_argument("--llm-base-url", default="http://127.0.0.1:4000")
+    p.add_argument("--llm-key", default="", help="Bearer token; falls back to MEMPAL_EMBEDDING_KEY.")
+    p.add_argument("--llm-top-k", type=int, default=10, help="Top-k pool sent to the LLM reranker.")
     args = p.parse_args()
     run(args)
 
