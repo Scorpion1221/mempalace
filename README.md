@@ -63,17 +63,21 @@ LiteLLM proxy setup. See [INSTALL.md](INSTALL.md) for details.
 
 ### AI Agent-Assisted Install
 
-If you're using Claude Code, Codex, or Cursor, just ask:
+If you're using Claude Code, Codex, or Cursor, paste this one-liner into the chat:
 
-> "Help me install MemPalace"
+```
+请按照 https://github.com/Scorpion1221/mempalace/blob/main/docs/INSTALL-FOR-AGENTS.md 的步骤帮我安装 MemPalace
+```
 
-Your AI assistant will:
-1. Ask 3 questions (which agent? Gemini API or Vertex AI? install path?)
-2. Run the right commands for you
-3. Guide you through editing `.env` for your API key
-4. Verify the install
+Or in English:
 
-See [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md) for the agent workflow.
+```
+Please install MemPalace by following https://github.com/Scorpion1221/mempalace/blob/main/docs/INSTALL-FOR-AGENTS.md
+```
+
+Your AI assistant will fetch the guide, ask 3 questions (which agent? Gemini API
+or Vertex AI? install path?), run the commands, and verify the install. Full
+workflow: [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md).
 
 ## Quickstart
 
