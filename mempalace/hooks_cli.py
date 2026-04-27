@@ -16,6 +16,11 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 
+# Budget for the palace-wide write lock when the async save worker writes to
+# ChromaDB. Mirrors the value used by mcp_server.py and miner.py so all
+# writers share the same waiting budget on a contended palace.
+_PALACE_WRITE_LOCK_TIMEOUT_S = 30.0
+
 SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "3"))
 SAVE_MIN_MESSAGES = int(os.environ.get("MEMPAL_SAVE_MIN_MESSAGES", "3"))
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
@@ -1115,7 +1120,20 @@ def _extract_first_json_object(text: str) -> str | None:
 
 
 def _async_save_worker(transcript_text, session_id, cwd):
-    """Background worker: call the recall LLM to extract memories, write to palace."""
+    """Background worker: call the recall LLM to extract memories, write to palace.
+
+    Concurrency contract (Wave 2):
+        All ChromaDB / KG / tunnel writes happen inside ONE
+        ``palace_write_lock`` acquisition so they commit as one logical
+        save unit. CPU-heavy work (LLM call, JSON parse, sanitize, hash,
+        embed) stays OUTSIDE the lock so contended palaces don't pile up
+        on a tight critical section.
+
+        On ``PalaceWriteLockTimeout``, the unwritten payload is persisted
+        to ``~/.mempalace/recovery/<palace_id>/`` so the next successful
+        run can drain it. We exit cleanly (rc=0) so the stop hook chain
+        is not disrupted.
+    """
     try:
         from .recall_llm import _get_llm_config, _call_llm
 
@@ -1163,154 +1181,347 @@ def _async_save_worker(transcript_text, session_id, cwd):
                 _log(f"async save: JSON parse failed ({e}); could not write dump")
             return
 
+        # ── Build write batch OUTSIDE the lock (CPU-heavy: hash + sanitize). ──
         from .config import MempalaceConfig, sanitize_content, sanitize_name
-        from .palace import get_collection
 
         cfg = MempalaceConfig()
-        col = get_collection(cfg.palace_path, create=True)
         now = datetime.now()
-        written = 0
+        import hashlib  # local — used by id derivation below
 
-        diary = data.get("diary", "")
-        if diary and len(diary.strip()) > 20:
-            import hashlib
-
+        diary_record: dict | None = None
+        diary_text = data.get("diary", "")
+        if diary_text and len(diary_text.strip()) > 20:
             entry_id = (
                 f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}"
-                f"_{hashlib.sha256(diary.encode()).hexdigest()[:12]}"
+                f"_{hashlib.sha256(diary_text.encode()).hexdigest()[:12]}"
             )
-            col.add(
-                ids=[entry_id],
-                documents=[sanitize_content(diary)],
-                metadatas=[
-                    {
-                        "wing": wing,
-                        "room": "diary",
-                        "hall": "hall_diary",
-                        "topic": "auto-save",
-                        "type": "diary_entry",
-                        "added_by": ASYNC_SAVE_TAG,
-                        "filed_at": now.isoformat(),
-                        "date": now.strftime("%Y-%m-%d"),
-                    }
-                ],
-            )
-            written += 1
+            diary_record = {
+                "id": entry_id,
+                "document": sanitize_content(diary_text),
+                "metadata": {
+                    "wing": wing,
+                    "room": "diary",
+                    "hall": "hall_diary",
+                    "topic": "auto-save",
+                    "type": "diary_entry",
+                    "added_by": ASYNC_SAVE_TAG,
+                    "filed_at": now.isoformat(),
+                    "date": now.strftime("%Y-%m-%d"),
+                },
+            }
 
-        saved_pairs: list = []
+        drawer_records: list[dict] = []
         for drawer in data.get("drawers", []):
             content = drawer.get("content", "")
             if not content or len(content.strip()) < 20:
                 continue
             d_wing = sanitize_name(drawer.get("wing", wing))
             d_room = sanitize_name(drawer.get("room", "general"))
-            import hashlib
-
             from .miner import detect_hall
 
             d_hall = detect_hall(content)
-
             d_id = (
                 f"drawer_{d_wing}_{d_room}"
                 f"_{hashlib.sha256((d_wing + d_room + content).encode()).hexdigest()[:24]}"
             )
-            col.upsert(
-                ids=[d_id],
-                documents=[sanitize_content(content)],
-                metadatas=[
-                    {
+            drawer_records.append(
+                {
+                    "id": d_id,
+                    "document": sanitize_content(content),
+                    "metadata": {
                         "wing": d_wing,
                         "room": d_room,
                         "hall": d_hall,
                         "added_by": ASYNC_SAVE_TAG,
                         "filed_at": now.isoformat(),
-                    }
-                ],
+                    },
+                    "_pair": (d_wing, d_room),
+                }
             )
-            saved_pairs.append((d_wing, d_room))
-            written += 1
 
-        kg_facts = data.get("kg", [])
-        kg_written = 0
-        if kg_facts:
-            try:
-                from .knowledge_graph import KnowledgeGraph
+        kg_facts_raw = data.get("kg", []) or []
+        kg_facts: list[dict] = []
+        for fact in kg_facts_raw:
+            subj = fact.get("subject", "")
+            pred = fact.get("predicate", "")
+            obj = fact.get("object", "")
+            if subj and pred and obj:
+                kg_facts.append({"subject": subj, "predicate": pred, "object": obj})
 
-                kg = KnowledgeGraph()
-                for fact in kg_facts:
-                    subj = fact.get("subject", "")
-                    pred = fact.get("predicate", "")
-                    obj = fact.get("object", "")
-                    if subj and pred and obj:
-                        existing = kg.query_entity(subj, direction="outgoing")
-                        for old in existing:
-                            if (
-                                old.get("predicate") == pred
-                                and old.get("object") != obj
-                                and old.get("valid_to") is None
-                            ):
-                                kg.invalidate(
-                                    subj, pred, old["object"], ended=now.strftime("%Y-%m-%d")
-                                )
-                        kg.add_triple(subj, pred, obj, valid_from=now.strftime("%Y-%m-%d"))
-                        kg_written += 1
-                kg.close()
-            except Exception as e:
-                _log(f"async save: KG write error: {e}")
+        tunnels_raw = data.get("tunnels", []) or []
+        tunnels: list[dict] = []
+        for t in tunnels_raw:
+            sw = (t.get("source_wing") or "").strip()
+            sr = (t.get("source_room") or "").strip()
+            tw = (t.get("target_wing") or "").strip()
+            tr = (t.get("target_room") or "").strip()
+            label = (t.get("label") or "").strip()
+            if not (sw and sr and tw and tr) or sw == tw:
+                continue  # skip malformed or same-wing
+            tunnels.append(
+                {
+                    "source_wing": sw,
+                    "source_room": sr,
+                    "target_wing": tw,
+                    "target_room": tr,
+                    "label": label,
+                }
+            )
 
-        tunnels = data.get("tunnels", [])
-        tunnels_written = 0
-        if tunnels:
-            try:
-                from .palace_graph import create_tunnel
+        # Nothing extracted at all — bail out before grabbing the lock.
+        if not (diary_record or drawer_records or kg_facts or tunnels):
+            _log("async save: LLM returned no actionable payload")
+            return
 
-                for t in tunnels:
-                    sw = (t.get("source_wing") or "").strip()
-                    sr = (t.get("source_room") or "").strip()
-                    tw = (t.get("target_wing") or "").strip()
-                    tr = (t.get("target_room") or "").strip()
-                    label = (t.get("label") or "").strip()
-                    if not (sw and sr and tw and tr) or sw == tw:
-                        continue  # skip malformed or same-wing
-                    try:
-                        create_tunnel(
-                            source_wing=sw,
-                            source_room=sr,
-                            target_wing=tw,
-                            target_room=tr,
-                            label=label,
-                        )
-                        tunnels_written += 1
-                    except Exception as e:
-                        _log(f"async save: tunnel write error ({sw}/{sr} -> {tw}/{tr}): {e}")
-            except Exception as e:
-                _log(f"async save: tunnel block failed: {e}")
+        # ── Critical section: refresh + write under the per-palace lock. ──
+        from .palace import PalaceWriteLockTimeout, get_collection, palace_write_lock
 
-        # Deterministic auto-tunnel pass — independent of the LLM's tunnel
-        # output. If a (wing, room) just saved appears in another wing too,
-        # link them. The LLM may have missed it (or produced same-wing
-        # tunnels we filtered out); this guarantees the doc-promised
-        # behavior of "same room across wings → tunnel bridge".
-        auto_tunnels_written = 0
-        if saved_pairs:
-            try:
-                from .palace_graph import auto_link_shared_rooms, invalidate_graph_cache
+        try:
+            with palace_write_lock(cfg.palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+                # get_collection inside the lock so client/refresh state
+                # is bound to the locked palace, not a stale snapshot.
+                col = get_collection(cfg.palace_path, create=True)
+                try:
+                    col.refresh_for_write()
+                except AttributeError:
+                    # Older backend / test fake without refresh_for_write —
+                    # safe to skip; the lock alone still serialises writers.
+                    pass
 
-                # Drop the cached graph so the auto-link sees the rooms
-                # we just upserted.
-                invalidate_graph_cache()
-                auto_links = auto_link_shared_rooms(saved_pairs, col=col, max_per_save=5)
-                auto_tunnels_written = len(auto_links)
-            except Exception as e:
-                _log(f"async save: auto-link tunnel block failed: {e}")
+                stats = _async_save_apply_writes(
+                    col=col,
+                    now=now,
+                    diary_record=diary_record,
+                    drawer_records=drawer_records,
+                    kg_facts=kg_facts,
+                    tunnels=tunnels,
+                )
+        except PalaceWriteLockTimeout:
+            # Persist the unwritten payload to the recovery WAL so the next
+            # successful save (or a manual replay) can pick it up. Losing
+            # this data silently would violate the "verbatim always /
+            # 100% recall" promise.
+            _persist_async_save_to_recovery(
+                cfg.palace_path,
+                session_id=session_id,
+                wing=wing,
+                diary_record=diary_record,
+                drawer_records=drawer_records,
+                kg_facts=kg_facts,
+                tunnels=tunnels,
+            )
+            sys.exit(0)
 
         _log(
-            f"async save: wrote {written} entries "
-            f"(diary + {len(data.get('drawers', []))} drawers + {kg_written} kg facts + "
-            f"{tunnels_written} llm tunnels + {auto_tunnels_written} auto tunnels)"
+            f"async save: wrote {stats['written']} entries "
+            f"(diary + {len(data.get('drawers', []))} drawers + "
+            f"{stats['kg_written']} kg facts + "
+            f"{stats['tunnels_written']} llm tunnels + "
+            f"{stats['auto_tunnels_written']} auto tunnels)"
         )
     except Exception as e:
         _log(f"async save error: {e}\n{traceback.format_exc()}")
+
+
+def _async_save_apply_writes(
+    *,
+    col,
+    now,
+    diary_record,
+    drawer_records,
+    kg_facts,
+    tunnels,
+) -> dict:
+    """Apply all async-save writes against an already-locked, refreshed collection.
+
+    Caller MUST hold ``palace_write_lock`` for ``col``'s palace and have
+    already invoked ``refresh_for_write``. Splitting this out keeps
+    ``_async_save_worker`` simple enough that ruff's complexity budget
+    stays satisfied.
+
+    Returns counters: ``{"written", "kg_written", "tunnels_written",
+    "auto_tunnels_written"}``.
+    """
+    written = 0
+
+    if diary_record is not None:
+        col.add(
+            ids=[diary_record["id"]],
+            documents=[diary_record["document"]],
+            metadatas=[diary_record["metadata"]],
+        )
+        written += 1
+
+    saved_pairs: list = []
+    for rec in drawer_records:
+        col.upsert(
+            ids=[rec["id"]],
+            documents=[rec["document"]],
+            metadatas=[rec["metadata"]],
+        )
+        saved_pairs.append(rec["_pair"])
+        written += 1
+
+    kg_written = _async_save_apply_kg(kg_facts, now) if kg_facts else 0
+    tunnels_written = _async_save_apply_tunnels(tunnels) if tunnels else 0
+    auto_tunnels_written = _async_save_apply_auto_tunnels(saved_pairs, col) if saved_pairs else 0
+
+    return {
+        "written": written,
+        "kg_written": kg_written,
+        "tunnels_written": tunnels_written,
+        "auto_tunnels_written": auto_tunnels_written,
+    }
+
+
+def _async_save_apply_kg(kg_facts: list[dict], now) -> int:
+    """Write KG triples (with prior-fact invalidation). Returns count written."""
+    try:
+        from .knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        try:
+            kg_written = 0
+            for fact in kg_facts:
+                subj = fact["subject"]
+                pred = fact["predicate"]
+                obj = fact["object"]
+                existing = kg.query_entity(subj, direction="outgoing")
+                for old in existing:
+                    if (
+                        old.get("predicate") == pred
+                        and old.get("object") != obj
+                        and old.get("valid_to") is None
+                    ):
+                        kg.invalidate(subj, pred, old["object"], ended=now.strftime("%Y-%m-%d"))
+                kg.add_triple(subj, pred, obj, valid_from=now.strftime("%Y-%m-%d"))
+                kg_written += 1
+            return kg_written
+        finally:
+            kg.close()
+    except Exception as e:
+        _log(f"async save: KG write error: {e}")
+        return 0
+
+
+def _async_save_apply_tunnels(tunnels: list[dict]) -> int:
+    """Create explicit cross-wing tunnels. Returns count written."""
+    try:
+        from .palace_graph import create_tunnel
+
+        tunnels_written = 0
+        for t in tunnels:
+            try:
+                create_tunnel(
+                    source_wing=t["source_wing"],
+                    source_room=t["source_room"],
+                    target_wing=t["target_wing"],
+                    target_room=t["target_room"],
+                    label=t["label"],
+                )
+                tunnels_written += 1
+            except Exception as e:
+                _log(
+                    "async save: tunnel write error "
+                    f"({t['source_wing']}/{t['source_room']} -> "
+                    f"{t['target_wing']}/{t['target_room']}): {e}"
+                )
+        return tunnels_written
+    except Exception as e:
+        _log(f"async save: tunnel block failed: {e}")
+        return 0
+
+
+def _async_save_apply_auto_tunnels(saved_pairs: list, col) -> int:
+    """Deterministic auto-tunnel pass for same-room cross-wing pairs.
+
+    Independent of the LLM's tunnel output. Stays inside the caller's
+    palace_write_lock so it sees the rooms we just upserted.
+    """
+    try:
+        from .palace_graph import auto_link_shared_rooms, invalidate_graph_cache
+
+        invalidate_graph_cache()
+        auto_links = auto_link_shared_rooms(saved_pairs, col=col, max_per_save=5)
+        return len(auto_links)
+    except Exception as e:
+        _log(f"async save: auto-link tunnel block failed: {e}")
+        return 0
+
+
+def _persist_async_save_to_recovery(
+    palace_path,
+    *,
+    session_id,
+    wing,
+    diary_record,
+    drawer_records,
+    kg_facts,
+    tunnels,
+):
+    """Persist an async-save payload to the recovery WAL on lock timeout.
+
+    Strips internal-only fields (``_pair``) so the on-disk record is
+    portable. Logs to stderr (visible in the spawning hook chain) and to
+    the hook log so operators can find orphaned payloads.
+
+    TODO(wave-3): pair this with a drainer that ``_async_save_worker``
+    invokes at startup, so orphaned recovery files are replayed
+    automatically on the next successful save instead of requiring a
+    manual replay or the future ``mempalace repair --replay-recovery``
+    command.
+    """
+    from .recovery_wal import persist_async_save_payload
+
+    # Sanitised copies — caller's dicts may include internal-only keys.
+    drawers_for_disk = [
+        {k: v for k, v in rec.items() if not k.startswith("_")} for rec in (drawer_records or [])
+    ]
+
+    record_count = sum(
+        1 for x in (diary_record, *(drawers_for_disk), *(kg_facts or []), *(tunnels or [])) if x
+    )
+
+    try:
+        path = persist_async_save_payload(
+            palace_path,
+            diary=diary_record,
+            drawers=drawers_for_disk,
+            kg_facts=kg_facts,
+            tunnels=tunnels,
+            context={
+                "session_id": session_id,
+                "wing": wing,
+                "filed_at": datetime.now().isoformat(),
+                "reason": "palace_write_lock_timeout",
+            },
+        )
+    except Exception as exc:
+        # Last-ditch: even WAL persistence failed. Log loudly so the
+        # operator knows data was lost (this should be very rare —
+        # writing one short JSONL file usually cannot fail unless the
+        # disk is full or permissions are broken).
+        msg = (
+            f"[mempalace.async_save] palace_write_lock timeout AND "
+            f"recovery WAL persistence failed: {exc!r}. "
+            f"Lost {record_count} records.\n"
+        )
+        try:
+            sys.stderr.write(msg)
+        except Exception:
+            pass
+        _log(msg)
+        return
+
+    msg = (
+        f"[mempalace.async_save] palace_write_lock timeout. "
+        f"Persisted {record_count} records to recovery WAL: {path}\n"
+    )
+    try:
+        sys.stderr.write(msg)
+    except Exception:
+        pass
+    _log(msg)
 
 
 def _wing_from_transcript_path(transcript_path: str) -> str:

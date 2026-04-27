@@ -58,6 +58,7 @@ from .config import (  # noqa: E402
 )
 from .version import __version__  # noqa: E402
 from .backends.chroma import ChromaBackend, ChromaCollection  # noqa: E402
+from .palace import PalaceWriteLockTimeout, palace_write_lock  # noqa: E402
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
@@ -212,6 +213,12 @@ def _get_client():
 
 
 _collection_has_ef = False
+# Shared backend handle so the ChromaCollection wrappers below have a way
+# to call refresh_for_write() — it requires a backend reference, the
+# palace path, and the collection name to rebind through
+# ChromaBackend._client_for_write. Without these, refresh_for_write()
+# silently no-ops and the lock + refresh contract is violated.
+_BACKEND_FOR_WRITE = ChromaBackend()
 
 
 def _get_collection(create=False):
@@ -220,6 +227,13 @@ def _get_collection(create=False):
     Rebuilds the cache if a custom embedding function becomes available
     after the collection was first cached without one (e.g. MCP server
     started before env vars were set).
+
+    The returned ``ChromaCollection`` is wired with ``backend=``,
+    ``palace_path=``, ``collection_name=``, ``embedding_function=``, and
+    ``create=`` so its ``refresh_for_write()`` can rebind through a fresh
+    write-path client (Wave 2 contract). Without these kwargs the
+    refresh is a no-op and the palace_write_lock alone cannot prevent
+    cross-process HNSW staleness.
     """
     global _collection_cache, _metadata_cache, _metadata_cache_time, _collection_has_ef
     try:
@@ -242,17 +256,22 @@ def _get_collection(create=False):
 
         if needs_rebuild:
             if create:
-                _collection_cache = ChromaCollection(
-                    client.get_or_create_collection(
-                        _config.collection_name,
-                        metadata={"hnsw:space": "cosine"},
-                        **ef_kwargs,
-                    )
+                raw = client.get_or_create_collection(
+                    _config.collection_name,
+                    metadata={"hnsw:space": "cosine"},
+                    **ef_kwargs,
                 )
             else:
-                _collection_cache = ChromaCollection(
-                    client.get_collection(_config.collection_name, **ef_kwargs)
-                )
+                raw = client.get_collection(_config.collection_name, **ef_kwargs)
+            _collection_cache = ChromaCollection(
+                raw,
+                backend=_BACKEND_FOR_WRITE,
+                palace_path=_config.palace_path,
+                collection_name=_config.collection_name,
+                embedding_function=ef,
+                hnsw_space="cosine",
+                create=create,
+            )
             _collection_has_ef = ef is not None
             _metadata_cache = None
             _metadata_cache_time = 0
@@ -292,6 +311,16 @@ _metadata_cache = None
 _metadata_cache_time = 0
 _METADATA_CACHE_TTL = 5.0  # seconds
 _MAX_RESULTS = 100  # upper bound for search/list limit params
+
+# Cross-process write lock timeout. Generous enough to absorb miner bursts
+# that hold the lock through long batches of upserts, tight enough to fail
+# fast when something is genuinely wedged (typically a crashed sibling
+# whose lock file kernel-released seconds ago).
+_PALACE_WRITE_LOCK_TIMEOUT_S = 30.0
+_LOCK_TIMEOUT_HINT = (
+    "palace_write_lock timeout: another writer holds the lock. "
+    "If this persists, check ~/.mempalace/locks/ for stale entries or run: mempalace doctor"
+)
 
 
 def _get_cached_metadata(col, where=None):
@@ -635,6 +664,7 @@ def tool_add_drawer(
 ):
     """File verbatim content into a wing/room. Checks for duplicates first."""
     global _metadata_cache
+    # ── CPU work: validation, hashing, WAL logging happen OUTSIDE the lock
     try:
         wing = sanitize_name(wing, "wing")
         room = sanitize_name(room, "room")
@@ -662,32 +692,39 @@ def tool_add_drawer(
         },
     )
 
-    # Idempotency: if the deterministic ID already exists, return success as a no-op.
-    try:
-        existing = col.get(ids=[drawer_id])
-        if existing and existing["ids"]:
-            return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
-    except Exception:
-        pass
+    metadata = {
+        "wing": wing,
+        "room": room,
+        "source_file": source_file or "",
+        "chunk_index": 0,
+        "added_by": added_by,
+        "filed_at": datetime.now().isoformat(),
+    }
 
+    # ── Critical section: refresh + write under the per-palace lock
     try:
-        col.upsert(
-            ids=[drawer_id],
-            documents=[content],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "source_file": source_file or "",
-                    "chunk_index": 0,
-                    "added_by": added_by,
-                    "filed_at": datetime.now().isoformat(),
-                }
-            ],
-        )
+        with palace_write_lock(_config.palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+            col.refresh_for_write()
+            # Idempotency check INSIDE the lock — without the lock, two
+            # concurrent writers could both miss the existing-id probe and
+            # race a redundant upsert that confuses HNSW segment merging.
+            try:
+                existing = col.get(ids=[drawer_id])
+                if existing and existing["ids"]:
+                    return {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
+            except Exception:
+                pass
+
+            col.upsert(
+                ids=[drawer_id],
+                documents=[content],
+                metadatas=[metadata],
+            )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
         return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
+    except PalaceWriteLockTimeout:
+        return {"success": False, "error": _LOCK_TIMEOUT_HINT}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -698,6 +735,10 @@ def tool_delete_drawer(drawer_id: str):
     col = _get_collection()
     if not col:
         return _no_palace()
+    # ── Pre-check + WAL log happen OUTSIDE the lock (read-only).
+    # The pre-check is informational only — the lock-protected delete
+    # below will silently no-op if a concurrent writer removed the row
+    # between our probe and the actual delete.
     existing = col.get(ids=[drawer_id])
     if not existing["ids"]:
         return {"success": False, "error": f"Drawer not found: {drawer_id}"}
@@ -715,10 +756,14 @@ def tool_delete_drawer(drawer_id: str):
     )
 
     try:
-        col.delete(ids=[drawer_id])
+        with palace_write_lock(_config.palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+            col.refresh_for_write()
+            col.delete(ids=[drawer_id])
         _metadata_cache = None
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
+    except PalaceWriteLockTimeout:
+        return {"success": False, "error": _LOCK_TIMEOUT_HINT}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -806,6 +851,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
     col = _get_collection()
     if not col:
         return _no_palace()
+    # ── CPU work: read existing, sanitize new fields, WAL — OUTSIDE the lock
     try:
         existing = col.get(ids=[drawer_id], include=["documents", "metadatas"])
         if not existing["ids"]:
@@ -850,7 +896,11 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
         if content is not None:
             update_kwargs["documents"] = [new_doc]
         update_kwargs["metadatas"] = [new_meta]
-        col.update(**update_kwargs)
+
+        # ── Critical section: refresh + write under the per-palace lock
+        with palace_write_lock(_config.palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+            col.refresh_for_write()
+            col.update(**update_kwargs)
 
         _metadata_cache = None
 
@@ -861,6 +911,8 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             "wing": new_meta.get("wing", ""),
             "room": new_meta.get("room", ""),
         }
+    except PalaceWriteLockTimeout:
+        return {"success": False, "error": _LOCK_TIMEOUT_HINT}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -954,6 +1006,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     This is the agent's personal journal — observations, thoughts,
     what it worked on, what it noticed, what it thinks matters.
     """
+    # ── CPU work: validation, ID hashing, WAL — OUTSIDE the lock
     try:
         agent_name = sanitize_name(agent_name, "agent_name")
         entry = sanitize_content(entry)
@@ -985,27 +1038,29 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         },
     )
 
+    metadata = {
+        "wing": wing,
+        "room": room,
+        "hall": "hall_diary",
+        "topic": topic,
+        "type": "diary_entry",
+        "agent": agent_name,
+        "filed_at": now.isoformat(),
+        "date": now.strftime("%Y-%m-%d"),
+    }
+
     try:
         # TODO: Future versions should expand AAAK before embedding to improve
         # semantic search quality. For now, store raw AAAK in metadata so it's
         # preserved, and keep the document as-is for embedding (even though
         # compressed AAAK degrades embedding quality).
-        col.add(
-            ids=[entry_id],
-            documents=[entry],
-            metadatas=[
-                {
-                    "wing": wing,
-                    "room": room,
-                    "hall": "hall_diary",
-                    "topic": topic,
-                    "type": "diary_entry",
-                    "agent": agent_name,
-                    "filed_at": now.isoformat(),
-                    "date": now.strftime("%Y-%m-%d"),
-                }
-            ],
-        )
+        with palace_write_lock(_config.palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+            col.refresh_for_write()
+            col.add(
+                ids=[entry_id],
+                documents=[entry],
+                metadatas=[metadata],
+            )
         logger.info(f"Diary entry: {entry_id} → {wing}/diary/{topic}")
         return {
             "success": True,
@@ -1014,6 +1069,8 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "topic": topic,
             "timestamp": now.isoformat(),
         }
+    except PalaceWriteLockTimeout:
+        return {"success": False, "error": _LOCK_TIMEOUT_HINT}
     except Exception as e:
         return {"success": False, "error": str(e)}
 
@@ -1823,9 +1880,42 @@ def _start_socket_listener():
     logger.info("Socket listener started at %s", _SOCKET_PATH)
 
 
+def _run_startup_health_check():
+    """Probe palace health at server boot. NEVER fatal — server must come up.
+
+    Writes diagnostics to stderr (not stdout — stdout is the MCP JSON-RPC
+    channel). The user can still use the MCP doctor / repair tools to fix
+    things once the server is reachable.
+    """
+    palace_dir = _config.palace_path
+    # Skip when the palace dir doesn't exist yet — first-run case where the
+    # user is about to call ``mempalace init``. Surfacing a "corrupt" warning
+    # would be misleading.
+    if not os.path.isdir(palace_dir):
+        return
+    try:
+        from .health import check_palace_health
+
+        report = check_palace_health(palace_dir)
+        if report.status == "corrupt":
+            issues_summary = [f"{i.code}: {i.message}" for i in report.issues]
+            sys.stderr.write(
+                f"[mempalace] WARNING: palace at {palace_dir} appears corrupt.\n"
+                f"  issues: {issues_summary}\n"
+                f"  Run: mempalace doctor   # for details\n"
+                f"  Run: mempalace repair --rebuild-from-verbatim   # to recover\n"
+                f"  Continuing in degraded mode — writes may fail or compound corruption.\n"
+            )
+        elif report.status == "warn":
+            sys.stderr.write(f"[mempalace] palace health: warn ({len(report.issues)} issues)\n")
+    except Exception as e:
+        sys.stderr.write(f"[mempalace] health check failed (non-fatal): {e}\n")
+
+
 def main():
     _restore_stdout()
     _start_socket_listener()
+    _run_startup_health_check()
     logger.info("MemPalace MCP Server starting...")
     while True:
         try:

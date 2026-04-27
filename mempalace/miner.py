@@ -7,10 +7,12 @@ Routes each file to the right room based on content.
 Stores verbatim chunks as drawers. No summaries. Ever.
 """
 
+import contextlib
 import os
 import sys
 import hashlib
 import fnmatch
+import logging
 from pathlib import Path
 from datetime import datetime
 from collections import defaultdict
@@ -18,14 +20,44 @@ from collections import defaultdict
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
+    PalaceWriteLockTimeout,
     build_closet_lines,
     file_already_mined,
     get_closets_collection,
     get_collection,
     mine_lock,
+    palace_write_lock,
     purge_file_closets,
     upsert_closet_lines,
 )
+
+logger = logging.getLogger(__name__)
+
+# Cross-process palace write lock timeout. Generous enough to absorb sibling
+# miner bursts that hold the lock through long batches, tight enough to fail
+# fast when something is genuinely wedged. Mirrors the value used by the MCP
+# server (mempalace/mcp_server.py) so all writers wait for each other on the
+# same budget.
+_PALACE_WRITE_LOCK_TIMEOUT_S = 30.0
+
+
+@contextlib.contextmanager
+def _maybe_palace_write_lock(palace_path):
+    """Acquire palace_write_lock, or yield a no-op if palace_path is None.
+
+    The miner is the only existing caller, and it always passes a path,
+    but ``process_file`` is exposed publicly with ``palace_path`` defaulted
+    to None so legacy callers (or tests instantiating it directly) don't
+    immediately break. When None, the per-file ``mine_lock`` still
+    serialises same-source contention; cross-file palace writes are
+    unprotected — same behaviour as before Wave 2.
+    """
+    if palace_path is None:
+        yield
+        return
+    with palace_write_lock(palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+        yield
+
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -683,8 +715,29 @@ def process_file(
     agent: str,
     dry_run: bool,
     closets_col=None,
+    palace_path: str | None = None,
 ) -> tuple:
-    """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
+    """Read, chunk, route, and file one file. Returns (drawer_count, room_name).
+
+    Concurrency model — TWO locks are held in nested order:
+        mine_lock(source_file)              # outer: per-source-file dedup
+            palace_write_lock(palace_path)  # inner: palace-wide HNSW gate
+
+    The mine_lock prevents two miners from racing the SAME file (would
+    duplicate drawers if both passed file_already_mined() then both
+    upserted). The palace_write_lock prevents two miners working on
+    DIFFERENT files from racing ChromaDB's HNSW writer (would corrupt
+    segment files). Both are required.
+
+    All CPU work (read, parse, chunk, normalize) happens OUTSIDE the
+    palace lock so the critical section stays tight.
+
+    ``palace_path`` is required for the palace lock. If omitted (e.g.
+    legacy callers), the function falls back to wrapping writes in a
+    no-op context — the per-file mine_lock still serialises same-file
+    contention, but cross-file writes are unprotected. New callers MUST
+    pass ``palace_path``.
+    """
 
     # Skip if already filed
     source_file = str(filepath)
@@ -722,55 +775,93 @@ def process_file(
         if file_already_mined(collection, source_file, check_mtime=True):
             return 0, room
 
-        # Purge stale drawers for this file before re-inserting the fresh chunks.
-        # Converts modified-file re-mines from upsert-over-existing-IDs (which hits
-        # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
-        # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
-        # path entirely.
+        # ── Critical section: refresh + write under the per-palace lock.
+        # Order is mine_lock (outer, per-file) → palace_write_lock (inner,
+        # per-palace). Reversing would risk deadlock against any other
+        # path that needs both. See module docstring above.
         try:
-            collection.delete(where={"source_file": source_file})
-        except Exception:
-            pass
+            with _maybe_palace_write_lock(palace_path):
+                # Discard any stale chromadb client state before this batch.
+                # MUST be inside the palace_write_lock to be effective.
+                try:
+                    collection.refresh_for_write()
+                except AttributeError:
+                    # Older backend or test fake without refresh_for_write —
+                    # safe to skip (lock still serialises writers, the only
+                    # missing piece is in-memory cache invalidation).
+                    pass
+                if closets_col is not None:
+                    try:
+                        closets_col.refresh_for_write()
+                    except AttributeError:
+                        pass
 
-        drawers_added = 0
-        for chunk in chunks:
-            added = add_drawer(
-                collection=collection,
-                wing=wing,
-                room=room,
-                content=chunk["content"],
-                source_file=source_file,
-                chunk_index=chunk["chunk_index"],
-                agent=agent,
-            )
-            if added:
-                drawers_added += 1
+                # Purge stale drawers for this file before re-inserting the
+                # fresh chunks. Converts modified-file re-mines from upsert-
+                # over-existing-IDs (which hits hnswlib's thread-unsafe
+                # updatePoint path and can segfault on macOS ARM with
+                # chromadb 0.6.3) into a clean delete+insert, bypassing the
+                # update path entirely.
+                try:
+                    collection.delete(where={"source_file": source_file})
+                except Exception:
+                    pass
 
-        # Build closet — the searchable index pointing to these drawers.
-        # Purge first: a re-mine (mtime change or normalize_version bump) must
-        # fully replace the prior closets, not append to them.
-        if closets_col and drawers_added > 0:
-            drawer_ids = [
-                f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(c['chunk_index'])).encode()).hexdigest()[:24]}"
-                for c in chunks
-            ]
-            closet_lines = build_closet_lines(source_file, drawer_ids, content, wing, room)
-            closet_id_base = (
-                f"closet_{wing}_{room}_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+                drawers_added = 0
+                for chunk in chunks:
+                    added = add_drawer(
+                        collection=collection,
+                        wing=wing,
+                        room=room,
+                        content=chunk["content"],
+                        source_file=source_file,
+                        chunk_index=chunk["chunk_index"],
+                        agent=agent,
+                    )
+                    if added:
+                        drawers_added += 1
+
+                # Build closet — the searchable index pointing to these drawers.
+                # Purge first: a re-mine (mtime change or normalize_version bump)
+                # must fully replace the prior closets, not append to them.
+                # Closet writes stay inside the SAME palace_write_lock so the
+                # delete+upsert pair is atomic w.r.t. concurrent writers.
+                if closets_col and drawers_added > 0:
+                    drawer_ids = [
+                        f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(c['chunk_index'])).encode()).hexdigest()[:24]}"
+                        for c in chunks
+                    ]
+                    closet_lines = build_closet_lines(source_file, drawer_ids, content, wing, room)
+                    closet_id_base = (
+                        f"closet_{wing}_{room}_"
+                        f"{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
+                    )
+                    entities = _extract_entities_for_metadata(content)
+                    closet_meta = {
+                        "wing": wing,
+                        "room": room,
+                        "source_file": source_file,
+                        "drawer_count": drawers_added,
+                        "filed_at": datetime.now().isoformat(),
+                        "normalize_version": NORMALIZE_VERSION,
+                    }
+                    if entities:
+                        closet_meta["entities"] = entities
+                    purge_file_closets(closets_col, source_file)
+                    upsert_closet_lines(closets_col, closet_id_base, closet_lines, closet_meta)
+        except PalaceWriteLockTimeout as exc:
+            # Another writer is holding the palace lock. Skip this file
+            # cleanly — the next mine run will retry. Crashing the whole
+            # mine here would lose progress on every other file in the
+            # batch, which is the wrong default for a long-running
+            # background task.
+            logger.error(
+                "palace write lock timeout for %s: %s — skipping this file, "
+                "next mine run will retry",
+                source_file,
+                exc,
             )
-            entities = _extract_entities_for_metadata(content)
-            closet_meta = {
-                "wing": wing,
-                "room": room,
-                "source_file": source_file,
-                "drawer_count": drawers_added,
-                "filed_at": datetime.now().isoformat(),
-                "normalize_version": NORMALIZE_VERSION,
-            }
-            if entities:
-                closet_meta["entities"] = entities
-            purge_file_closets(closets_col, source_file)
-            upsert_closet_lines(closets_col, closet_id_base, closet_lines, closet_meta)
+            return 0, room
 
     return drawers_added, room
 
@@ -911,6 +1002,7 @@ def mine(
             agent=agent,
             dry_run=dry_run,
             closets_col=closets_col,
+            palace_path=palace_path,
         )
         if drawers == 0 and not dry_run:
             files_skipped += 1

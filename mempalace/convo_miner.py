@@ -8,6 +8,8 @@ Normalizes format, chunks by exchange pair (Q+A = one unit), files to palace.
 Same palace as project mining. Different ingest strategy.
 """
 
+import contextlib
+import logging
 import os
 import sys
 import hashlib
@@ -19,10 +21,33 @@ from .normalize import normalize
 from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
+    PalaceWriteLockTimeout,
     file_already_mined,
     get_collection,
     mine_lock,
+    palace_write_lock,
 )
+
+logger = logging.getLogger(__name__)
+
+# Cross-process palace write lock timeout. Mirrors miner.py and mcp_server.py.
+_PALACE_WRITE_LOCK_TIMEOUT_S = 30.0
+
+
+@contextlib.contextmanager
+def _maybe_palace_write_lock(palace_path):
+    """Acquire palace_write_lock, or yield a no-op if palace_path is None.
+
+    Lets ``_file_chunks_locked`` and ``_register_file`` be safely invoked
+    by legacy callers (or unit tests) that pass a bare collection without
+    a palace path. Production paths always pass one — this fallback only
+    preserves the pre-Wave-2 behaviour (per-file ``mine_lock`` only).
+    """
+    if palace_path is None:
+        yield
+        return
+    with palace_write_lock(palace_path, timeout=_PALACE_WRITE_LOCK_TIMEOUT_S):
+        yield
 
 
 # Cached hall keywords — avoids re-reading config per drawer
@@ -65,29 +90,54 @@ MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # use also scales with source size.
 
 
-def _register_file(collection, source_file: str, wing: str, agent: str):
+def _register_file(
+    collection,
+    source_file: str,
+    wing: str,
+    agent: str,
+    palace_path: str | None = None,
+):
     """Write a sentinel so file_already_mined() returns True for 0-chunk files.
 
     Without this, files that normalize to nothing or produce zero chunks are
     re-read and re-processed on every mine run because nothing was written to
     ChromaDB on the first pass.
+
+    The sentinel write is a single ``upsert``; it must run inside the
+    per-palace write lock so it does not race other concurrent writers
+    holding ``palace_write_lock``. ``PalaceWriteLockTimeout`` is logged and
+    swallowed — failure to register a sentinel just means the empty/short
+    file gets retried on the next mine run, no crash.
     """
     sentinel_id = f"_reg_{hashlib.sha256(source_file.encode()).hexdigest()[:24]}"
-    collection.upsert(
-        documents=[f"[registry] {source_file}"],
-        ids=[sentinel_id],
-        metadatas=[
-            {
-                "wing": wing,
-                "room": "_registry",
-                "source_file": source_file,
-                "added_by": agent,
-                "filed_at": datetime.now().isoformat(),
-                "ingest_mode": "registry",
-                "normalize_version": NORMALIZE_VERSION,
-            }
-        ],
-    )
+    try:
+        with _maybe_palace_write_lock(palace_path):
+            try:
+                collection.refresh_for_write()
+            except AttributeError:
+                pass
+            collection.upsert(
+                documents=[f"[registry] {source_file}"],
+                ids=[sentinel_id],
+                metadatas=[
+                    {
+                        "wing": wing,
+                        "room": "_registry",
+                        "source_file": source_file,
+                        "added_by": agent,
+                        "filed_at": datetime.now().isoformat(),
+                        "ingest_mode": "registry",
+                        "normalize_version": NORMALIZE_VERSION,
+                    }
+                ],
+            )
+    except PalaceWriteLockTimeout as exc:
+        logger.error(
+            "palace write lock timeout while registering %s: %s — sentinel skipped, "
+            "the file will be re-processed on the next mine run",
+            source_file,
+            exc,
+        )
 
 
 # =============================================================================
@@ -306,14 +356,33 @@ def scan_convos(convo_dir: str) -> list:
 # =============================================================================
 
 
-def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extract_mode):
+def _file_chunks_locked(
+    collection,
+    source_file,
+    chunks,
+    wing,
+    room,
+    agent,
+    extract_mode,
+    palace_path: str | None = None,
+):
     """Lock the source file, purge stale drawers, and upsert fresh chunks.
 
-    Combines the per-file serialization that prevents concurrent agents from
-    duplicating work (via mine_lock) with the normalize-version rebuild
-    contract (purge-before-insert so pre-v2 drawers don't survive).
+    Two-tier locking — see miner.process_file for the full contract:
+        mine_lock(source_file)              # outer — per-file dedup
+            palace_write_lock(palace_path)  # inner — palace-wide HNSW gate
 
-    Returns (drawers_added, room_counts_delta, skipped).
+    The mine_lock prevents two miners from racing the SAME file (would
+    duplicate drawers if both passed file_already_mined() then both
+    upserted). The palace_write_lock prevents two miners working on
+    DIFFERENT files from racing ChromaDB's HNSW writer (would corrupt
+    segment files). Both are required.
+
+    Returns (drawers_added, room_counts_delta, skipped). On
+    ``PalaceWriteLockTimeout`` returns ``(0, {}, True)`` so the caller
+    treats the file the same way as "already filed" — we skip cleanly
+    and the next mine run will retry without losing progress on
+    sibling files.
     """
     room_counts_delta: dict = defaultdict(int)
     drawers_added = 0
@@ -324,42 +393,68 @@ def _file_chunks_locked(collection, source_file, chunks, wing, room, agent, extr
         if file_already_mined(collection, source_file):
             return 0, room_counts_delta, True
 
-        # Purge stale drawers first. When the normalize schema bumps,
-        # file_already_mined() returned False for pre-v2 drawers — clean
-        # them out so the source doesn't end up with mixed old/new drawers.
+        # ── Critical section: refresh + purge + upsert under the per-palace
+        # lock. Order is mine_lock (outer) → palace_write_lock (inner).
         try:
-            collection.delete(where={"source_file": source_file})
-        except Exception:
-            pass
+            with _maybe_palace_write_lock(palace_path):
+                # Discard any stale chromadb client state before this batch.
+                # MUST be inside the palace_write_lock to be effective.
+                try:
+                    collection.refresh_for_write()
+                except AttributeError:
+                    # Older backend or test fake without refresh_for_write —
+                    # safe to skip (lock still serialises writers, the only
+                    # missing piece is in-memory cache invalidation).
+                    pass
 
-        for chunk in chunks:
-            chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
-            if extract_mode == "general":
-                room_counts_delta[chunk_room] += 1
-            drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
-            try:
-                collection.upsert(
-                    documents=[chunk["content"]],
-                    ids=[drawer_id],
-                    metadatas=[
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "hall": _detect_hall_cached(chunk["content"]),
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": datetime.now().isoformat(),
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                            "normalize_version": NORMALIZE_VERSION,
-                        }
-                    ],
-                )
-                drawers_added += 1
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    raise
+                # Purge stale drawers first. When the normalize schema bumps,
+                # file_already_mined() returned False for pre-v2 drawers — clean
+                # them out so the source doesn't end up with mixed old/new drawers.
+                try:
+                    collection.delete(where={"source_file": source_file})
+                except Exception:
+                    pass
+
+                for chunk in chunks:
+                    chunk_room = (
+                        chunk.get("memory_type", room) if extract_mode == "general" else room
+                    )
+                    if extract_mode == "general":
+                        room_counts_delta[chunk_room] += 1
+                    drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+                    try:
+                        collection.upsert(
+                            documents=[chunk["content"]],
+                            ids=[drawer_id],
+                            metadatas=[
+                                {
+                                    "wing": wing,
+                                    "room": chunk_room,
+                                    "hall": _detect_hall_cached(chunk["content"]),
+                                    "source_file": source_file,
+                                    "chunk_index": chunk["chunk_index"],
+                                    "added_by": agent,
+                                    "filed_at": datetime.now().isoformat(),
+                                    "ingest_mode": "convos",
+                                    "extract_mode": extract_mode,
+                                    "normalize_version": NORMALIZE_VERSION,
+                                }
+                            ],
+                        )
+                        drawers_added += 1
+                    except Exception as e:
+                        if "already exists" not in str(e).lower():
+                            raise
+        except PalaceWriteLockTimeout as exc:
+            logger.error(
+                "palace write lock timeout for %s: %s — skipping this file, "
+                "next mine run will retry",
+                source_file,
+                exc,
+            )
+            # Treat as "skipped" so the caller continues with the next file
+            # instead of crashing the whole mine run.
+            return 0, defaultdict(int), True
     return drawers_added, room_counts_delta, False
 
 
@@ -417,12 +512,12 @@ def mine_convos(
             content = normalize(str(filepath))
         except (OSError, ValueError):
             if not dry_run:
-                _register_file(collection, source_file, wing, agent)
+                _register_file(collection, source_file, wing, agent, palace_path=palace_path)
             continue
 
         if not content or len(content.strip()) < MIN_CHUNK_SIZE:
             if not dry_run:
-                _register_file(collection, source_file, wing, agent)
+                _register_file(collection, source_file, wing, agent, palace_path=palace_path)
             continue
 
         # Chunk — either exchange pairs or general extraction
@@ -440,7 +535,7 @@ def mine_convos(
 
         if not chunks:
             if not dry_run:
-                _register_file(collection, source_file, wing, agent)
+                _register_file(collection, source_file, wing, agent, palace_path=palace_path)
             continue
 
         # Detect room from content (general mode uses memory_type instead)
@@ -470,10 +565,19 @@ def mine_convos(
         if extract_mode != "general":
             room_counts[room] += 1
 
-        # Lock + purge stale + file fresh chunks. Lock serializes concurrent
-        # agents; purge removes pre-v2 drawers so the schema bump applies.
+        # Lock + purge stale + file fresh chunks. Per-file mine_lock
+        # serializes same-source agents; per-palace palace_write_lock
+        # serializes cross-source writes against ChromaDB's HNSW writer.
+        # Purge removes pre-v2 drawers so the schema bump applies.
         drawers_added, room_delta, skipped = _file_chunks_locked(
-            collection, source_file, chunks, wing, room, agent, extract_mode
+            collection,
+            source_file,
+            chunks,
+            wing,
+            room,
+            agent,
+            extract_mode,
+            palace_path=palace_path,
         )
         if skipped:
             files_skipped += 1
