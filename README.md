@@ -66,13 +66,13 @@ LiteLLM proxy setup. See [INSTALL.md](INSTALL.md) for details.
 If you're using Claude Code, Codex, or Cursor, paste this one-liner into the chat:
 
 ```
-请按照 https://github.com/Scorpion1221/mempalace/blob/main/docs/INSTALL-FOR-AGENTS.md 的步骤帮我安装 MemPalace
+请按照 https://github.com/Scorpion1221/mempalace/blob/dev/docs/INSTALL-FOR-AGENTS.md 的步骤帮我安装 MemPalace
 ```
 
 Or in English:
 
 ```
-Please install MemPalace by following https://github.com/Scorpion1221/mempalace/blob/main/docs/INSTALL-FOR-AGENTS.md
+Please install MemPalace by following https://github.com/Scorpion1221/mempalace/blob/dev/docs/INSTALL-FOR-AGENTS.md
 ```
 
 Your AI assistant will fetch the guide, ask 3 questions (which agent? Gemini API
