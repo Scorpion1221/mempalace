@@ -2809,7 +2809,7 @@ def llm_rerank(
 
     session_blocks = []
     for rank, idx in enumerate(candidates):
-        text = corpus[idx][:500].replace("\n", " ").strip()
+        text = corpus[idx].replace("\n", " ").strip()
         session_blocks.append(f"Session {rank + 1}:\n{text}")
 
     sessions_text = "\n\n".join(session_blocks)
