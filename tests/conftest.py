@@ -22,8 +22,21 @@ for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
     _original_env[_var] = os.environ.get(_var)
 
 # Ensure tests use the default (local) embedding and no LLM recall,
-# not any API-based config from the user's shell environment.
-for _embed_var in ("MEMPAL_EMBEDDING_MODEL", "MEMPAL_RECALL_LLM"):
+# not any API-based config from the user's shell environment. The probe
+# in recall_llm.is_enabled() reads endpoint+model from MEMPAL_LLM_* (or
+# legacy MEMPAL_RECALL_*) — strip both forms so probe-based default-on
+# does not accidentally trigger LLM calls in tests.
+for _embed_var in (
+    "MEMPAL_EMBEDDING_MODEL",
+    "MEMPAL_LLM",
+    "MEMPAL_LLM_ENDPOINT",
+    "MEMPAL_LLM_MODEL",
+    "MEMPAL_LLM_KEY",
+    "MEMPAL_RECALL_LLM",
+    "MEMPAL_RECALL_ENDPOINT",
+    "MEMPAL_RECALL_MODEL",
+    "MEMPAL_RECALL_KEY",
+):
     _original_env[_embed_var] = os.environ.pop(_embed_var, None)
 
 os.environ["HOME"] = _session_tmp

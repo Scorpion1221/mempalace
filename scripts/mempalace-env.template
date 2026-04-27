@@ -23,14 +23,21 @@ export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"
 export MEMPAL_EMBEDDING_ENDPOINT="http://127.0.0.1:4000"
 export MEMPAL_EMBEDDING_KEY="sk-litellm-local"
 
-# --- Recall LLM (save extraction + recall gate) ---
-# The quartet gates both async save (Stop hook) and recall rewrite/rerank
-# (UserPromptSubmit hook + sessionStart on Cursor). Missing any → async
-# save silently drops buffered turns; recall falls back to raw vector search.
-export MEMPAL_RECALL_LLM="1"
-export MEMPAL_RECALL_ENDPOINT="http://127.0.0.1:4000/v1"
-export MEMPAL_RECALL_MODEL="gemini-3.1-flash-lite-preview"
-export MEMPAL_RECALL_KEY="sk-litellm-local"
+# --- LLM endpoint (shared by async-save + recall enhancement) ---
+# One LLM, two jobs: extracting drawer/diary/KG/tunnels in the Stop hook
+# AND rewriting/reranking queries in UserPromptSubmit. Default-on whenever
+# endpoint+model are set; missing endpoint→ async save silently skips and
+# recall falls back to raw vector search. To force off: MEMPAL_LLM=0.
+export MEMPAL_LLM_ENDPOINT="http://127.0.0.1:4000/v1"
+export MEMPAL_LLM_MODEL="gemini-3.1-flash-lite-preview"
+export MEMPAL_LLM_KEY="sk-litellm-local"
+
+# Legacy aliases (still read by recall_llm.py for backward compat) —
+# safe to leave commented unless you want to override the canonical
+# values above without changing them.
+# export MEMPAL_RECALL_ENDPOINT="http://127.0.0.1:4000/v1"
+# export MEMPAL_RECALL_MODEL="gemini-3.1-flash-lite-preview"
+# export MEMPAL_RECALL_KEY="sk-litellm-local"
 
 # --- Platform-specific (optional) ---
 # macOS: LiteLLM's HTTPS egress needs a CA bundle path on some installs.

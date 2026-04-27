@@ -2093,7 +2093,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         except Exception:
             pass
 
-        # --- LLM-enhanced recall (opt-in via MEMPAL_RECALL_LLM=1) ---
+        # --- LLM-enhanced recall (default-on; opt-out via MEMPAL_LLM=0) ---
         llm_config = None
         search_query = query
         if previous_assistant_tail:
@@ -2407,8 +2407,9 @@ class MemPalaceMemoryProvider(MemoryProvider):
 
         if not is_enabled():
             logger.info(
-                "hermes-llm-save: LLM recall disabled (MEMPAL_RECALL_LLM not set); "
-                "buffered %d turns for session=%s trigger=%s not persisted",
+                "hermes-llm-save: LLM disabled (no endpoint configured or "
+                "MEMPAL_LLM=0); buffered %d turns for session=%s trigger=%s "
+                "not persisted",
                 len(meaningful),
                 state.session_id,
                 trigger,
