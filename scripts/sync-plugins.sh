@@ -63,6 +63,11 @@ smart_copy_hook() {
     local src="$1" dst="$2"
     if [ ! -f "$dst" ]; then
         cp "$src" "$dst"
+        chmod +x "$dst"  # hook scripts MUST be executable — agents invoke
+                         # them directly (no `bash script.sh`), so missing
+                         # +x → exit 126 ("Permission denied"). Defensive:
+                         # if the source was somehow shipped without +x
+                         # (cp preserves mode), force the bit on every copy.
         echo "  → $(basename "$dst") (new)"
         return
     fi
@@ -75,6 +80,7 @@ smart_copy_hook() {
         fi
     done < <(grep '^export ' "$dst" 2>/dev/null || true)
     cp "$src" "$dst"
+    chmod +x "$dst"  # see new-file branch above for rationale.
     if [ -n "$saved_lines" ]; then
         while IFS= read -r line; do
             [ -z "$line" ] && continue
