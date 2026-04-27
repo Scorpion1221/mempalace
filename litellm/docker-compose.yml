@@ -1,15 +1,17 @@
 services:
   litellm:
-    # Pin a stable tag so `docker compose pull` doesn't silently swap the proxy.
     image: ghcr.io/berriai/litellm:main-v1.55.0-stable
     container_name: mempalace-litellm
     restart: unless-stopped
     ports:
-      # Bind to localhost only — this proxy has an API key and should not
-      # be reachable from the LAN.
+      # Localhost-only — the master_key is a convenience, not a real secret,
+      # and the upstream Gemini/Vertex credentials are worth protecting.
       - "127.0.0.1:4000:4000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      # Mount host gcloud config so Vertex AI ADC works without baking a
+      # service-account key into the image. Ignored by backend (A).
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
     env_file:
       - .env
     command: --config /app/config.yaml --port 4000 --num_workers 2

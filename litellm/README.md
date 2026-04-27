@@ -2,21 +2,50 @@
 
 MemPalace uses Gemini for both embedding (palace vectorisation) and the recall
 LLM (rerank + save extraction). This directory ships a minimal LiteLLM proxy
-that wraps the Gemini API behind an OpenAI-compatible endpoint on port 4000 —
-matching the defaults in `scripts/mempalace-env.template`.
+that wraps Gemini behind an OpenAI-compatible endpoint on port 4000 — matching
+the defaults in `scripts/mempalace-env.template`.
 
 ## Quick start
 
 ```bash
 cd litellm
-cp .env.example .env
-# edit .env and paste your GEMINI_API_KEY (from https://aistudio.google.com/apikey)
-docker compose up -d
-curl http://127.0.0.1:4000/health/readiness  # should return 200
+bash setup.sh
 ```
 
-That's it. MemPalace's default `~/.mempalace/env` points to `http://127.0.0.1:4000`
-with master key `sk-litellm-local`, so everything wires up automatically.
+The script auto-detects existing LiteLLM installs (Docker or Python), creates
+`.env` from the template if missing, validates backend alignment, and starts
+the proxy. On first run it'll prompt you to edit `.env` and add your
+`GEMINI_API_KEY` (get one at https://aistudio.google.com/apikey).
+
+MemPalace's default `~/.mempalace/env` points to `http://127.0.0.1:4000` with
+master key `sk-litellm-local`, so everything wires up automatically once the
+proxy is running.
+
+## Backends
+
+Two ways to reach Gemini. Pick one in `.env`:
+
+### (A) Gemini API (default — simplest)
+
+```bash
+# .env
+GEMINI_API_KEY=your-key-here
+```
+
+### (B) GCP Vertex AI (for orgs already on GCP)
+
+```bash
+# .env
+VERTEXAI_PROJECT=your-gcp-project-id
+VERTEXAI_LOCATION=us-central1
+# plus ONE auth method:
+#   - mounted gcloud ADC (default — docker-compose.yml mounts ~/.config/gcloud)
+#   - GOOGLE_APPLICATION_CREDENTIALS=/secrets/sa-key.json
+```
+
+Then edit `config.yaml`: comment out the `gemini/*` model entries and
+uncomment the `vertex_ai/*` ones. `setup.sh` checks alignment and complains
+if you forget.
 
 ## What this provides
 

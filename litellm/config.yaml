@@ -10,45 +10,88 @@
 #   MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1
 #   MEMPAL_*_KEY=sk-litellm-local   (the master_key below)
 #
-# Requires a Gemini API key — put it in litellm/.env as GEMINI_API_KEY=...
+# ─── Backend selection ──────────────────────────────────────────────────────
+# Two ways to reach Gemini. Uncomment ONE pair and comment out the other.
+#
+#   (A) Gemini API — simplest. Requires GEMINI_API_KEY in litellm/.env.
+#       Get a key at https://aistudio.google.com/apikey
+#
+#   (B) GCP Vertex AI — for orgs already on GCP. Requires
+#       VERTEXAI_PROJECT + VERTEXAI_LOCATION in litellm/.env, and either
+#         - GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json  (service account), or
+#         - host-level `gcloud auth application-default login`  (ADC)
+#       The docker-compose.yml mounts ~/.config/gcloud so ADC works inside
+#       the container without baking credentials into the image.
+#
+# The dimension warning at the bottom applies to BOTH backends.
 
 model_list:
-  # --- Embedding (required — palace vectorisation) ---
+  # ─── (A) Gemini API backend ──────────────────────────────────────────────
   - model_name: gemini-embedding-2-preview
     litellm_params:
       model: gemini/gemini-embedding-001
       api_key: os.environ/GEMINI_API_KEY
-      # 3072 dims — MUST match the dimension the palace was initialised with.
-      # Changing this after the palace exists silently breaks every upsert.
-      output_dimensionality: 3072
+      output_dimensionality: 3072  # see "Dimension warning" at bottom
 
-  # --- Recall LLM (recall rewrite + rerank + async save extraction) ---
   - model_name: gemini-3.1-flash-lite-preview
     litellm_params:
       model: gemini/gemini-2.5-flash-lite
       api_key: os.environ/GEMINI_API_KEY
 
-  # --- Optional: Flash (higher quality rerank, higher cost) ---
   - model_name: gemini-2.5-flash
     litellm_params:
       model: gemini/gemini-2.5-flash
       api_key: os.environ/GEMINI_API_KEY
 
-  # --- Optional: Pro (max quality, for benchmarks) ---
   - model_name: gemini-2.5-pro
     litellm_params:
       model: gemini/gemini-2.5-pro
       api_key: os.environ/GEMINI_API_KEY
 
+  # ─── (B) Vertex AI backend — uncomment to use instead of (A) ────────────
+  # Duplicate entries with the same model_name are NOT allowed; comment out
+  # the matching (A) entry above when enabling a (B) entry below.
+  #
+  # - model_name: gemini-embedding-2-preview
+  #   litellm_params:
+  #     model: vertex_ai/gemini-embedding-001
+  #     vertex_project: os.environ/VERTEXAI_PROJECT
+  #     vertex_location: os.environ/VERTEXAI_LOCATION
+  #     output_dimensionality: 3072
+  #
+  # - model_name: gemini-3.1-flash-lite-preview
+  #   litellm_params:
+  #     model: vertex_ai/gemini-2.5-flash-lite
+  #     vertex_project: os.environ/VERTEXAI_PROJECT
+  #     vertex_location: os.environ/VERTEXAI_LOCATION
+  #
+  # - model_name: gemini-2.5-flash
+  #   litellm_params:
+  #     model: vertex_ai/gemini-2.5-flash
+  #     vertex_project: os.environ/VERTEXAI_PROJECT
+  #     vertex_location: os.environ/VERTEXAI_LOCATION
+  #
+  # - model_name: gemini-2.5-pro
+  #   litellm_params:
+  #     model: vertex_ai/gemini-2.5-pro
+  #     vertex_project: os.environ/VERTEXAI_PROJECT
+  #     vertex_location: os.environ/VERTEXAI_LOCATION
+
 litellm_settings:
   drop_params: true
-  # Cache embedding calls (same text → same vector) to save cost on re-ingest.
   cache: true
   cache_params:
     type: local
-    ttl: 86400  # 24h
+    ttl: 86400  # 24h — embedding of the same text hits cache
 
 general_settings:
   # Master key — clients authenticate as Bearer sk-litellm-local.
   # Change this to something random in production, and update ~/.mempalace/env.
   master_key: sk-litellm-local
+
+# ─── Dimension warning ──────────────────────────────────────────────────────
+# MemPalace stores embeddings in ChromaDB with a fixed dimensionality. The
+# palace is initialised with whatever dimension the first embedding call
+# returns. Changing `output_dimensionality` after the palace exists will
+# silently break every upsert — ChromaDB rejects vectors with the wrong dim.
+# If you must change it, wipe ~/.mempalace/palace/ and re-ingest.
