@@ -22,6 +22,7 @@ from .palace import (
     SKIP_DIRS,
     PalaceWriteLockTimeout,
     build_closet_lines,
+    ensure_palace_initialized,
     file_already_mined,
     get_closets_collection,
     get_collection,
@@ -951,6 +952,20 @@ def mine(
     include_ignored: list = None,
 ):
     """Mine a project directory into the palace."""
+
+    # Bootstrap the ChromaDB schema before any read/write touches the palace.
+    # Cheap no-op when sqlite already exists; only the very first parallel
+    # mine against a brand-new palace pays the lock cost. ``dry_run`` mines
+    # never open the palace, so skip the bootstrap there.
+    if not dry_run:
+        try:
+            ensure_palace_initialized(palace_path)
+        except PalaceWriteLockTimeout as exc:
+            logger.warning(
+                "palace bootstrap timed out (non-fatal): %s; continuing — "
+                "the first ChromaDB write will retry",
+                exc,
+            )
 
     project_path = Path(project_dir).expanduser().resolve()
     config = load_config(project_dir)

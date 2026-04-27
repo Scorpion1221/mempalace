@@ -58,7 +58,11 @@ from .config import (  # noqa: E402
 )
 from .version import __version__  # noqa: E402
 from .backends.chroma import ChromaBackend, ChromaCollection  # noqa: E402
-from .palace import PalaceWriteLockTimeout, palace_write_lock  # noqa: E402
+from .palace import (  # noqa: E402
+    PalaceWriteLockTimeout,
+    ensure_palace_initialized,
+    palace_write_lock,
+)
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
@@ -1915,6 +1919,21 @@ def _run_startup_health_check():
 def main():
     _restore_stdout()
     _start_socket_listener()
+    # Bootstrap the ChromaDB schema BEFORE the health check (or any other
+    # code) opens the palace. Prevents the first-open race where N MCP
+    # servers spinning up against a brand-new palace each fire CREATE TABLE
+    # statements concurrently and N-1 crash. Idempotent — fast no-op once
+    # chroma.sqlite3 exists.
+    try:
+        ensure_palace_initialized(_config.palace_path)
+    except PalaceWriteLockTimeout as exc:
+        sys.stderr.write(
+            f"[mempalace] palace bootstrap timed out (non-fatal): {exc}\n"
+            "  Another writer is holding palace_write_lock. "
+            "Continuing — first write will retry.\n"
+        )
+    except Exception as exc:
+        sys.stderr.write(f"[mempalace] palace bootstrap failed (non-fatal): {exc}\n")
     _run_startup_health_check()
     logger.info("MemPalace MCP Server starting...")
     while True:

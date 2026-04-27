@@ -22,6 +22,7 @@ from .palace import (
     NORMALIZE_VERSION,
     SKIP_DIRS,
     PalaceWriteLockTimeout,
+    ensure_palace_initialized,
     file_already_mined,
     get_collection,
     mine_lock,
@@ -473,6 +474,20 @@ def mine_convos(
         "exchange" — default exchange-pair chunking (Q+A = one unit)
         "general"  — general extractor: decisions, preferences, milestones, problems, emotions
     """
+
+    # Bootstrap the ChromaDB schema before opening the palace. Cheap no-op
+    # once chroma.sqlite3 exists; the slow path runs at most once per palace
+    # across all concurrent first-time openers. ``dry_run`` mines never
+    # touch the palace, so skip the bootstrap there.
+    if not dry_run:
+        try:
+            ensure_palace_initialized(palace_path)
+        except PalaceWriteLockTimeout as exc:
+            logger.warning(
+                "palace bootstrap timed out (non-fatal): %s; continuing — "
+                "the first ChromaDB write will retry",
+                exc,
+            )
 
     convo_path = Path(convo_dir).expanduser().resolve()
     if not wing:

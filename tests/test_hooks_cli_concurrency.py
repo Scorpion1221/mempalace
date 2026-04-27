@@ -204,12 +204,29 @@ class TestRefreshForWriteOrdering:
             f"no chroma write recorded; order={order}"
         )
 
-        lock_in = order.index("lock_in")
+        # The async save worker may take palace_write_lock more than once
+        # (the H-1 bootstrap helper acquires it on the slow path). The
+        # ordering contract we care about is around the WRITES: the lock
+        # acquisition that contains refresh_for_write must precede the
+        # first add/upsert and end after the last write. Anchor on the
+        # write events instead of ``order.index`` so the assertion stays
+        # meaningful with any number of preceding bootstrap acquisitions.
         refresh = order.index("refresh_for_write")
         first_write = min(i for i, ev in enumerate(order) if ev in ("add", "upsert"))
-        lock_out = order.index("lock_out")
+        last_write = max(i for i, ev in enumerate(order) if ev in ("add", "upsert"))
 
-        assert lock_in < refresh < first_write < lock_out, (
+        # Find the lock_in immediately preceding refresh_for_write, and the
+        # lock_out immediately following the last write.
+        prior_lock_ins = [i for i, ev in enumerate(order[:refresh]) if ev == "lock_in"]
+        assert prior_lock_ins, f"refresh_for_write not preceded by any lock_in: {order}"
+        write_lock_in = prior_lock_ins[-1]
+        following_lock_outs = [
+            i + last_write + 1 for i, ev in enumerate(order[last_write + 1 :]) if ev == "lock_out"
+        ]
+        assert following_lock_outs, f"no lock_out after final write: {order}"
+        write_lock_out = following_lock_outs[0]
+
+        assert write_lock_in < refresh < first_write <= last_write < write_lock_out, (
             f"refresh did not run inside lock before first write: {order}"
         )
 

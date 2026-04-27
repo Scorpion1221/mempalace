@@ -295,6 +295,55 @@ def _reader_loop(
         )
 
 
+def _first_open_writer(
+    palace_path: str,
+    worker_id: int,
+    result_path: str,
+) -> None:
+    """Subprocess target for the first-open race regression test.
+
+    Calls ``ensure_palace_initialized`` against a brand-new palace (no
+    pre-init in the parent) and immediately performs one tiny write. If
+    the H-1 fix regresses, ChromaDB's ``CREATE TABLE collections`` race
+    surfaces here — N-1 workers crash with
+    ``InternalError: table collections already exists``.
+    """
+    outcome: dict = {"worker_id": worker_id, "pid": os.getpid()}
+    fixed_embedding = [0.1] * 384
+    try:
+        from mempalace.backends.chroma import ChromaBackend
+        from mempalace.palace import (
+            ensure_palace_initialized,
+            palace_write_lock as _lock,
+        )
+
+        ensure_palace_initialized(palace_path, timeout=60.0)
+
+        backend = ChromaBackend()
+        col = backend.get_collection(palace_path, "mempalace_drawers", create=True)
+        with _lock(palace_path, timeout=30.0):
+            col.refresh_for_write()
+            col.upsert(
+                ids=[f"first_open_w{worker_id}"],
+                documents=[f"first-open drawer worker {worker_id}"],
+                metadatas=[
+                    {
+                        "wing": "first_open_test",
+                        "room": "race_check",
+                        "added_by": "first_open_writer",
+                        "worker_id": worker_id,
+                    }
+                ],
+                embeddings=[fixed_embedding],
+            )
+        outcome["status"] = "ok"
+    except Exception as exc:
+        outcome["status"] = "error"
+        outcome["error_type"] = type(exc).__name__
+        outcome["error_message"] = str(exc)
+    Path(result_path).write_text(json.dumps(outcome))
+
+
 def _hold_lock_then_block(
     palace_path: str,
     ready_path: str,
@@ -325,29 +374,21 @@ def _wait_for(path: Path, timeout: float = 10.0) -> bool:
 
 
 def _ensure_palace_initialised(palace_path: str) -> None:
-    """Pre-create the chromadb collection in the parent before spawning workers.
+    """Bootstrap the palace before spawning workers.
 
-    Realistic production setup: by the time six MCP servers attach to the
-    palace, ``~/.mempalace/palace/chroma.sqlite3`` already exists from a
-    prior ``mempalace init`` or from the first server's startup. Letting
-    every subprocess race the initial ``PersistentClient`` open exposes a
-    different race (chromadb's internal ``CREATE TABLE collections`` is
-    not idempotent across concurrent first-opens) which lives below the
-    palace_write_lock layer and is documented as a finding in the Wave 3
-    review. Pre-creating the palace lets these tests focus on the write
-    paths that the lock IS supposed to protect.
+    Historically this helper pre-created the collection in the parent
+    process to dodge the chromadb ``CREATE TABLE collections`` first-open
+    race, which lives below ``palace_write_lock`` and is now fixed at the
+    source by ``mempalace.palace.ensure_palace_initialized`` (issue H-1).
 
-    Initialised with NO embedding function so the workers (which also
-    skip the embedding pipeline to avoid downloading the ONNX model on
-    every spawn) can attach without a dimensionality mismatch.
+    The remaining tests in this file focus on the write-side concurrency
+    contract (lock + refresh + WAL), so we still want a fully-initialised
+    palace before spawning workers — but we route that through the same
+    helper production code uses, instead of replicating it here.
     """
-    from mempalace.backends.chroma import ChromaBackend
+    from mempalace.palace import ensure_palace_initialized
 
-    backend = ChromaBackend()
-    col = backend.get_collection(palace_path, "mempalace_drawers", create=True)
-    # Touch the collection so the underlying segments exist on disk
-    # before any subprocess tries to open them.
-    _ = col.count()
+    ensure_palace_initialized(palace_path)
 
 
 def _join_all(procs, timeout=60.0):
@@ -377,6 +418,73 @@ def _read_results(result_paths):
 
 
 # ── Tests ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.stress
+def test_concurrent_first_open_does_not_race(tmp_path):
+    """6 processes opening a brand-new palace simultaneously — none should crash.
+
+    Regression test for issue H-1. Prior to ``ensure_palace_initialized``,
+    chromadb's internal ``CREATE TABLE collections`` (no ``IF NOT EXISTS``)
+    raced when N processes constructed ``PersistentClient`` against a
+    palace whose ``chroma.sqlite3`` did not yet exist. The loser raised
+    ``InternalError: table collections already exists`` and crashed.
+
+    The bootstrap helper serializes that first-open via
+    ``palace_write_lock`` so all callers see an initialised schema by the
+    time they touch the palace. This test deliberately does NO pre-init
+    in the parent — every subprocess must survive the race on its own.
+    """
+    palace = tmp_path / "fresh_palace"
+    # NO pre-init. The brand-new palace must survive the race.
+    assert not palace.exists()
+
+    n_workers = 6
+    procs: list = []
+    result_paths: list = []
+    for worker_id in range(n_workers):
+        rp = tmp_path / f"first_open_w{worker_id}.json"
+        result_paths.append(rp)
+        proc = _MP_CTX.Process(
+            target=_first_open_writer,
+            args=(str(palace), worker_id, str(rp)),
+        )
+        proc.start()
+        procs.append(proc)
+
+    _join_all(procs, timeout=120.0)
+
+    # Every subprocess must exit cleanly. A regression of H-1 surfaces
+    # here as exitcode != 0 from N-1 workers.
+    for i, p in enumerate(procs):
+        assert not p.is_alive(), f"first-open worker {i} hung"
+        assert p.exitcode == 0, f"first-open worker {i} exit code = {p.exitcode}"
+
+    # And every worker must have reported success — the assertion that
+    # would catch a chromadb-only crash that didn't propagate to exitcode.
+    results = _read_results(result_paths)
+    for i, res in enumerate(results):
+        assert "missing" not in res, f"first-open worker {i} produced no result file"
+        assert res.get("status") == "ok", (
+            f"first-open worker {i} reported {res.get('error_type')}: {res.get('error_message')}"
+        )
+
+    # The palace must contain all 6 writes — proves bootstrap actually
+    # produced a usable schema, not just a half-initialised file.
+    from mempalace.palace import get_collection
+
+    col = get_collection(str(palace), create=False)
+    assert col.count() >= n_workers, (
+        f"expected >= {n_workers} drawers after first-open race, got {col.count()}"
+    )
+
+    # Health check rules out any segment-level corruption that the simple
+    # count assertion above could miss.
+    report = check_palace_health(palace)
+    assert report.status == "ok", (
+        f"palace health after first-open race = {report.status}; "
+        f"issues: {[i.code for i in report.issues]}"
+    )
 
 
 @pytest.mark.stress

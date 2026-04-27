@@ -1144,6 +1144,27 @@ def _async_save_worker(transcript_text, session_id, cwd):
         everything (drained or not) to the WAL for the next worker.
     """
     try:
+        # Bootstrap ChromaDB schema BEFORE any code opens the palace.
+        # Prevents the first-open CREATE TABLE race when N async save
+        # workers fire against a brand-new palace concurrently. Idempotent
+        # fast no-op once chroma.sqlite3 exists — the slow path runs at
+        # most once per palace.
+        try:
+            from .config import MempalaceConfig as _BootstrapConfig
+            from .palace import (
+                PalaceWriteLockTimeout as _BootstrapTimeout,
+                ensure_palace_initialized,
+            )
+
+            ensure_palace_initialized(_BootstrapConfig().palace_path)
+        except _BootstrapTimeout as bootstrap_exc:
+            _log(
+                f"async save: palace bootstrap timed out ({bootstrap_exc}) — "
+                "continuing; the first write will retry"
+            )
+        except Exception as bootstrap_exc:
+            _log(f"async save: palace bootstrap failed ({bootstrap_exc}) — continuing")
+
         from .recall_llm import _get_llm_config, _call_llm
 
         config = _get_llm_config()

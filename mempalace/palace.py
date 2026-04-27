@@ -372,6 +372,26 @@ def palace_write_lock(palace_path: str | Path, timeout: float = 30.0):
     ``palace_path``, so two different palaces NEVER block each other, while
     symlinks and relative paths to the SAME palace map to the same lock.
 
+    Scope — what this lock does NOT cover:
+        This lock guards ChromaDB HNSW segment writes only. Other palace
+        state has its own locking and does NOT participate in
+        ``palace_write_lock``:
+
+          - Tunnel JSON (``~/.mempalace/tunnels.json``): protected by
+            ``mine_lock(_TUNNEL_FILE)`` — see ``palace_graph.create_tunnel``
+            and ``palace_graph.delete_tunnel``.
+          - Knowledge graph SQLite (``~/.mempalace/knowledge_graph.sqlite3``):
+            protected by ``KnowledgeGraph``'s internal ``threading.Lock``
+            plus ``PRAGMA journal_mode=WAL`` for cross-process readers —
+            see ``knowledge_graph.py``. Note: the threading.Lock only
+            protects in-process concurrent threads; cross-process safety
+            relies on SQLite's WAL + ``timeout=10`` retry, not on this lock.
+          - Verbatim source files held by the miner: protected by
+            ``mine_lock(source_file)`` — see ``miner.process_file``.
+
+        Callers writing to those stores do NOT need to acquire
+        ``palace_write_lock``. Callers writing to ChromaDB MUST acquire it.
+
     Args:
         palace_path: Path to the palace directory (any form — absolute,
             relative, or symlink — is normalised via ``Path.resolve()``).
@@ -440,6 +460,67 @@ def palace_write_lock(palace_path: str | Path, timeout: float = 30.0):
             lf.close()
         except Exception:
             pass
+
+
+def ensure_palace_initialized(palace_path: str | Path, timeout: float = 30.0) -> None:
+    """Idempotently ensure the ChromaDB palace schema exists. Safe for concurrent callers.
+
+    Why: ChromaDB's ``PersistentClient.__init__`` runs internal ``CREATE TABLE``
+    statements that race when N processes initialize a brand-new palace
+    simultaneously (the loser raises
+    ``InternalError: table collections already exists``). This helper
+    serializes the first-open via ``palace_write_lock`` — after the first
+    successful call, subsequent calls are cheap no-ops because
+    ``chroma.sqlite3`` already exists and ChromaDB's idempotency suffices.
+
+    MUST be called at writer entry points (MCP server startup, miner
+    ``main()``, ``async_save_worker`` startup) BEFORE any other code attempts
+    to open the palace.
+
+    Idempotent: safe to call multiple times, by multiple processes, in any
+    order.
+
+    Args:
+        palace_path: Directory that holds (or will hold) ``chroma.sqlite3``.
+        timeout: Maximum seconds to wait for ``palace_write_lock`` on the
+            slow path. The fast path (sqlite already present and non-empty)
+            never takes the lock, so contention is bounded to the very
+            first race per palace.
+
+    Raises:
+        PalaceWriteLockTimeout: If the slow-path lock could not be
+            acquired within ``timeout`` seconds. Callers SHOULD log and
+            continue rather than crash — the next invocation will retry.
+    """
+    palace_path = Path(palace_path).resolve()
+
+    # Fast path: a non-empty chroma.sqlite3 means the schema is initialized.
+    # Skip the lock entirely so this helper is essentially free after the
+    # first successful run on any given palace.
+    sqlite_path = palace_path / "chroma.sqlite3"
+    if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
+        return
+
+    # Slow path: take the cross-process lock and bootstrap exactly once.
+    palace_path.mkdir(parents=True, exist_ok=True)
+    with palace_write_lock(palace_path, timeout=timeout):
+        # Re-check inside the lock — another process may have just
+        # bootstrapped while we were waiting on the lock.
+        if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
+            return
+        # Force ChromaDB to create the schema. ``list_collections`` is the
+        # cheapest call that triggers full schema initialization without
+        # creating any user-visible collections.
+        import chromadb
+
+        client = chromadb.PersistentClient(path=str(palace_path))
+        client.list_collections()
+        # Drop the strong reference so ChromaDB releases its memory map
+        # before this function returns. Python's refcount-based GC reclaims
+        # the client immediately on the ``del`` (no cycles, see the
+        # ``_client_for_write`` docstring on why ``gc.collect()`` is
+        # unnecessary here).
+        del client
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:
