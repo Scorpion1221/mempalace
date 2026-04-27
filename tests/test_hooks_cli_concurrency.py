@@ -368,6 +368,64 @@ class TestRecoveryWalIdempotent:
         assert any(r["args"].get("id") == "second" for r in recs2 if r["op"] == "diary")
 
 
+# ── 6b. Recovery WAL is drained on the next successful save ───────────
+
+
+class TestRecoveryWalDrainedOnNextSave:
+    def test_async_save_worker_drains_pending_wal_during_normal_save(
+        self, isolated_palace, patched_llm
+    ):
+        """The next successful ``_async_save_worker`` run drains pending WAL files.
+
+        End-to-end shape: a pending WAL file is planted, the worker runs
+        normally (no lock contention), and afterwards the WAL file is gone
+        AND its records are present in the palace alongside the new
+        payload. This is the round-trip that closes the "100% recall" gap.
+        """
+        rec_dir = recovery_wal.recovery_dir_for_palace(isolated_palace)
+        rec_dir.mkdir(parents=True, exist_ok=True)
+
+        # Plant a single-drawer WAL file via the public helper so the
+        # filename / palace_id derivation matches the worker's view.
+        pending_doc = "wal-pending-drawer " + ("p" * 40)
+        recovery_wal.persist_records(
+            isolated_palace,
+            [
+                {
+                    "op": "drawer",
+                    "args": {
+                        "id": "drawer_pending_recovery_xyz",
+                        "document": pending_doc,
+                        "metadata": {
+                            "wing": "wal_wing",
+                            "room": "wal_room",
+                            "added_by": "wal_test",
+                        },
+                    },
+                }
+            ],
+        )
+        assert len(list(rec_dir.glob("*.jsonl"))) == 1
+
+        hooks_cli._async_save_worker(
+            transcript_text="content for the LLM " + ("z" * 40),
+            session_id="drain-on-normal-save",
+            cwd="/tmp/drainnormalproject",
+        )
+
+        # Drainer removed the WAL file.
+        assert list(rec_dir.glob("*.jsonl")) == [], "drainer should have removed the WAL file"
+
+        # The drained drawer is now in the palace.
+        from mempalace.palace import get_collection
+
+        col = get_collection(isolated_palace, create=True)
+        docs = col.get(include=["documents"])["documents"]
+        assert any(pending_doc in d for d in docs), (
+            f"drained WAL drawer missing from palace; have: {docs}"
+        )
+
+
 # ── 7. Clean exit on lock timeout ─────────────────────────────────────
 
 

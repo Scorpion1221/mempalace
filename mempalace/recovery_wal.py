@@ -22,22 +22,27 @@ Format note: ``palace_id`` is the first 16 hex chars of
 ``palace_write_lock`` so operators can correlate lock filenames with
 recovery directories.
 
-TODO(wave-3): Add a drainer that ``_async_save_worker`` calls at startup
-to replay any orphaned recovery files from previous runs. Until that
-lands, files in this directory must be replayed manually (or by a future
-``mempalace repair --replay-recovery`` command). They are NEVER deleted
-automatically — losing orphaned writes silently is the bug we're trying
-to prevent.
+Drainer: ``drain_recovery_wal`` replays pending files into the palace
+via a caller-supplied ``apply_records`` callback. ``_async_save_worker``
+invokes the drainer at startup (inside its own ``palace_write_lock``)
+so orphaned payloads land in the palace before the new payload is
+processed. ``mempal drain-recovery`` exposes the same operation as a
+manual CLI command.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
+import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _palace_id(palace_path: str | Path) -> str:
@@ -139,3 +144,182 @@ def persist_async_save_payload(
         # logging).
         records.append({"op": "empty", "args": {"reason": "lock_timeout_no_payload"}})
     return persist_records(palace_path, records, pid=pid)
+
+
+# ── Drainer ────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class DrainResult:
+    """Outcome of a ``drain_recovery_wal`` invocation.
+
+    Frozen by design — once returned, the caller should not mutate it; a
+    fresh result is produced per drain pass. ``failures`` lists the
+    files that errored along with a short error message so operators
+    can decide whether to retry, edit, or delete.
+    """
+
+    palace_path: Path
+    files_processed: int
+    files_failed: int
+    records_replayed: int
+    failures: list[tuple[Path, str]] = field(default_factory=list)
+    duration_seconds: float = 0.0
+
+
+def list_pending(palace_path: str | Path) -> list[Path]:
+    """Return the recovery WAL files for ``palace_path``, oldest first.
+
+    Returns an empty list when the recovery directory does not exist —
+    a fresh palace with no orphaned payloads is the common case and
+    must NOT raise.
+    """
+    rec_dir = recovery_dir_for_palace(palace_path)
+    if not rec_dir.is_dir():
+        return []
+    try:
+        files = [p for p in rec_dir.iterdir() if p.is_file() and p.suffix == ".jsonl"]
+    except OSError:
+        return []
+    # mtime ascending = oldest first; ties are broken by name (which encodes
+    # an ISO timestamp + pid so it is also monotonic in practice).
+    files.sort(key=lambda p: (p.stat().st_mtime, p.name))
+    return files
+
+
+def _read_jsonl_records(path: Path) -> list[dict]:
+    """Read JSONL records from ``path``, skipping malformed lines.
+
+    Behavior decision (documented in the module docstring): a single
+    malformed line is logged and SKIPPED, but the rest of the file
+    still drains. Rationale — losing 99 valid records to recover from
+    one corrupt line would be a worse violation of the "100% recall"
+    promise than the corrupt line itself.
+
+    Raises:
+        OSError: when the file cannot be opened (caller treats as a
+            per-file failure and leaves the file on disk for retry).
+    """
+    records: list[dict] = []
+    with open(path, "r", encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, start=1):
+            line = raw.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                logger.warning(
+                    "recovery_wal: skipping malformed line %d in %s: %s",
+                    lineno,
+                    path,
+                    exc,
+                )
+                continue
+    return records
+
+
+def drain_recovery_wal(
+    palace_path: str | Path,
+    *,
+    apply_records: Callable[[list[dict]], None],
+    timeout_per_file_s: float = 30.0,  # noqa: ARG001 — reserved for future use
+) -> DrainResult:
+    """Replay all pending recovery WAL files for ``palace_path``.
+
+    For each file (oldest first):
+
+    1. Read all JSONL records (malformed lines are skipped per the
+       behavior documented in ``_read_jsonl_records``).
+    2. Call ``apply_records(records)`` — caller is responsible for the
+       actual ChromaDB / KG / tunnel writes and MUST already hold
+       ``palace_write_lock`` when those writes need to be serialised.
+    3. On success, delete the file.
+    4. On failure, log the error, leave the file in place, and continue
+       with the next file.
+
+    Returns a ``DrainResult``. Per-file errors NEVER raise (the whole
+    point of the WAL is durability across crashes); only programmer
+    errors — like an unset ``apply_records`` — propagate.
+
+    The ``timeout_per_file_s`` parameter is reserved for a future
+    implementation that could enforce a hard wall-clock cap per file;
+    today it is documented but unused so the signature is stable.
+    """
+    if apply_records is None:  # programmer error, not a runtime fault
+        raise TypeError("drain_recovery_wal requires apply_records callback")
+
+    palace = Path(palace_path)
+    started = time.monotonic()
+    pending = list_pending(palace)
+
+    files_processed = 0
+    files_failed = 0
+    records_replayed = 0
+    failures: list[tuple[Path, str]] = []
+
+    for path in pending:
+        try:
+            records = _read_jsonl_records(path)
+        except OSError as exc:
+            files_failed += 1
+            failures.append((path, f"read failed: {exc!r}"))
+            logger.warning("recovery_wal: cannot read %s: %s", path, exc)
+            continue
+
+        if not records:
+            # Empty file (or only-malformed) — drop it so it does not
+            # accumulate. There is nothing to replay; failing to delete
+            # would leave operational noise without value.
+            try:
+                path.unlink()
+                files_processed += 1
+            except OSError as exc:
+                files_failed += 1
+                failures.append((path, f"unlink (empty file) failed: {exc!r}"))
+                logger.warning("recovery_wal: could not unlink empty %s: %s", path, exc)
+            continue
+
+        try:
+            apply_records(records)
+        except Exception as exc:  # pragma: no cover - exercised via tests
+            files_failed += 1
+            failures.append((path, f"apply failed: {exc!r}"))
+            logger.warning(
+                "recovery_wal: apply_records failed for %s: %s; leaving file on disk for retry",
+                path,
+                exc,
+            )
+            continue
+
+        try:
+            path.unlink()
+        except OSError as exc:
+            # The records DID land — but we couldn't remove the file.
+            # Treat as a failure so the operator is alerted, otherwise
+            # the next drain would re-apply the same records (causing
+            # duplicates). The downstream writes are idempotent (drawers
+            # are upserted by ID, tunnels are dedup'd by canonical ID,
+            # KG triples short-circuit on identical-current matches),
+            # so the practical impact is small but worth flagging.
+            files_failed += 1
+            failures.append((path, f"unlink failed after apply: {exc!r}"))
+            logger.warning(
+                "recovery_wal: applied %d records but could not unlink %s: %s",
+                len(records),
+                path,
+                exc,
+            )
+            continue
+
+        files_processed += 1
+        records_replayed += len(records)
+
+    return DrainResult(
+        palace_path=palace,
+        files_processed=files_processed,
+        files_failed=files_failed,
+        records_replayed=records_replayed,
+        failures=failures,
+        duration_seconds=time.monotonic() - started,
+    )

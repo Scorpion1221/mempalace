@@ -385,8 +385,7 @@ def cmd_repair(args):
     # Try to read existing drawers
     ef = get_embedding_function()
     try:
-        col = backend.get_collection(palace_path, "mempalace_drawers",
-                                      embedding_function=ef)
+        col = backend.get_collection(palace_path, "mempalace_drawers", embedding_function=ef)
         total = col.count()
         print(f"  Drawers found: {total}")
     except Exception as e:
@@ -434,8 +433,7 @@ def cmd_repair(args):
 
     print("  Rebuilding collection...")
     backend.delete_collection(palace_path, "mempalace_drawers")
-    new_col = backend.create_collection(palace_path, "mempalace_drawers",
-                                        embedding_function=ef)
+    new_col = backend.create_collection(palace_path, "mempalace_drawers", embedding_function=ef)
 
     filed = 0
     for i in range(0, len(all_ids), batch_size):
@@ -517,6 +515,123 @@ def _cmd_repair_rebuild_from_verbatim(args):
     sys.exit(0)
 
 
+def cmd_drain_recovery(args):
+    """Replay orphaned recovery WAL files into the palace.
+
+    Background: when ``_async_save_worker`` (the stop-hook's background
+    writer) cannot acquire ``palace_write_lock`` within its budget, it
+    persists the unwritten payload to ``~/.mempalace/recovery/<id>/``
+    instead of dropping it on the floor. Those files are normally
+    drained automatically on the next successful save, but operators
+    can replay them manually here — useful when the next save is far
+    in the future or when debugging stuck writers.
+
+    Exit codes:
+        0 = success (even if some files failed — partial drain is success)
+        2 = palace path does not exist
+    """
+    palace_path = os.path.abspath(
+        os.path.expanduser(args.palace) if args.palace else MempalaceConfig().palace_path
+    )
+
+    if not os.path.isdir(palace_path):
+        print(f"\n  No palace directory at {palace_path}", file=sys.stderr)
+        sys.exit(2)
+
+    from .recovery_wal import drain_recovery_wal, list_pending, recovery_dir_for_palace
+
+    pending = list_pending(palace_path)
+
+    print(f"\n{'=' * 55}")
+    print("  MemPalace Recovery Drain")
+    print(f"{'=' * 55}\n")
+    print(f"  Palace:          {palace_path}")
+    print(f"  Recovery dir:    {recovery_dir_for_palace(palace_path)}")
+    print(f"  Pending files:   {len(pending)}")
+
+    if not pending:
+        print("\n  Nothing to drain.")
+        sys.exit(0)
+
+    if args.dry_run:
+        print("\n  DRY RUN — files would be replayed in this order:")
+        import json as _json
+
+        for p in pending:
+            try:
+                line_count = sum(
+                    1 for line in p.read_text(encoding="utf-8").splitlines() if line.strip()
+                )
+            except OSError as exc:
+                line_count = -1
+                print(f"    {p.name}  (cannot read: {exc})")
+                continue
+            print(f"    {p.name}  ({line_count} record(s))")
+            # Show op breakdown so operators can sanity-check before draining.
+            try:
+                ops: dict[str, int] = {}
+                for raw in p.read_text(encoding="utf-8").splitlines():
+                    raw = raw.strip()
+                    if not raw:
+                        continue
+                    try:
+                        rec = _json.loads(raw)
+                    except _json.JSONDecodeError:
+                        ops["<malformed>"] = ops.get("<malformed>", 0) + 1
+                        continue
+                    op = rec.get("op", "<missing op>")
+                    ops[op] = ops.get(op, 0) + 1
+                if ops:
+                    parts = ", ".join(f"{k}={v}" for k, v in sorted(ops.items()))
+                    print(f"      ops: {parts}")
+            except OSError:
+                pass
+        print("\n  (dry run — nothing applied)")
+        sys.exit(0)
+
+    # Real drain.
+    from .palace import PalaceWriteLockTimeout, get_collection, palace_write_lock
+    from .hooks_cli import _replay_recovery_records
+
+    print("\n  Draining...")
+    try:
+        with palace_write_lock(palace_path, timeout=30.0):
+            col = get_collection(palace_path, create=True)
+            try:
+                col.refresh_for_write()
+            except AttributeError:
+                pass
+            from datetime import datetime as _dt
+
+            now = _dt.now()
+            result = drain_recovery_wal(
+                palace_path,
+                apply_records=lambda recs: _replay_recovery_records(recs, col, now),
+            )
+    except PalaceWriteLockTimeout:
+        print(
+            "  ERROR: could not acquire palace_write_lock within 30s. "
+            "Another writer is busy — try again shortly.",
+            file=sys.stderr,
+        )
+        sys.exit(0)  # ops command — busy palace is not a hard failure
+
+    print(f"  Files processed: {result.files_processed}")
+    print(f"  Files failed:    {result.files_failed}")
+    print(f"  Records:         {result.records_replayed}")
+    print(f"  Duration:        {result.duration_seconds:.2f}s")
+
+    if result.failures:
+        print("\n  Failures (file left on disk for retry):")
+        for path, err in result.failures[:10]:
+            print(f"    {path.name}: {err}")
+        if len(result.failures) > 10:
+            print(f"    ... and {len(result.failures) - 10} more")
+
+    print(f"\n{'=' * 55}\n")
+    sys.exit(0)
+
+
 def cmd_hook(args):
     """Run hook logic: reads JSON from stdin, outputs JSON to stdout."""
     from .hooks_cli import run_hook
@@ -578,8 +693,7 @@ def cmd_compress(args):
     backend = ChromaBackend()
     ef = get_embedding_function()
     try:
-        col = backend.get_collection(palace_path, "mempalace_drawers",
-                                      embedding_function=ef)
+        col = backend.get_collection(palace_path, "mempalace_drawers", embedding_function=ef)
     except Exception:
         print(f"\n  No palace found at {palace_path}")
         print("  Run: mempalace init <dir> then mempalace mine <dir>")
@@ -654,8 +768,9 @@ def cmd_compress(args):
     # Store compressed versions (unless dry-run)
     if not args.dry_run:
         try:
-            comp_col = backend.get_or_create_collection(palace_path, "mempalace_compressed",
-                                                        embedding_function=ef)
+            comp_col = backend.get_or_create_collection(
+                palace_path, "mempalace_compressed", embedding_function=ef
+            )
             for doc_id, compressed, meta, stats in compressed_entries:
                 comp_meta = dict(meta)
                 comp_meta["compression_ratio"] = round(stats["size_ratio"], 1)
@@ -930,6 +1045,20 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # drain-recovery
+    p_drain = sub.add_parser(
+        "drain-recovery",
+        help=(
+            "Replay orphaned recovery WAL files (from async_save_worker "
+            "lock timeouts) into the palace"
+        ),
+    )
+    p_drain.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="List pending files and record counts without applying",
+    )
+
     args = parser.parse_args()
 
     if not args.command:
@@ -966,6 +1095,7 @@ def main():
         "doctor": cmd_doctor,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "drain-recovery": cmd_drain_recovery,
     }
     dispatch[args.command](args)
 

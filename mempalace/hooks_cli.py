@@ -1133,6 +1133,15 @@ def _async_save_worker(transcript_text, session_id, cwd):
         to ``~/.mempalace/recovery/<palace_id>/`` so the next successful
         run can drain it. We exit cleanly (rc=0) so the stop hook chain
         is not disrupted.
+
+    Drainer (Wave 3):
+        Before processing the new payload, the worker drains any pending
+        recovery WAL files for this palace via ``drain_recovery_wal``.
+        Both the drain and the new payload run inside the same
+        ``palace_write_lock`` acquisition so writers see them as one
+        logical save unit. If the drain pre-flight times out we silently
+        skip it — the new payload's own try/except will then send
+        everything (drained or not) to the WAL for the next worker.
     """
     try:
         from .recall_llm import _get_llm_config, _call_llm
@@ -1287,6 +1296,12 @@ def _async_save_worker(transcript_text, session_id, cwd):
                     # Older backend / test fake without refresh_for_write —
                     # safe to skip; the lock alone still serialises writers.
                     pass
+
+                # Drain orphaned recovery WAL files first so they land in
+                # the palace before the new payload is processed. Drain +
+                # new payload share this single lock acquisition so other
+                # workers cannot interleave between the two.
+                _drain_recovery_wal_safely(cfg.palace_path, col, now)
 
                 stats = _async_save_apply_writes(
                     col=col,
@@ -1449,6 +1464,110 @@ def _async_save_apply_auto_tunnels(saved_pairs: list, col) -> int:
         return 0
 
 
+def _drain_recovery_wal_safely(palace_path, col, now) -> None:
+    """Drain pending recovery WAL files into ``col``, swallowing per-file errors.
+
+    Called from inside ``_async_save_worker``'s ``palace_write_lock``
+    block. ``apply_records`` writes via the shared ``_async_save_apply_*``
+    helpers, so the drained payload commits under the same lock as the
+    new payload. Failures are logged and the offending file is left on
+    disk for retry by a future worker (the WAL is the recovery
+    boundary — losing data here would defeat its purpose).
+    """
+    try:
+        from .recovery_wal import drain_recovery_wal
+    except Exception as exc:  # pragma: no cover - defensive
+        _log(f"async save: drainer unavailable, skipping: {exc}")
+        return
+
+    try:
+        result = drain_recovery_wal(
+            palace_path,
+            apply_records=lambda recs: _replay_recovery_records(recs, col, now),
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        _log(f"async save: recovery WAL drain raised unexpectedly: {exc}")
+        return
+
+    if result.records_replayed > 0 or result.files_processed > 0:
+        msg = (
+            f"[mempalace.async_save] drained {result.files_processed} "
+            f"recovery file(s) ({result.records_replayed} record(s)) "
+            f"in {result.duration_seconds:.2f}s"
+        )
+        try:
+            sys.stderr.write(msg + "\n")
+        except Exception:
+            pass
+        _log(msg)
+    if result.files_failed > 0:
+        for path, err in result.failures:
+            _log(f"async save: recovery drain left {path} on disk: {err}")
+
+
+def _replay_recovery_records(records: list[dict], col, now) -> None:
+    """Apply a flat list of WAL records against an already-locked collection.
+
+    Splits the records by ``op`` into the four buckets the existing
+    ``_async_save_apply_*`` helpers expect, then dispatches to them.
+    Reuses the live writers so a future schema change to the writers
+    is automatically inherited by the drainer.
+
+    Records with unrecognised ``op`` (e.g. ``"context"`` metadata,
+    ``"empty"`` markers) are skipped — they were always informational.
+    """
+    diary_record: dict | None = None
+    drawer_records: list[dict] = []
+    kg_facts: list[dict] = []
+    tunnels: list[dict] = []
+
+    for rec in records:
+        op = rec.get("op")
+        args = rec.get("args") or {}
+        if op == "diary":
+            # First diary wins; subsequent diaries inside the same WAL
+            # file are extremely rare (one save → one diary by design),
+            # so a single record per save is the realistic shape.
+            diary_record = diary_record or args
+        elif op == "drawer":
+            drawer_records.append(args)
+        elif op == "kg_triple":
+            kg_facts.append(args)
+        elif op == "tunnel":
+            tunnels.append(args)
+        # other ops (context, empty, unknown) are intentionally skipped
+
+    # Compute saved_pairs the same way _async_save_apply_writes does so
+    # the auto-tunnel pass sees the rooms we're about to upsert.
+    saved_pairs: list = []
+
+    if diary_record is not None:
+        col.add(
+            ids=[diary_record["id"]],
+            documents=[diary_record["document"]],
+            metadatas=[diary_record.get("metadata", {})],
+        )
+
+    for rec in drawer_records:
+        col.upsert(
+            ids=[rec["id"]],
+            documents=[rec["document"]],
+            metadatas=[rec.get("metadata", {})],
+        )
+        meta = rec.get("metadata") or {}
+        wing = meta.get("wing")
+        room = meta.get("room")
+        if wing and room:
+            saved_pairs.append((wing, room))
+
+    if kg_facts:
+        _async_save_apply_kg(kg_facts, now)
+    if tunnels:
+        _async_save_apply_tunnels(tunnels)
+    if saved_pairs:
+        _async_save_apply_auto_tunnels(saved_pairs, col)
+
+
 def _persist_async_save_to_recovery(
     palace_path,
     *,
@@ -1463,13 +1582,9 @@ def _persist_async_save_to_recovery(
 
     Strips internal-only fields (``_pair``) so the on-disk record is
     portable. Logs to stderr (visible in the spawning hook chain) and to
-    the hook log so operators can find orphaned payloads.
-
-    TODO(wave-3): pair this with a drainer that ``_async_save_worker``
-    invokes at startup, so orphaned recovery files are replayed
-    automatically on the next successful save instead of requiring a
-    manual replay or the future ``mempalace repair --replay-recovery``
-    command.
+    the hook log so operators can find orphaned payloads. The WAL is
+    drained on the next successful ``_async_save_worker`` run, or
+    manually via ``mempal drain-recovery``.
     """
     from .recovery_wal import persist_async_save_payload
 
