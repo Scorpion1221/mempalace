@@ -53,24 +53,56 @@ else
   fail "python3 not found"
 fi
 
-# ─── Step 2: CLI on PATH ───
-MEMPALACE_BIN="$(python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))")/mempalace"
-if command -v mempalace &>/dev/null; then
-  ok "CLI already on PATH: $(which mempalace)"
-elif [[ -f "$MEMPALACE_BIN" ]]; then
-  # Try ~/.local/bin first (no sudo), fall back to /usr/local/bin
-  if [[ -d "$HOME/.local/bin" ]] && echo "$PATH" | grep -q "$HOME/.local/bin"; then
-    ln -sf "$MEMPALACE_BIN" "$HOME/.local/bin/mempalace"
-    ok "CLI symlinked: ~/.local/bin/mempalace"
-  elif [[ -w /usr/local/bin ]]; then
-    ln -sf "$MEMPALACE_BIN" /usr/local/bin/mempalace
-    ok "CLI symlinked: /usr/local/bin/mempalace"
-  else
-    warn "CLI not on PATH. Add manually: ln -s $MEMPALACE_BIN ~/.local/bin/mempalace"
+# ─── Step 2: CLI + MCP server on PATH ───
+# Two binaries get installed by `pip install -e .`:
+#   - mempalace      (CLI)       — terminal use, ~/.local/bin is fine
+#   - mempalace-mcp  (MCP server) — spawned by GUI Claude Code / Cursor /
+#                                   Hermes via launchd, which does NOT see
+#                                   ~/.pyenv/shims or ~/.local/bin. Must
+#                                   live under /usr/local/bin (or similar
+#                                   path that launchd resolves).
+PY_SCRIPT_DIR="$(python3 -c "import sysconfig; print(sysconfig.get_path('scripts'))")"
+
+install_symlink() {
+  local name="$1"
+  local src="$PY_SCRIPT_DIR/$name"
+  local prefer_system="$2"  # "system" = must be /usr/local/bin for launchd visibility
+
+  if [[ ! -f "$src" ]]; then
+    warn "$name binary not found at $src"
+    return 1
   fi
-else
-  warn "CLI binary not found at $MEMPALACE_BIN"
-fi
+
+  if [[ "$prefer_system" == "system" ]]; then
+    # MCP server — needs to be in launchd's default PATH
+    if [[ -w /usr/local/bin ]]; then
+      ln -sf "$src" "/usr/local/bin/$name"
+      ok "$name symlinked: /usr/local/bin/$name"
+    elif sudo -n true 2>/dev/null; then
+      sudo ln -sf "$src" "/usr/local/bin/$name"
+      ok "$name symlinked: /usr/local/bin/$name (via sudo)"
+    else
+      warn "$name needs /usr/local/bin for GUI Claude Code / Cursor / Hermes."
+      warn "  Run manually: sudo ln -sf $src /usr/local/bin/$name"
+    fi
+  else
+    # CLI — terminal use, either location works
+    if command -v "$name" &>/dev/null; then
+      ok "$name already on PATH: $(which "$name")"
+    elif [[ -d "$HOME/.local/bin" ]] && echo "$PATH" | grep -q "$HOME/.local/bin"; then
+      ln -sf "$src" "$HOME/.local/bin/$name"
+      ok "$name symlinked: ~/.local/bin/$name"
+    elif [[ -w /usr/local/bin ]]; then
+      ln -sf "$src" "/usr/local/bin/$name"
+      ok "$name symlinked: /usr/local/bin/$name"
+    else
+      warn "$name not on PATH. Add manually: ln -s $src ~/.local/bin/$name"
+    fi
+  fi
+}
+
+install_symlink "mempalace" ""          # CLI — flexible
+install_symlink "mempalace-mcp" "system" # MCP — must be in launchd PATH
 
 # ─── Step 3: Initialize palace if needed ───
 if [[ ! -d "$HOME/.mempalace/palace" ]]; then
