@@ -265,6 +265,47 @@ if not re.search(r'^\[plugins\."mempalace"\]', content, re.MULTILINE):
     content += "\n[plugins.\"mempalace\"]\nenabled = true\n"
     print("  → registered [plugins.\"mempalace\"] enabled = true")
 
+# 0c. [shell_environment_policy.set] — bootstrap with env populated if
+#     missing. Without this, fresh Codex configs fail [7/8] validation
+#     with all "Codex (shell): MEMPAL_* is missing" errors — the upserter
+#     at step 2 silently skips because re.search returns None.
+#
+#     Note: we populate the bootstrapped block with the env vars directly
+#     instead of writing an empty block + relying on the upserter. The
+#     upserter substitutes group(2) of `(\[...\])([^\[]*)` — group(2)
+#     starts right after the `]` and has no leading `\n`, so an empty
+#     bootstrap produces `[shell_environment_policy.set]MEMPAL_FOO=...`
+#     (invalid TOML) when the upserter writes back. Pre-populating sidesteps
+#     the regex's missing-leading-newline behavior; the upserter then
+#     processes a non-empty body correctly.
+if not re.search(r'^\[shell_environment_policy\.set\]', content, re.MULTILINE):
+    if content and not content.endswith("\n"):
+        content += "\n"
+    content += "\n[shell_environment_policy.set]\n"
+    for v in vars_to_set:
+        val = env_vals.get(v, "")
+        if val:
+            content += f'{v} = "{val}"\n'
+    print("  → bootstrapped [shell_environment_policy.set] block (populated)")
+
+# 0d. [features].codex_hooks = true — Codex's hooks are gated behind this
+#     feature flag. Without it, the hooks.json events (UserPromptSubmit,
+#     SessionStart, Stop) won't fire even though hooks.json is on disk.
+#     Idempotent: only adds if not already mentioned (preserves an explicit
+#     `codex_hooks = false` if a user has intentionally disabled it).
+features_match = re.search(r'^\[features\]([^\[]*)', content, re.MULTILINE | re.DOTALL)
+if features_match:
+    if not re.search(r'^\s*codex_hooks\s*=', features_match.group(1), re.MULTILINE):
+        body = features_match.group(1).rstrip("\n")
+        new_body = body + "\ncodex_hooks = true\n\n"
+        content = content[:features_match.start(1)] + new_body + content[features_match.end(1):]
+        print("  → added codex_hooks = true to existing [features] block")
+else:
+    if content and not content.endswith("\n"):
+        content += "\n"
+    content += "\n[features]\ncodex_hooks = true\n"
+    print("  → bootstrapped [features] block with codex_hooks = true")
+
 # 1. [mcp_servers.mempalace] env = { ... } — one-line inline table.
 #    Rebuild the inline value entirely since single-line TOML is painful to
 #    partial-edit.
