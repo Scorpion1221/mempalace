@@ -532,10 +532,10 @@ fi
 # compatibility settings are read). So we merge our hook entries into the
 # user-scoped hooks.json with absolute paths to the plugin's hook script.
 HOOK_CMD="$CURSOR_PLUGIN/hooks/mempal-hook.sh"
-python3 - <<PYEOF
+CURSOR_HOOKS_JSON_PATH="$CURSOR_HOOKS_JSON" HOOK_CMD_PATH="$HOOK_CMD" python3 - <<'PYEOF'
 import json, os, pathlib
-path = pathlib.Path("$CURSOR_HOOKS_JSON")
-hook_cmd = "$HOOK_CMD"
+path = pathlib.Path(os.environ["CURSOR_HOOKS_JSON_PATH"])
+hook_cmd = os.environ["HOOK_CMD_PATH"]
 if path.exists():
     with open(path) as f:
         cfg = json.load(f)
