@@ -49,13 +49,15 @@ else
     done
 fi
 
-# Vars REQUIRED to be present + non-empty in ~/.mempalace/env. Only canonical
-# MEMPAL_LLM_* / MEMPAL_EMBEDDING_*. Legacy MEMPAL_RECALL_* aliases are
-# still HONORED at runtime by mempalace.recall_llm for backward compat — but
-# they are NOT required, NOT validated, and NOT propagated by this sync. A
-# fresh install never needs to set them. Extra SSL_CERT_FILE handled separately.
-PROPAGATED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY \
-MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY"
+# Vars propagated from ~/.mempalace/env into each agent's native config.
+# REQUIRED_VARS must be non-empty or the script aborts (embedding is needed
+# for any palace operation). OPTIONAL_VARS are propagated when set but their
+# absence is tolerated — offline / Path D installs intentionally leave them
+# empty. Legacy MEMPAL_RECALL_* aliases are still honored at runtime but are
+# NOT propagated or validated here.
+REQUIRED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY"
+OPTIONAL_VARS="MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY"
+PROPAGATED_VARS="$REQUIRED_VARS $OPTIONAL_VARS"
 
 # Smart copy: preserve local env-var fallback defaults in hook scripts
 # (user's override survives a sync).
@@ -117,17 +119,30 @@ fi
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 MISSING=""
-for var in $PROPAGATED_VARS; do
+for var in $REQUIRED_VARS; do
     if [ -z "${!var:-}" ]; then
         MISSING="$MISSING $var"
     fi
 done
 if [ -n "$MISSING" ]; then
-    echo "  ⚠ After sourcing $ENV_FILE, these vars are still empty:$MISSING"
+    echo "  ⚠ After sourcing $ENV_FILE, these required vars are still empty:$MISSING"
     echo "    Edit $ENV_FILE and re-run. Aborting."
     exit 1
 fi
-echo "  ✓ 6 MEMPAL_* vars loaded from single source"
+OPTIONAL_MISSING=""
+for var in $OPTIONAL_VARS; do
+    if [ -z "${!var:-}" ]; then
+        OPTIONAL_MISSING="$OPTIONAL_MISSING $var"
+    fi
+done
+if [ -n "$OPTIONAL_MISSING" ]; then
+    echo "  ⚠ Optional LLM vars not set:$OPTIONAL_MISSING (offline mode — auto-save uses verbatim fallback)"
+fi
+LOADED_COUNT=0
+for var in $PROPAGATED_VARS; do
+    [ -n "${!var:-}" ] && LOADED_COUNT=$((LOADED_COUNT + 1))
+done
+echo "  ✓ $LOADED_COUNT MEMPAL_* vars loaded from single source"
 
 # --- [1/8] Python package snapshot install ----------------------------------
 echo "[1/8] Installing Python package (snapshot, not editable)..."
@@ -477,7 +492,8 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     # Upsert env vars into the launchd plist.
     if [ -f "$HERMES_PLIST" ]; then
         for var in $PROPAGATED_VARS; do
-            val="${!var}"
+            val="${!var:-}"
+            [ -z "$val" ] && continue
             # PlistBuddy's Add fails if key exists, Set fails if key doesn't.
             # Try Set first, fall back to Add.
             /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:$var $val" "$HERMES_PLIST" 2>/dev/null \
@@ -584,7 +600,9 @@ PYEOF
 # Push env vars into the macOS GUI session so Cursor (launched via
 # LaunchServices, which does NOT source ~/.zshrc) sees them.
 for var in $PROPAGATED_VARS; do
-    launchctl setenv "$var" "${!var}"
+    val="${!var:-}"
+    [ -z "$val" ] && continue
+    launchctl setenv "$var" "$val"
 done
 echo "  → 7 env vars set via launchctl (current GUI session)"
 
@@ -635,7 +653,7 @@ echo "[7/8] Validating env var propagation..."
 DRIFT=0
 check_agent_var() {
     local agent="$1" var="$2" actual="$3"
-    local expected="${!var}"
+    local expected="${!var:-}"
     if [ -z "$actual" ]; then
         echo "  ⚠ $agent: $var is missing"
         DRIFT=1
