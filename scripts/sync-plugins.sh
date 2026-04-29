@@ -491,8 +491,7 @@ with open(path, "w") as f:
 print("  → config.toml env upserted in [mcp_servers.mempalace] and [shell_environment_policy.set]")
 PYEOF
     else
-        echo "  ⚠ ~/.codex/config.toml not found — Codex CLI not installed?"
-        echo "    Install Codex first, then re-run: bash $REPO/scripts/sync-plugins.sh --codex"
+        echo "  → Codex CLI not detected (no ~/.codex/config.toml), skipping config.toml sync"
     fi
 fi
 
