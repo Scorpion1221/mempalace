@@ -627,16 +627,18 @@ PYEOF
 
 # Push env vars into the macOS GUI session so Cursor (launched via
 # LaunchServices, which does NOT source ~/.zshrc) sees them.
-for var in $PROPAGATED_VARS; do
-    val="${!var:-}"
-    [ -z "$val" ] && continue
-    launchctl setenv "$var" "$val"
-done
-echo "  → 7 env vars set via launchctl (current GUI session)"
+# This entire block is macOS-only (launchctl + LaunchAgents).
+if [ "$(uname)" = "Darwin" ]; then
+    for var in $PROPAGATED_VARS; do
+        val="${!var:-}"
+        [ -z "$val" ] && continue
+        launchctl setenv "$var" "$val"
+    done
+    echo "  → env vars set via launchctl (current GUI session)"
 
-# Persist across reboots via a LaunchAgent plist.
-ENV_PLIST="$HOME/Library/LaunchAgents/ai.mempalace.env.plist"
-python3 - <<PYEOF
+    # Persist across reboots via a LaunchAgent plist.
+    ENV_PLIST="$HOME/Library/LaunchAgents/ai.mempalace.env.plist"
+    python3 - <<PYEOF
 import os, plistlib
 path = "$ENV_PLIST"
 vars_to_set = "$PROPAGATED_VARS".split()
@@ -656,9 +658,10 @@ with open(path, "wb") as f:
     plistlib.dump(plist, f)
 print("  → wrote $ENV_PLIST (reapplies env on login)")
 PYEOF
-# Reload so the plist is active immediately.
-launchctl unload "$ENV_PLIST" 2>/dev/null || true
-launchctl load "$ENV_PLIST" 2>/dev/null || true
+    # Reload so the plist is active immediately.
+    launchctl unload "$ENV_PLIST" 2>/dev/null || true
+    launchctl load "$ENV_PLIST" 2>/dev/null || true
+fi
 fi
 
 # --- [6/8] Restart Hermes if running ----------------------------------------
@@ -743,11 +746,13 @@ if [ -f "$HERMES_PLIST" ]; then
     done
 fi
 
-# Cursor (launchctl)
-for var in $PROPAGATED_VARS; do
-    actual=$(launchctl getenv "$var" 2>/dev/null || echo "")
-    check_agent_var "Cursor (launchctl)" "$var" "$actual"
-done
+# Cursor (launchctl — macOS only)
+if [ "$(uname)" = "Darwin" ]; then
+    for var in $PROPAGATED_VARS; do
+        actual=$(launchctl getenv "$var" 2>/dev/null || echo "")
+        check_agent_var "Cursor (launchctl)" "$var" "$actual"
+    done
+fi
 
 if [ $DRIFT -eq 0 ]; then
     echo "  ✓ all agents match ~/.mempalace/env"
