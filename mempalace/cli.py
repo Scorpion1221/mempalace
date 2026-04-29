@@ -646,6 +646,17 @@ def cmd_instructions(args):
     run_instructions(name=args.name)
 
 
+def cmd_update(args):
+    """Pull latest code and sync plugins to installed agents."""
+    from .updater import check, update
+
+    if args.check:
+        check()
+        return
+    agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
+    update(agents=agents, tag=args.tag or None, pull=not args.no_pull)
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "mempalace-mcp"
@@ -1045,6 +1056,34 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # update
+    p_update = sub.add_parser(
+        "update",
+        help="Pull latest code and sync plugins to all installed agents",
+    )
+    p_update.add_argument(
+        "--check",
+        action="store_true",
+        help="Show what would change without touching anything",
+    )
+    p_update.add_argument(
+        "--agents",
+        type=str,
+        default="",
+        help="Comma-separated agent list (claude,codex,hermes,cursor). Default: auto-detect",
+    )
+    p_update.add_argument(
+        "--tag",
+        type=str,
+        default="",
+        help="Check out a specific tag instead of pulling the current branch",
+    )
+    p_update.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="Skip git pull, only re-run sync-plugins.sh",
+    )
+
     # drain-recovery
     p_drain = sub.add_parser(
         "drain-recovery",
@@ -1095,6 +1134,7 @@ def main():
         "doctor": cmd_doctor,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "update": cmd_update,
         "drain-recovery": cmd_drain_recovery,
     }
     dispatch[args.command](args)

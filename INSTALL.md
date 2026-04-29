@@ -220,12 +220,28 @@ using AAAK-compressed diary entries and verbatim drawers.
 
 ## Updating
 
-Since it's an editable install, Python code changes take effect immediately:
+```bash
+mempalace update              # git pull --rebase + sync all installed agents
+```
+
+The command auto-detects which agents are installed and only syncs those.
+Under the hood it runs `git pull --rebase` then `bash scripts/sync-plugins.sh`.
+
+Other useful flags:
+
+```bash
+mempalace update --check              # preview: what's behind, which agents will sync
+mempalace update --agents claude,codex  # only sync specific agents
+mempalace update --tag v3.3.308       # check out a specific release tag
+mempalace update --no-pull            # skip git pull, just re-sync plugins
+```
+
+**Manual fallback** (if `mempalace update` isn't available yet):
 
 ```bash
 cd ~/git/mempalace
 git pull
-bash scripts/sync-plugins.sh  # Sync plugin files to all agents
+bash scripts/sync-plugins.sh
 ```
 
 ## Development Workflow
