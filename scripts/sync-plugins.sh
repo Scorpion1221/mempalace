@@ -146,7 +146,13 @@ echo "  ✓ $LOADED_COUNT MEMPAL_* vars loaded from single source"
 
 # --- [1/8] Python package snapshot install ----------------------------------
 echo "[1/8] Installing Python package (snapshot, not editable)..."
-pip install --force-reinstall --no-deps "$REPO" -q 2>/dev/null
+if ! pip install --force-reinstall --no-deps "$REPO" -q 2>&1; then
+    echo "  ⚠ pip install failed. Trying with python3 -m pip..."
+    python3 -m pip install --force-reinstall --no-deps "$REPO" -q 2>&1 || {
+        echo "  ✗ Package install failed. Check pip / venv setup."
+        exit 1
+    }
+fi
 echo "  → $(python3 -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
 
 # --- [2/8] Claude Code: sync plugin cache + upsert env in settings.json -----
