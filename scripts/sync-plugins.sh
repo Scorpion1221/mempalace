@@ -415,9 +415,10 @@ else:
 
 # 1. [mcp_servers.mempalace] env = { ... } — one-line inline table.
 #    Rebuild the inline value entirely since single-line TOML is painful to
-#    partial-edit.
+#    partial-edit. The regex uses a lookahead to stop at section boundaries
+#    (newline + '[') without tripping on inline brackets like args = [].
 pairs = ", ".join(f'{k} = "{v}"' for k, v in env_vals.items() if v)
-m = re.search(r'(\[mcp_servers\.mempalace\][^\[]*?)env\s*=\s*\{[^}]*\}', content, re.DOTALL)
+m = re.search(r'(\[mcp_servers\.mempalace\](?:(?!\n\[)[^\n]|\n)*?)env\s*=\s*\{[^}]*\}', content, re.DOTALL)
 if m:
     content = content[:m.start()] + m.group(1) + "env = { " + pairs + " }" + content[m.end():]
 
