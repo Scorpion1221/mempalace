@@ -661,6 +661,9 @@ PYEOF
     # Reload so the plist is active immediately.
     launchctl unload "$ENV_PLIST" 2>/dev/null || true
     launchctl load "$ENV_PLIST" 2>/dev/null || true
+else
+    echo "  ℹ Linux: ensure ~/.mempalace/env is sourced in your shell profile"
+    echo "    so Cursor and other GUI-launched agents inherit MEMPAL_* vars."
 fi
 fi
 
