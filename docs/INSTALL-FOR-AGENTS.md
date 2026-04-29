@@ -23,12 +23,22 @@ Use `AskUserQuestion` to gather install configuration. Ask 2-3 questions:
   - "Hermes" (description: "Hermes agent — advanced users only")
 - Multi-select: true (user can pick multiple — e.g., Claude Code + Codex)
 
-**Question 2: Do you have a Gemini API key?**
-- Header: "LiteLLM Backend"
+**Question 2: How will MemPalace reach an LLM + embedding backend?**
+- Header: "LLM Backend"
 - Options:
-  - "Yes, I have a Gemini API key" (description: "Simplest path — get one at https://aistudio.google.com/apikey")
-  - "I use Vertex AI" (description: "For orgs already on Vertex — requires a service-account JSON file")
-  - "Not yet — I'll set it up later" (description: "Skip LiteLLM setup for now")
+  - "LiteLLM via Docker" (description: "Recommended — we ship templates, you bring a key (Gemini API or Vertex AI)")
+  - "LiteLLM via Python" (description: "Same config, no Docker — you manage the process yourself")
+  - "Bring my own endpoint" (description: "You already run vLLM / Ollama / OpenAI-compat gateway elsewhere")
+  - "Offline (no LLM)" (description: "Skip LLM stack entirely — auto-save still works in verbatim mode, recall falls back to MiniLM")
+
+If user picks "LiteLLM via Docker" or "LiteLLM via Python", ask follow-up
+sub-question for backend:
+
+**Question 2a: Gemini API or Vertex AI?**
+- Header: "LiteLLM Provider"
+- Options:
+  - "Gemini API" (description: "Simplest — get a key at https://aistudio.google.com/apikey")
+  - "Vertex AI" (description: "For orgs already on Vertex — requires a service-account JSON file")
 
 **Question 3: Install location (optional)**
 - Header: "Install Path"
@@ -71,17 +81,17 @@ Run the command and show output to user.
 
 ---
 
-### Step 4: Set up LiteLLM Proxy
+### Step 4: Set up LLM Backend
 
-LiteLLM runs on the user's machine, not inside the repo working tree. Always
-stage config under `~/.litellm/` so edits survive `git pull` and don't dirty
-the checkout. The repo's `litellm/` directory is the source of templates only.
+MemPalace only requires an OpenAI-compatible endpoint for embeddings + recall
+LLM. Pick one of four deployment paths below based on the user's answer to
+Question 2.
 
 > Note: `~/git/mempalace/litellm/setup.sh` exists but is a repo-local helper
-> that operates inside the checkout. This guide intentionally bypasses it and
-> uses plain `docker compose` from `~/.litellm/` instead.
+> that mutates the repo working tree. This guide intentionally bypasses it
+> and uses plain `docker compose` (or `litellm` CLI) from `~/.litellm/`.
 
-Common preparation (run regardless of backend choice):
+#### Common LiteLLM preparation (paths A and B only)
 
 ```bash
 mkdir -p ~/.litellm
@@ -91,41 +101,22 @@ cp -n ~/git/mempalace/litellm/.env.example      ~/.litellm/.env.example
 [ -f ~/.litellm/.env ] || cp ~/.litellm/.env.example ~/.litellm/.env
 ```
 
-Based on user's backend choice:
+If user picked **Vertex AI** in Question 2a (instead of Gemini API), also do
+this once (applies to both A and B):
 
-#### If "Yes, I have a Gemini API key":
+1. Edit `~/.litellm/.env`: set `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION`.
+2. Edit `~/.litellm/config.yaml`: comment out `gemini/*` model entries,
+   uncomment the `vertex_ai/*` ones (the shipped examples use the real
+   preview IDs `vertex_ai/gemini-embedding-2-preview` and
+   `vertex_ai/gemini-3.1-flash-lite-preview`).
+3. Set `vertex_credentials: /path/to/vertex-service-account.json` on each
+   enabled Vertex entry.
 
-1. Run the common preparation above.
-2. Edit `~/.litellm/.env` and set `GEMINI_API_KEY`.
-3. Start the proxy from the home-dir workspace:
+For Gemini API, edit `~/.litellm/.env` and set `GEMINI_API_KEY`.
 
-```bash
-cd ~/.litellm
-docker compose up -d
-curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
-```
+---
 
-**Tell the user**: "I copied the LiteLLM templates to `~/.litellm/`. Please
-edit `~/.litellm/.env` and add your `GEMINI_API_KEY`, then let me know — I'll
-start the container with `cd ~/.litellm && docker compose up -d`."
-
-#### If "I use Vertex AI":
-
-1. Run the common preparation above.
-2. Edit `~/.litellm/.env` and set `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION`.
-3. Edit `~/.litellm/config.yaml`:
-   - Comment out the `gemini/*` model entries.
-   - Uncomment the `vertex_ai/*` ones (they already use real preview IDs like
-     `vertex_ai/gemini-embedding-2-preview` and
-     `vertex_ai/gemini-3.1-flash-lite-preview`).
-   - On each enabled Vertex entry, set
-     `vertex_credentials: /path/to/vertex-service-account.json` to a local
-     service-account JSON path.
-4. If running via Docker and the credentials JSON lives outside the default
-   mounts, add a read-only mount in `~/.litellm/docker-compose.yml`, e.g.
-   `- /host/path/vertex-service-account.json:/secrets/vertex.json:ro`, and
-   point `vertex_credentials` at the in-container path (`/secrets/vertex.json`).
-5. Start the proxy:
+#### Path A: LiteLLM via Docker (recommended)
 
 ```bash
 cd ~/.litellm
@@ -133,30 +124,101 @@ docker compose up -d
 curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
 ```
 
-**Tell the user**: "I copied the LiteLLM templates to `~/.litellm/`. Please:
-1. Edit `~/.litellm/.env` and set `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION`
-2. Edit `~/.litellm/config.yaml`: disable `gemini/*`, enable `vertex_ai/*`,
-   and set `vertex_credentials` to your local service-account JSON path
-3. If the JSON path is outside the default mounts, add it as a read-only
-   mount in `~/.litellm/docker-compose.yml`
-4. Tell me when done — I'll run `cd ~/.litellm && docker compose up -d`"
+If using Vertex AI and the credentials JSON lives outside the default
+mounts, add a read-only mount in `~/.litellm/docker-compose.yml`, e.g.
+`- /host/path/vertex-service-account.json:/secrets/vertex.json:ro`, and
+point `vertex_credentials` at the in-container path (`/secrets/vertex.json`).
 
-#### If "Not yet — I'll set it up later":
+**Tell the user**: "I staged the LiteLLM config at `~/.litellm/`. Please
+finish editing `~/.litellm/.env` (and `config.yaml` for Vertex), then let
+me know — I'll run `cd ~/.litellm && docker compose up -d`."
 
-Skip LiteLLM setup. Tell the user:
+---
 
-"MemPalace is installed but won't work until you set up the LiteLLM proxy.
-When you're ready:
-1. Get a Gemini API key at https://aistudio.google.com/apikey
-2. Stage the config under your home dir:
-   ```bash
-   mkdir -p ~/.litellm
-   cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
-   cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
-   cp ~/git/mempalace/litellm/.env.example          ~/.litellm/.env
-   ```
-3. Edit `~/.litellm/.env` and add your `GEMINI_API_KEY`
-4. Run `cd ~/.litellm && docker compose up -d`"
+#### Path B: LiteLLM via Python (no Docker)
+
+```bash
+pip install litellm
+litellm --config ~/.litellm/config.yaml --port 4000 &
+curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
+```
+
+**Caveat**: this leaves a foreground/background process the user is
+responsible for. The proxy will not auto-restart on reboot. Tell the user:
+"You're running LiteLLM as a plain Python process — it won't survive
+reboots. If you want a managed service, switch to Path A (Docker) or wrap
+it in launchd/systemd later."
+
+---
+
+#### Path C: Bring your own endpoint (vLLM / Ollama / OpenAI-compat gateway)
+
+Skip LiteLLM entirely. The user already has an OpenAI-compatible endpoint
+they want to use.
+
+Edit `~/.mempalace/env` and set the four MEMPAL variables:
+
+```bash
+export MEMPAL_EMBEDDING_MODEL="<their-embedding-model-id>"
+export MEMPAL_EMBEDDING_ENDPOINT="<their-base-url>"   # no /v1 suffix
+export MEMPAL_EMBEDDING_KEY="<their-api-key>"
+
+export MEMPAL_LLM_ENDPOINT="<their-base-url>/v1"      # /v1 required
+export MEMPAL_LLM_MODEL="<their-llm-model-id>"
+export MEMPAL_LLM_KEY="<their-api-key>"
+```
+
+Then:
+
+```bash
+bash ~/git/mempalace/scripts/sync-plugins.sh   # propagate env to all agents
+curl -fs "$MEMPAL_EMBEDDING_ENDPOINT/v1/models" >/dev/null && echo "endpoint: OK"
+```
+
+**Caveat**: ChromaDB locks the embedding dimensionality at first call.
+Ask the user to confirm their embedding model's output dim — anything other
+than 3072 means starting fresh (no existing palace) or an explicit
+`MEMPAL_EMBEDDING_DIMS` override.
+
+---
+
+#### Path D: Offline (no LLM)
+
+No proxy, no endpoint. The user wants MemPalace as a local-only verbatim
+log without LLM enhancements.
+
+Make sure no LLM/embedding env vars are set:
+
+```bash
+unset MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY \
+      MEMPAL_RECALL_ENDPOINT MEMPAL_RECALL_MODEL MEMPAL_RECALL_KEY \
+      MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY
+```
+
+(or comment them out in `~/.mempalace/env` and re-run `sync-plugins.sh`.)
+
+What works in offline mode:
+
+- All MCP tools, all `mempalace` CLI subcommands
+- Semantic search via ChromaDB built-in MiniLM (384d)
+- Auto-save: writes each save window verbatim into `room=raw_transcript`
+  under tag `async_offline_save`. Future runs with an LLM configured can
+  re-classify these later. Opt out with `MEMPAL_OFFLINE_SAVE=0`.
+
+What is degraded or off:
+
+- UserPrompt recall: pure vector search, no LLM rewrite, no rerank,
+  smaller pool (`USERPROMPT_RECALL_LIMIT` instead of `_POOL`)
+- LLM-driven KG fact extraction, diary structuring, and per-drawer
+  summarisation: all skipped silently
+
+**Tell the user**: "MemPalace is installed in offline mode. The palace
+will still grow — every Stop hook writes the raw transcript verbatim into
+`room=raw_transcript`. When you later add a Gemini key (or any
+OpenAI-compatible endpoint), set `MEMPAL_*_ENDPOINT/MODEL/KEY` in
+`~/.mempalace/env` and re-run `sync-plugins.sh` — those raw drawers will
+remain searchable, and new saves will use the structured LLM path."
+
 
 ---
 
@@ -167,8 +229,16 @@ Run these commands and show output:
 ```bash
 mempalace status
 python3 -c "import mempalace; print(f'MemPalace {mempalace.__version__} installed')"
-curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK" || echo "LiteLLM proxy: NOT RUNNING"
 ```
+
+Then verify the chosen LLM path:
+
+- Path A (Docker) or Path B (Python):
+  `curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK" || echo "LiteLLM proxy: NOT RUNNING"`
+- Path C (own endpoint):
+  `curl -fs "$MEMPAL_EMBEDDING_ENDPOINT/v1/models" >/dev/null && echo "endpoint: OK" || echo "endpoint: NOT RUNNING"`
+- Path D (offline): no proxy check; instead confirm
+  `python3 -c "from mempalace.recall_llm import is_enabled; print('LLM enabled:', is_enabled())"` prints `False`.
 
 ---
 
@@ -215,7 +285,7 @@ User: "Help me install MemPalace"
 
 Agent: [calls AskUserQuestion with 3 questions above]
 
-User: [selects "Both Claude Code + Codex", "Yes, I have a Gemini API key", "~/git/mempalace"]
+User: [selects "Both Claude Code + Codex", "LiteLLM via Docker", "Gemini API", "~/git/mempalace"]
 
 Agent:
   "I'll install MemPalace for Claude Code + Codex at ~/git/mempalace."
@@ -248,15 +318,15 @@ Agent:
 
 ## Troubleshooting During Install
 
-### "Docker not found"
+### "Docker not found" (only relevant if user picked Path A)
 
-If bringing up LiteLLM in `~/.litellm/` fails with "Docker not found":
+Two responses:
 
 **Option 1**: Install Docker
 - macOS: `brew install --cask docker`
 - Linux: `sudo apt install docker.io` or equivalent
 
-**Option 2**: Use Python LiteLLM (still reading config from `~/.litellm/`)
+**Option 2**: Switch to Path B (Python LiteLLM, same `~/.litellm/config.yaml`)
 ```bash
 pip install litellm
 litellm --config ~/.litellm/config.yaml --port 4000

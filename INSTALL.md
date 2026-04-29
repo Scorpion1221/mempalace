@@ -18,14 +18,21 @@ bash install.sh          # Both Claude Code + Codex (default)
 # bash install.sh --claude  # Claude Code only
 # bash install.sh --codex   # Codex only
 
-# Step 2: Set up LiteLLM proxy (embedding + recall LLM)
-cd litellm
-bash setup.sh            # Auto-detects Docker/Python, guides through config
+# Step 2: Set up an LLM backend (embedding + recall LLM)
+# Pick one of the four paths documented in "LLM Backend Setup" below.
+# Recommended default (Path A — LiteLLM via Docker):
+mkdir -p ~/.litellm
+cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
+cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
+cp -n ~/git/mempalace/litellm/.env.example      ~/.litellm/.env.example
+[ -f ~/.litellm/.env ] || cp ~/.litellm/.env.example ~/.litellm/.env
+# edit ~/.litellm/.env to add GEMINI_API_KEY
+cd ~/.litellm && docker compose up -d
 ```
 
 That's it. The `install.sh` script handles Python package, CLI, palace init, and
-plugin sync. The `litellm/setup.sh` script detects existing installs, validates
-config, and starts the proxy.
+plugin sync. See "LLM Backend Setup" below for Path B (Python), Path C (your own
+endpoint), or Path D (offline).
 
 ## What Gets Installed
 
@@ -64,46 +71,90 @@ Cursor has no per-prompt hook for context injection. Auto-recall uses:
 
 Hermes users: run `bash scripts/sync-plugins.sh --hermes` after the above.
 
-## LiteLLM Proxy Setup
+## LLM Backend Setup
 
-MemPalace needs a LiteLLM proxy for embedding (palace vectorisation) and recall
-LLM (rerank + save extraction). The `litellm/` directory ships a ready-to-run
-Docker config.
+MemPalace only needs an OpenAI-compatible endpoint for embeddings + recall
+LLM. There are four supported deployment paths — pick whichever fits your
+environment. The agent install guide
+([docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md)) walks through each
+path step-by-step; the summary below is for humans installing manually.
+
+### Path A: LiteLLM via Docker (recommended)
+
+We ship templates under `litellm/`. Stage them under `~/.litellm/` so the
+running config doesn't dirty your repo working tree:
 
 ```bash
-cd ~/git/mempalace/litellm
-bash setup.sh
+mkdir -p ~/.litellm
+cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
+cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
+cp -n ~/git/mempalace/litellm/.env.example      ~/.litellm/.env.example
+[ -f ~/.litellm/.env ] || cp ~/.litellm/.env.example ~/.litellm/.env
+
+# Edit ~/.litellm/.env to add GEMINI_API_KEY (or VERTEXAI_PROJECT/LOCATION)
+# For Vertex: also edit ~/.litellm/config.yaml — disable gemini/*, enable
+# vertex_ai/*, set vertex_credentials: /path/to/service-account.json
+
+cd ~/.litellm && docker compose up -d
+curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
 ```
 
-The script:
-1. Auto-detects existing LiteLLM (Docker running/stopped, Python, or none)
-2. Creates `.env` from template if missing (prompts for `GEMINI_API_KEY`)
-3. Validates backend alignment (Gemini API vs Vertex AI)
-4. Starts/restarts the proxy with health check
+Vertex AI shipped examples use the real preview IDs
+(`vertex_ai/gemini-embedding-2-preview`,
+`vertex_ai/gemini-3.1-flash-lite-preview`).
 
-### Backends
+### Path B: LiteLLM via Python (no Docker)
 
-Two ways to reach Gemini:
+Same `~/.litellm/config.yaml`, no container:
 
-**(A) Gemini API** (default — simplest)
 ```bash
-# litellm/.env
-GEMINI_API_KEY=your-key-here
+pip install litellm
+litellm --config ~/.litellm/config.yaml --port 4000 &
 ```
-Get a key at https://aistudio.google.com/apikey
 
-**(B) Vertex AI** (for orgs already on Vertex)
+You manage the process — it won't auto-restart on reboot. Wrap it in
+launchd / systemd if you want a managed service.
+
+### Path C: Bring your own endpoint
+
+Already running vLLM, Ollama, or any OpenAI-compatible gateway? Skip
+LiteLLM entirely and point MemPalace at it via `~/.mempalace/env`:
+
 ```bash
-# litellm/.env
-VERTEXAI_PROJECT=your-vertex-project-id
-VERTEXAI_LOCATION=global
+export MEMPAL_EMBEDDING_MODEL="<embedding-model-id>"
+export MEMPAL_EMBEDDING_ENDPOINT="<base-url>"        # no /v1 suffix
+export MEMPAL_EMBEDDING_KEY="<api-key>"
+
+export MEMPAL_LLM_ENDPOINT="<base-url>/v1"           # /v1 required
+export MEMPAL_LLM_MODEL="<llm-model-id>"
+export MEMPAL_LLM_KEY="<api-key>"
 ```
-Then edit `litellm/config.yaml`: comment out `gemini/*` models, uncomment
-`vertex_ai/*` ones. The shipped Vertex examples use the real preview model
-IDs (`vertex_ai/gemini-embedding-2-preview`,
-`vertex_ai/gemini-3.1-flash-lite-preview`). Set `vertex_credentials` on each
-uncommented Vertex entry to your own service-account JSON path, e.g.
-`vertex_credentials: /path/to/vertex-service-account.json`.
+
+ChromaDB locks embedding dimensionality at first call. Stick with 3072
+or wipe `~/.mempalace/palace/` before switching to a different dim, and
+optionally set `MEMPAL_EMBEDDING_DIMS` to override the default.
+
+### Path D: Offline (no LLM)
+
+No proxy, no endpoint. Auto-save still works in **verbatim raw-transcript
+mode** — every Stop hook writes the transcript window into
+`room=raw_transcript` under tag `async_offline_save`, so the palace keeps
+growing. Embedding falls back to ChromaDB's built-in MiniLM (384d). Recall
+uses pure vector search (no rewrite, no rerank).
+
+What's silently disabled:
+
+- LLM-driven KG fact extraction
+- Diary/drawer structuring during auto-save
+- UserPrompt recall when the prompt has no history-reference word
+
+Opt out of the verbatim raw-transcript writer with `MEMPAL_OFFLINE_SAVE=0`.
+
+When you later add a Gemini key (or any OpenAI-compat endpoint), set
+`MEMPAL_*_ENDPOINT/MODEL/KEY` and re-run `sync-plugins.sh`. Existing raw
+drawers remain searchable; new saves switch to the structured LLM path.
+
+
 
 ## Environment Variables
 
@@ -232,7 +283,7 @@ If you must change it, wipe `~/.mempalace/palace/` and re-ingest.
 ### "LiteLLM proxy not responding"
 
 ```bash
-cd ~/git/mempalace/litellm
+cd ~/.litellm
 docker compose logs -f              # Check logs
 docker compose restart              # Restart proxy
 curl http://127.0.0.1:4000/health/readiness  # Health check
