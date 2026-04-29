@@ -450,8 +450,9 @@ HERMES_RUNTIME="$HOME/.hermes/hermes-agent/plugins/memory/mempalace"
 HERMES_PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
 if ! $SYNC_HERMES; then
     echo "[4/8] Hermes: skipped (not in sync list)"
-elif [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
+elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     echo "[4/8] Syncing Hermes plugin + plist env..."
+    mkdir -p "$HERMES_RUNTIME"
     for f in "$HERMES_REPO/plugins/memory/mempalace/"*.py \
              "$HERMES_REPO/plugins/memory/mempalace/"*.yaml \
              "$HERMES_REPO/plugins/memory/mempalace/"*.md; do
@@ -477,7 +478,7 @@ elif [ -d "$HERMES_RUNTIME" ] && [ -f "$HERMES_REPO/plugins/memory/mempalace/__i
         echo "  → 7 env vars upserted in launchd plist"
     fi
 else
-    echo "[4/8] Hermes plugin dir not found, skipping"
+    echo "[4/8] Hermes plugin source not found, skipping"
 fi
 
 # --- [5/8] Cursor: symlink plugin + register hooks + launchctl env ---------
