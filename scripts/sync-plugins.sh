@@ -59,6 +59,14 @@ MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY"
 
 # Smart copy: preserve local env-var fallback defaults in hook scripts
 # (user's override survives a sync).
+_sed_inplace() {
+    if sed --version 2>/dev/null | grep -q GNU; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
+}
+
 smart_copy_hook() {
     local src="$1" dst="$2"
     if [ ! -f "$dst" ]; then
@@ -87,7 +95,7 @@ smart_copy_hook() {
             local var_name
             var_name=$(echo "$line" | sed 's/export \([A-Z_]*\)=.*/\1/')
             if [ -n "$var_name" ] && grep -q "^export ${var_name}=" "$dst"; then
-                sed -i '' "s|^export ${var_name}=.*|${line}|" "$dst"
+                _sed_inplace "s|^export ${var_name}=.*|${line}|" "$dst"
                 echo "  → preserved local $var_name"
             fi
         done <<< "$saved_lines"
