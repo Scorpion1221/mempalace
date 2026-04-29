@@ -1577,3 +1577,123 @@ def test_userprompt_drops_unknown_wing(tmp_path):
     # The hallucinated wing must NOT have reached search_memories.
     assert search_calls, "search_memories should have been called"
     assert search_calls[0].get("wing") is None
+
+
+# --- Offline mode (no LLM) ---
+
+
+def _make_palace(tmp_path: Path, monkeypatch) -> Path:
+    palace = tmp_path / "palace"
+    palace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MEMPAL_PALACE_PATH", str(palace))
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "default")
+    return palace
+
+
+def test_offline_save_worker_writes_raw_drawer(tmp_path, monkeypatch):
+    from mempalace.hooks_cli import ASYNC_SAVE_TAG_OFFLINE, _async_save_worker_offline
+
+    _make_palace(tmp_path, monkeypatch)
+    transcript = (
+        "User: Why does our deploy fail when the staging DB is upgraded?\n"
+        "Assistant: Because the migration runner caches schema introspection "
+        "results across pods and they go stale after the bump.\n"
+    )
+
+    _async_save_worker_offline(transcript, "session-offline-1", str(tmp_path / "myproj"))
+
+    from mempalace.config import MempalaceConfig
+    from mempalace.palace import get_collection
+
+    col = get_collection(MempalaceConfig().palace_path, create=False)
+    rows = col.get(where={"added_by": ASYNC_SAVE_TAG_OFFLINE})
+    assert len(rows["ids"]) == 1
+    meta = rows["metadatas"][0]
+    assert meta["room"] == "raw_transcript"
+    assert meta["wing"] == "myproj"
+    assert meta["session_id"] == "session-offline-1"
+    assert "migration runner caches schema introspection" in rows["documents"][0]
+    assert rows["documents"][0].startswith("User: Why does our deploy fail")
+
+
+def test_offline_save_worker_skips_short_transcript(tmp_path, monkeypatch):
+    from mempalace.hooks_cli import ASYNC_SAVE_TAG_OFFLINE, _async_save_worker_offline
+
+    _make_palace(tmp_path, monkeypatch)
+    _async_save_worker_offline("ok", "session-short", str(tmp_path / "myproj"))
+
+    from mempalace.config import MempalaceConfig
+    from mempalace.palace import get_collection
+
+    col = get_collection(MempalaceConfig().palace_path, create=True)
+    rows = col.get(where={"added_by": ASYNC_SAVE_TAG_OFFLINE})
+    assert rows["ids"] == []
+
+
+def test_stop_hook_offline_dispatches_offline_worker(tmp_path, monkeypatch):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    monkeypatch.delenv("MEMPAL_OFFLINE_SAVE", raising=False)
+    spawn_calls = []
+
+    class FakeProc:
+        def __init__(self, *a, **kw):
+            spawn_calls.append(a[0])
+            self.stdin = io.BytesIO()
+
+    with patch("mempalace.recall_llm.is_enabled", return_value=False):
+        with patch("mempalace.hooks_cli.subprocess.Popen", side_effect=FakeProc):
+            with patch(
+                "mempalace.hooks_cli._extract_recent_exchanges",
+                return_value="x" * 200,
+            ):
+                _capture_hook_output(
+                    hook_stop,
+                    {
+                        "session_id": "session-offline-2",
+                        "stop_hook_active": False,
+                        "transcript_path": str(transcript),
+                    },
+                    state_dir=tmp_path,
+                )
+
+    assert spawn_calls, "Popen should have been called for offline save"
+    cmd = " ".join(spawn_calls[0])
+    assert "_async_save_worker_offline" in cmd
+    assert "_async_save_worker(" not in cmd  # the LLM worker call form
+
+
+def test_stop_hook_offline_save_disabled_via_env(tmp_path, monkeypatch):
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(
+        transcript,
+        [{"message": {"role": "user", "content": f"msg {i}"}} for i in range(SAVE_INTERVAL)],
+    )
+    monkeypatch.setenv("MEMPAL_OFFLINE_SAVE", "0")
+    spawn_calls = []
+
+    class FakeProc:
+        def __init__(self, *a, **kw):
+            spawn_calls.append(a[0])
+            self.stdin = io.BytesIO()
+
+    with patch("mempalace.recall_llm.is_enabled", return_value=False):
+        with patch("mempalace.hooks_cli.subprocess.Popen", side_effect=FakeProc):
+            with patch(
+                "mempalace.hooks_cli._extract_recent_exchanges",
+                return_value="x" * 200,
+            ):
+                _capture_hook_output(
+                    hook_stop,
+                    {
+                        "session_id": "session-offline-3",
+                        "stop_hook_active": False,
+                        "transcript_path": str(transcript),
+                    },
+                    state_dir=tmp_path,
+                )
+
+    assert not spawn_calls, "Popen should NOT have been called when MEMPAL_OFFLINE_SAVE=0"

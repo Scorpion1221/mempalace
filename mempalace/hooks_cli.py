@@ -31,6 +31,7 @@ STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 # `_build_palace_context` still sees them during the transition.
 ASYNC_SAVE_TAG = "async_llm_save"
 ASYNC_SAVE_TAG_LEGACY = "haiku_async_save"
+ASYNC_SAVE_TAG_OFFLINE = "async_offline_save"
 _RECENT_MSG_COUNT = 30  # how many recent user messages to summarize
 
 
@@ -1660,6 +1661,52 @@ def _persist_async_save_to_recovery(
     _log(msg)
 
 
+def _async_save_worker_offline(transcript_text, session_id, cwd):
+    """Background worker for offline mode: write transcript verbatim, no LLM.
+
+    Honors the verbatim-storage design principle: stores the exact transcript
+    chunk in a single drawer under ``room=raw_transcript`` so it remains
+    searchable via vector + BM25 even without an LLM stack. Future runs with
+    an LLM configured can re-classify these drawers into structured ones.
+    """
+    try:
+        if len(transcript_text.strip()) < 80:
+            _log("offline save: transcript too short, skipping")
+            return
+
+        from .config import MempalaceConfig, sanitize_content
+        from .miner import detect_hall
+        from .palace import get_collection
+
+        wing = Path(cwd).name.lower().replace(" ", "_").replace("-", "_") if cwd else "general"
+        cfg = MempalaceConfig()
+        col = get_collection(cfg.palace_path, create=True)
+        now = datetime.now()
+
+        import hashlib
+
+        digest = hashlib.sha256(transcript_text.encode()).hexdigest()[:24]
+        drawer_id = f"raw_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}_{digest}"
+        col.upsert(
+            ids=[drawer_id],
+            documents=[sanitize_content(transcript_text)],
+            metadatas=[
+                {
+                    "wing": wing,
+                    "room": "raw_transcript",
+                    "hall": detect_hall(transcript_text),
+                    "added_by": ASYNC_SAVE_TAG_OFFLINE,
+                    "filed_at": now.isoformat(),
+                    "date": now.strftime("%Y-%m-%d"),
+                    "session_id": session_id,
+                }
+            ],
+        )
+        _log(f"offline save: wrote 1 raw drawer wing={wing} chars={len(transcript_text)}")
+    except Exception as e:
+        _log(f"offline save error: {e}\n{traceback.format_exc()}")
+
+
 def _wing_from_transcript_path(transcript_path: str) -> str:
     """Derive a project wing name from a Claude Code transcript path.
 
@@ -1748,32 +1795,42 @@ def hook_stop(data: dict, harness: str):
         # Auto-save and recall share the same LLM gate: enabled by default
         # whenever an endpoint+model is configured. Set MEMPAL_LLM=0 to
         # opt out. See recall_llm.is_enabled() for the full probe rules.
+        # Offline mode (no LLM) falls back to a verbatim raw-transcript
+        # writer so the palace keeps growing; opt out via MEMPAL_OFFLINE_SAVE=0.
         from .recall_llm import is_enabled as _llm_is_enabled
 
-        if transcript_text and _llm_is_enabled():
-            cwd = parsed.get("cwd", "") or data.get("cwd", "")
-            try:
-                proc = subprocess.Popen(
-                    [
-                        sys.executable,
-                        "-c",
-                        "import sys, json; "
-                        "d = json.load(sys.stdin); "
-                        "from mempalace.hooks_cli import _async_save_worker; "
-                        "_async_save_worker(d['text'], d['session'], d['cwd'])",
-                    ],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-                payload = json.dumps(
-                    {"text": transcript_text, "session": session_id, "cwd": cwd or ""}
-                )
-                proc.stdin.write(payload.encode("utf-8"))
-                proc.stdin.close()
-                _log("async save: spawned background process")
-            except Exception as e:
-                _log(f"async save: failed to spawn ({e})")
+        if transcript_text:
+            if _llm_is_enabled():
+                worker = "_async_save_worker"
+            elif os.environ.get("MEMPAL_OFFLINE_SAVE", "1") in ("0", "false", "False"):
+                worker = ""
+                _log("async save: offline mode but MEMPAL_OFFLINE_SAVE=0, skipping")
+            else:
+                worker = "_async_save_worker_offline"
+            if worker:
+                cwd = parsed.get("cwd", "") or data.get("cwd", "")
+                try:
+                    proc = subprocess.Popen(
+                        [
+                            sys.executable,
+                            "-c",
+                            "import sys, json; "
+                            "d = json.load(sys.stdin); "
+                            f"from mempalace.hooks_cli import {worker}; "
+                            f"{worker}(d['text'], d['session'], d['cwd'])",
+                        ],
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                    payload = json.dumps(
+                        {"text": transcript_text, "session": session_id, "cwd": cwd or ""}
+                    )
+                    proc.stdin.write(payload.encode("utf-8"))
+                    proc.stdin.close()
+                    _log(f"async save: spawned {worker} background process")
+                except Exception as e:
+                    _log(f"async save: failed to spawn ({e})")
 
         _output({})
     else:
@@ -2216,6 +2273,8 @@ def hook_userprompt(data: dict, harness: str):
 
         if is_enabled():
             llm_config = _get_llm_config()
+        else:
+            _log("UserPrompt recall: LLM disabled, running pure vector search (offline mode)")
         if llm_config:
             # Build active context: cwd + palace taxonomy (rooms/halls) + top
             # KG entities, so the gate can pick valid filter values AND rewrite
