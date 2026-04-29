@@ -145,15 +145,36 @@ done
 echo "  ✓ $LOADED_COUNT MEMPAL_* vars loaded from single source"
 
 # --- [1/8] Python package snapshot install ----------------------------------
+# Locate the best pip for installing mempalace. Priority:
+#   1. Repo's own venv (.venv or venv)
+#   2. Currently active venv (VIRTUAL_ENV)
+#   3. Bare `pip` in PATH
+_PIP=""
+for candidate in "$REPO/.venv/bin/pip" "$REPO/venv/bin/pip"; do
+    if [ -x "$candidate" ]; then
+        _PIP="$candidate"
+        break
+    fi
+done
+if [ -z "$_PIP" ] && [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/pip" ]; then
+    _PIP="$VIRTUAL_ENV/bin/pip"
+fi
+[ -z "$_PIP" ] && _PIP="pip"
+
 echo "[1/8] Installing Python package (snapshot, not editable)..."
-if ! pip install --force-reinstall --no-deps "$REPO" -q 2>&1; then
-    echo "  ⚠ pip install failed. Trying with python3 -m pip..."
+if ! "$_PIP" install --force-reinstall --no-deps "$REPO" -q 2>&1; then
+    echo "  ⚠ $_PIP failed. Trying python3 -m pip..."
     python3 -m pip install --force-reinstall --no-deps "$REPO" -q 2>&1 || {
-        echo "  ✗ Package install failed. Check pip / venv setup."
+        echo "  ✗ Package install failed."
+        echo "    Make sure you're in a venv, or that $REPO/.venv exists."
         exit 1
     }
 fi
-echo "  → $(python3 -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
+# Use the same python that pip installed into for the version check.
+_PYTHON="${_PIP%/pip}"
+_PYTHON="${_PYTHON%/bin}/bin/python3"
+[ -x "$_PYTHON" ] || _PYTHON="python3"
+echo "  → $("$_PYTHON" -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
 
 # --- [2/8] Claude Code: sync plugin cache + upsert env in settings.json -----
 CLAUDE_CACHE=""
