@@ -76,7 +76,9 @@ Please install MemPalace by following https://github.com/Scorpion1221/mempalace/
 ```
 
 Your AI assistant will fetch the guide, ask 3 questions (which agent? Gemini API
-or Vertex AI? install path?), run the commands, and verify the install. Full
+or Vertex AI? install path?), run the commands, and verify the install. For
+Vertex AI, point each `vertex_ai/*` entry in `litellm/config.yaml` at your own
+service-account JSON via `vertex_credentials`. Full
 workflow: [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md).
 
 ## Quickstart

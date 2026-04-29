@@ -32,20 +32,30 @@ Two ways to reach Gemini. Pick one in `.env`:
 GEMINI_API_KEY=your-key-here
 ```
 
-### (B) GCP Vertex AI (for orgs already on GCP)
+### (B) Vertex AI (for orgs already on Vertex)
 
 ```bash
 # .env
-VERTEXAI_PROJECT=your-gcp-project-id
-VERTEXAI_LOCATION=us-central1
-# plus ONE auth method:
-#   - mounted gcloud ADC (default — docker-compose.yml mounts ~/.config/gcloud)
-#   - GOOGLE_APPLICATION_CREDENTIALS=/secrets/sa-key.json
+VERTEXAI_PROJECT=your-vertex-project-id
+VERTEXAI_LOCATION=global
 ```
 
 Then edit `config.yaml`: comment out the `gemini/*` model entries and
-uncomment the `vertex_ai/*` ones. `setup.sh` checks alignment and complains
-if you forget.
+uncomment the `vertex_ai/*` ones. The shipped Vertex examples already use the
+real preview model IDs:
+
+- `vertex_ai/gemini-embedding-2-preview`
+- `vertex_ai/gemini-3.1-flash-lite-preview`
+
+Set `vertex_credentials` on each uncommented Vertex model entry to a local
+service-account JSON path, using your own file location. Example:
+
+```yaml
+vertex_credentials: /path/to/vertex-service-account.json
+```
+
+Do not commit real credential paths or key files. `setup.sh` checks backend
+alignment and complains if you forget.
 
 ## What this provides
 

@@ -78,7 +78,7 @@ fi
 BACKEND="gemini"
 if [ -n "${VERTEXAI_PROJECT:-}" ]; then
     BACKEND="vertex"
-    ok "Backend: GCP Vertex AI (project: ${VERTEXAI_PROJECT}, location: ${VERTEXAI_LOCATION:-us-central1})"
+    ok "Backend: Vertex AI (project: ${VERTEXAI_PROJECT}, location: ${VERTEXAI_LOCATION:-global})"
 else
     ok "Backend: Gemini API"
 fi

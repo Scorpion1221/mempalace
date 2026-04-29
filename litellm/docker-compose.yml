@@ -9,8 +9,14 @@ services:
       - "127.0.0.1:4000:4000"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      # Mount host gcloud config so Vertex AI ADC works without baking a
-      # service-account key into the image. Ignored by backend (A).
+      # Vertex AI auth in this repo is configured per-model via
+      # `vertex_credentials: /path/to/vertex-service-account.json` in
+      # config.yaml. If that path lives outside the container, mount it in
+      # read-only here, e.g.:
+      #   - /host/path/vertex-service-account.json:/secrets/vertex.json:ro
+      # and set `vertex_credentials: /secrets/vertex.json` in config.yaml.
+      # The gcloud ADC mount below is optional (legacy) and ignored by the
+      # Gemini API backend.
       - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
     env_file:
       - .env

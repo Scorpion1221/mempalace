@@ -27,7 +27,7 @@ Use `AskUserQuestion` to gather install configuration. Ask 2-3 questions:
 - Header: "LiteLLM Backend"
 - Options:
   - "Yes, I have a Gemini API key" (description: "Simplest path — get one at https://aistudio.google.com/apikey")
-  - "I use GCP Vertex AI" (description: "For orgs already on GCP with gcloud auth")
+  - "I use Vertex AI" (description: "For orgs already on Vertex — requires a service-account JSON file")
   - "Not yet — I'll set it up later" (description: "Skip LiteLLM setup for now")
 
 **Question 3: Install location (optional)**
@@ -73,37 +73,73 @@ Run the command and show output to user.
 
 ### Step 4: Set up LiteLLM Proxy
 
+LiteLLM runs on the user's machine, not inside the repo working tree. Always
+stage config under `~/.litellm/` so edits survive `git pull` and don't dirty
+the checkout. The repo's `litellm/` directory is the source of templates only.
+
+> Note: `~/git/mempalace/litellm/setup.sh` exists but is a repo-local helper
+> that operates inside the checkout. This guide intentionally bypasses it and
+> uses plain `docker compose` from `~/.litellm/` instead.
+
+Common preparation (run regardless of backend choice):
+
+```bash
+mkdir -p ~/.litellm
+cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
+cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
+cp -n ~/git/mempalace/litellm/.env.example      ~/.litellm/.env.example
+[ -f ~/.litellm/.env ] || cp ~/.litellm/.env.example ~/.litellm/.env
+```
+
 Based on user's backend choice:
 
 #### If "Yes, I have a Gemini API key":
 
-```bash
-cd ~/git/mempalace/litellm
-bash setup.sh
-```
-
-The script will:
-1. Create `.env` from template
-2. Prompt user to edit `.env` and add `GEMINI_API_KEY`
-3. Wait for user to confirm they've edited it
-4. Start Docker container
-5. Health check
-
-**Tell the user**: "The setup script created `litellm/.env`. Please edit it and
-add your `GEMINI_API_KEY`, then re-run `bash setup.sh`."
-
-#### If "I use GCP Vertex AI":
+1. Run the common preparation above.
+2. Edit `~/.litellm/.env` and set `GEMINI_API_KEY`.
+3. Start the proxy from the home-dir workspace:
 
 ```bash
-cd ~/git/mempalace/litellm
-bash setup.sh
+cd ~/.litellm
+docker compose up -d
+curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
 ```
 
-**Tell the user**: "The setup script created `litellm/.env`. You need to:
-1. Edit `.env` and set `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION`
-2. Edit `config.yaml`: comment out `gemini/*` models, uncomment `vertex_ai/*`
-3. Ensure `gcloud auth application-default login` is set up
-4. Re-run `bash setup.sh`"
+**Tell the user**: "I copied the LiteLLM templates to `~/.litellm/`. Please
+edit `~/.litellm/.env` and add your `GEMINI_API_KEY`, then let me know — I'll
+start the container with `cd ~/.litellm && docker compose up -d`."
+
+#### If "I use Vertex AI":
+
+1. Run the common preparation above.
+2. Edit `~/.litellm/.env` and set `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION`.
+3. Edit `~/.litellm/config.yaml`:
+   - Comment out the `gemini/*` model entries.
+   - Uncomment the `vertex_ai/*` ones (they already use real preview IDs like
+     `vertex_ai/gemini-embedding-2-preview` and
+     `vertex_ai/gemini-3.1-flash-lite-preview`).
+   - On each enabled Vertex entry, set
+     `vertex_credentials: /path/to/vertex-service-account.json` to a local
+     service-account JSON path.
+4. If running via Docker and the credentials JSON lives outside the default
+   mounts, add a read-only mount in `~/.litellm/docker-compose.yml`, e.g.
+   `- /host/path/vertex-service-account.json:/secrets/vertex.json:ro`, and
+   point `vertex_credentials` at the in-container path (`/secrets/vertex.json`).
+5. Start the proxy:
+
+```bash
+cd ~/.litellm
+docker compose up -d
+curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
+```
+
+**Tell the user**: "I copied the LiteLLM templates to `~/.litellm/`. Please:
+1. Edit `~/.litellm/.env` and set `VERTEXAI_PROJECT` and `VERTEXAI_LOCATION`
+2. Edit `~/.litellm/config.yaml`: disable `gemini/*`, enable `vertex_ai/*`,
+   and set `vertex_credentials` to your local service-account JSON path
+3. If the JSON path is outside the default mounts, add it as a read-only
+   mount in `~/.litellm/docker-compose.yml`
+4. Tell me when done — I'll run `cd ~/.litellm && docker compose up -d`"
 
 #### If "Not yet — I'll set it up later":
 
@@ -112,7 +148,15 @@ Skip LiteLLM setup. Tell the user:
 "MemPalace is installed but won't work until you set up the LiteLLM proxy.
 When you're ready:
 1. Get a Gemini API key at https://aistudio.google.com/apikey
-2. Run: `cd ~/git/mempalace/litellm && bash setup.sh`"
+2. Stage the config under your home dir:
+   ```bash
+   mkdir -p ~/.litellm
+   cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
+   cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
+   cp ~/git/mempalace/litellm/.env.example          ~/.litellm/.env
+   ```
+3. Edit `~/.litellm/.env` and add your `GEMINI_API_KEY`
+4. Run `cd ~/.litellm && docker compose up -d`"
 
 ---
 
@@ -178,17 +222,17 @@ Agent:
   
   [runs: git clone ...]
   [runs: bash install.sh --all]
-  [runs: cd litellm && bash setup.sh]
+  [runs: mkdir -p ~/.litellm && cp -n ~/git/mempalace/litellm/{config.yaml,docker-compose.yml,.env.example} ~/.litellm/ && cp ~/.litellm/.env.example ~/.litellm/.env]
   
-  "The LiteLLM setup script created litellm/.env. Please:
-   1. Edit ~/git/mempalace/litellm/.env
+  "I staged the LiteLLM config at ~/.litellm/. Please:
+   1. Edit ~/.litellm/.env
    2. Add your GEMINI_API_KEY (get one at https://aistudio.google.com/apikey)
-   3. Let me know when done, and I'll restart the proxy"
+   3. Let me know when done, and I'll start the proxy"
 
 User: "Done"
 
 Agent:
-  [runs: cd ~/git/mempalace/litellm && bash setup.sh]
+  [runs: cd ~/.litellm && docker compose up -d]
   [runs: mempalace status]
   [runs: curl health check]
   
@@ -206,16 +250,16 @@ Agent:
 
 ### "Docker not found"
 
-If `bash setup.sh` fails with "Docker not found":
+If bringing up LiteLLM in `~/.litellm/` fails with "Docker not found":
 
 **Option 1**: Install Docker
 - macOS: `brew install --cask docker`
 - Linux: `sudo apt install docker.io` or equivalent
 
-**Option 2**: Use Python LiteLLM
+**Option 2**: Use Python LiteLLM (still reading config from `~/.litellm/`)
 ```bash
 pip install litellm
-litellm --config ~/git/mempalace/litellm/config.yaml --port 4000
+litellm --config ~/.litellm/config.yaml --port 4000
 ```
 
 ### "Permission denied" on install.sh

@@ -78,7 +78,7 @@ bash setup.sh
 The script:
 1. Auto-detects existing LiteLLM (Docker running/stopped, Python, or none)
 2. Creates `.env` from template if missing (prompts for `GEMINI_API_KEY`)
-3. Validates backend alignment (Gemini API vs GCP Vertex AI)
+3. Validates backend alignment (Gemini API vs Vertex AI)
 4. Starts/restarts the proxy with health check
 
 ### Backends
@@ -92,15 +92,18 @@ GEMINI_API_KEY=your-key-here
 ```
 Get a key at https://aistudio.google.com/apikey
 
-**(B) GCP Vertex AI** (for orgs already on GCP)
+**(B) Vertex AI** (for orgs already on Vertex)
 ```bash
 # litellm/.env
-VERTEXAI_PROJECT=your-gcp-project-id
-VERTEXAI_LOCATION=us-central1
+VERTEXAI_PROJECT=your-vertex-project-id
+VERTEXAI_LOCATION=global
 ```
 Then edit `litellm/config.yaml`: comment out `gemini/*` models, uncomment
-`vertex_ai/*` ones. Auth uses mounted gcloud ADC (default) or
-`GOOGLE_APPLICATION_CREDENTIALS=/secrets/sa-key.json`.
+`vertex_ai/*` ones. The shipped Vertex examples use the real preview model
+IDs (`vertex_ai/gemini-embedding-2-preview`,
+`vertex_ai/gemini-3.1-flash-lite-preview`). Set `vertex_credentials` on each
+uncommented Vertex entry to your own service-account JSON path, e.g.
+`vertex_credentials: /path/to/vertex-service-account.json`.
 
 ## Environment Variables
 
