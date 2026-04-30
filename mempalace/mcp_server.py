@@ -1870,7 +1870,16 @@ def _start_socket_listener():
     try:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(_SOCKET_PATH)
-        server.listen(4)
+        # Default backlog is intentionally generous: bridge clients are
+        # short-lived (one connect per JSON-RPC line) and a bursty agent
+        # startup can open 5–10 connections back-to-back. A too-small
+        # backlog surfaces as ``ConnectionRefusedError`` on the bridge
+        # side, which we want to avoid even at moderate concurrency.
+        try:
+            backlog = int(os.environ.get("MEMPAL_MCP_BACKLOG", "64"))
+        except ValueError:
+            backlog = 64
+        server.listen(max(1, backlog))
     except OSError:
         return
 

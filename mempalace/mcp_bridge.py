@@ -44,7 +44,7 @@ def _uds_available(path: str) -> bool:
         return False
 
 
-def _proxy_via_uds(path: str) -> int:
+def _proxy_via_uds(path: str, fallback_argv: list[str]) -> int:
     while True:
         line = sys.stdin.readline()
         if not line:
@@ -55,7 +55,14 @@ def _proxy_via_uds(path: str) -> int:
 
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            sock.connect(path)
+            try:
+                sock.connect(path)
+            except OSError:
+                # The UDS may disappear or temporarily refuse connections after
+                # the initial availability probe (singleton restart, backlog
+                # overflow, stale socket inode). Fall back immediately to a
+                # local stdio server instead of failing the agent request.
+                return _proxy_via_subprocess(fallback_argv, initial_line=line)
             sock.sendall((line + "\n").encode("utf-8"))
             data = b""
             while not data.endswith(b"\n"):
@@ -70,7 +77,7 @@ def _proxy_via_uds(path: str) -> int:
             sock.close()
 
 
-def _proxy_via_subprocess(argv: list[str]) -> int:
+def _proxy_via_subprocess(argv: list[str], initial_line: str | None = None) -> int:
     proc = subprocess.Popen(
         argv,
         stdin=subprocess.PIPE,
@@ -84,6 +91,16 @@ def _proxy_via_subprocess(argv: list[str]) -> int:
     assert proc.stdout is not None
 
     try:
+        if initial_line is not None:
+            proc.stdin.write(initial_line)
+            if not initial_line.endswith("\n"):
+                proc.stdin.write("\n")
+            proc.stdin.flush()
+            resp = proc.stdout.readline()
+            if not resp:
+                return proc.wait(timeout=5)
+            sys.stdout.write(resp)
+            sys.stdout.flush()
         while True:
             line = sys.stdin.readline()
             if not line:
@@ -111,11 +128,12 @@ def _proxy_via_subprocess(argv: list[str]) -> int:
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     force_stdio = os.environ.get("MEMPAL_NO_SINGLETON") == "1"
+    fallback_argv = ["mempalace-mcp", *argv]
 
     if not force_stdio and _uds_available(SOCKET_PATH):
-        return _proxy_via_uds(SOCKET_PATH)
+        return _proxy_via_uds(SOCKET_PATH, fallback_argv)
 
-    return _proxy_via_subprocess(["mempalace-mcp", *argv])
+    return _proxy_via_subprocess(fallback_argv)
 
 
 if __name__ == "__main__":
