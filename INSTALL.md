@@ -456,7 +456,7 @@ Three version surfaces exist:
 - Claude's installed plugin cache path metadata
 
 The source of truth is the runtime/package version. The plugin manifests in this
-fork are now aligned to `3.3.309`; if Claude still shows an old installed cache
+fork are now aligned to `3.3.310`; if Claude still shows an old installed cache
 entry, re-run install/sync or reinstall the plugin from the UI.
 
 ## Uninstall
