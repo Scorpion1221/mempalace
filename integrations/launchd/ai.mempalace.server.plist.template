@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>ai.mempalace.server</string>
+
+    <!-- Direct exec — no bash wrapper — so launchd can SIGTERM the Python
+         process cleanly and atexit cleanup runs on shutdown.
+         @MEMPAL_MCP_PATH@ is replaced by `mempalace singleton install`. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@MEMPAL_MCP_PATH@</string>
+        <string>--singleton</string>
+    </array>
+
+    <!-- RunAtLoad + KeepAlive so the singleton comes up on login and
+         respawns on crash. Throttle prevents crash-loops from hammering
+         the log. -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <!-- Inherit the user session environment so ~/.mempalace/env values
+         that were pushed via `launchctl setenv` (or the Cursor env plist)
+         apply here too. Additional per-service overrides go under
+         EnvironmentVariables below. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>@HOME@</string>
+        <key>PATH</key>
+        <string>@PATH@</string>
+    </dict>
+
+    <!-- Stdout/stderr tee into ~/.mempalace/logs/ so crashes are
+         diagnosable without attaching to launchd directly. -->
+    <key>StandardOutPath</key>
+    <string>@HOME@/.mempalace/logs/mcp.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@HOME@/.mempalace/logs/mcp.err.log</string>
+
+    <key>WorkingDirectory</key>
+    <string>@HOME@</string>
+
+    <!-- Process type: Background keeps it away from the foreground UI
+         scheduling class. Safety > latency for a memory singleton. -->
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

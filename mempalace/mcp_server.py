@@ -88,6 +88,16 @@ def _parse_args():
         metavar="PATH",
         help="Path to the palace directory (overrides config file and env var)",
     )
+    parser.add_argument(
+        "--singleton",
+        action="store_true",
+        help=(
+            "Run as a managed singleton: start the UDS listener and block on "
+            "signals instead of reading JSON-RPC from stdin. Use this under "
+            "launchd/systemd so the process does not exit when stdin is "
+            "closed/EOF. Env override: MEMPAL_MCP_SINGLETON=1."
+        ),
+    )
     args, unknown = parser.parse_known_args()
     if unknown:
         logger.debug("Ignoring unknown args: %s", unknown)
@@ -1846,6 +1856,10 @@ def _start_socket_listener():
     import socket
     import threading
 
+    if os.environ.get("MEMPAL_MCP_DISABLE_SOCKET") == "1":
+        logger.info("Socket listener disabled by MEMPAL_MCP_DISABLE_SOCKET=1")
+        return
+
     sock_dir = os.path.dirname(_SOCKET_PATH)
     os.makedirs(sock_dir, exist_ok=True)
     if os.path.exists(_SOCKET_PATH):
@@ -1856,7 +1870,16 @@ def _start_socket_listener():
     try:
         server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         server.bind(_SOCKET_PATH)
-        server.listen(4)
+        # Default backlog is intentionally generous: bridge clients are
+        # short-lived (one connect per JSON-RPC line) and a bursty agent
+        # startup can open 5–10 connections back-to-back. A too-small
+        # backlog surfaces as ``ConnectionRefusedError`` on the bridge
+        # side, which we want to avoid even at moderate concurrency.
+        try:
+            backlog = int(os.environ.get("MEMPAL_MCP_BACKLOG", "64"))
+        except ValueError:
+            backlog = 64
+        server.listen(max(1, backlog))
     except OSError:
         return
 
@@ -1936,6 +1959,34 @@ def main():
         sys.stderr.write(f"[mempalace] palace bootstrap failed (non-fatal): {exc}\n")
     _run_startup_health_check()
     logger.info("MemPalace MCP Server starting...")
+
+    singleton_mode = _args.singleton or os.environ.get("MEMPAL_MCP_SINGLETON") == "1"
+    if singleton_mode:
+        # Managed-service mode: no stdio peer to read from. Block on a signal
+        # event so launchd/systemd see a long-lived process while the UDS
+        # listener keeps serving bridge clients in its background thread.
+        import signal
+        import threading
+
+        stop_event = threading.Event()
+
+        def _handle_signal(signum, _frame):
+            logger.info("Received signal %s, shutting down singleton", signum)
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handle_signal)
+            except (OSError, ValueError):
+                # Some environments (windows, non-main thread) can refuse
+                # signal installation — accept the default handler instead.
+                pass
+        logger.info(
+            "Singleton mode active (UDS listener only). Waiting for SIGTERM/SIGINT..."
+        )
+        stop_event.wait()
+        return
+
     while True:
         try:
             line = sys.stdin.readline()

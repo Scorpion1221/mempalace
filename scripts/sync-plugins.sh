@@ -387,7 +387,7 @@ env_vals = {v: os.environ.get(v, "") for v in vars_to_set}
 if not re.search(r'^\[mcp_servers\.mempalace\]', content, re.MULTILINE):
     if content and not content.endswith("\n"):
         content += "\n"
-    content += "\n[mcp_servers.mempalace]\ncommand = \"mempalace-mcp\"\nenv = {}\n"
+    content += "\n[mcp_servers.mempalace]\ncommand = \"mempalace-mcp-bridge\"\nenv = {}\n"
     print("  → bootstrapped [mcp_servers.mempalace] block")
 
 # 0b. [plugins."mempalace"] — register the plugin so Codex picks it up at
@@ -439,6 +439,25 @@ else:
         content += "\n"
     content += "\n[features]\ncodex_hooks = true\n"
     print("  → bootstrapped [features] block with codex_hooks = true")
+
+# 0e. [mcp_servers.mempalace].command — force bridge-first for existing blocks.
+#     Users that installed under the previous stdio-only model still have
+#     command = "mempalace-mcp" literally pinned in their config; leave those
+#     custom commands alone only if they've deliberately switched to something
+#     exotic (anything that isn't the legacy "mempalace-mcp" string).
+cmd_match = re.search(
+    r'(\[mcp_servers\.mempalace\](?:(?!\n\[)[^\n]|\n)*?command\s*=\s*)"([^"]+)"',
+    content,
+    re.DOTALL,
+)
+if cmd_match and cmd_match.group(2) == "mempalace-mcp":
+    content = (
+        content[: cmd_match.start()]
+        + cmd_match.group(1)
+        + '"mempalace-mcp-bridge"'
+        + content[cmd_match.end():]
+    )
+    print('  → rewrote [mcp_servers.mempalace].command to "mempalace-mcp-bridge"')
 
 # 1. [mcp_servers.mempalace] env = { ... } — one-line inline table.
 #    Rebuild the inline value entirely since single-line TOML is painful to

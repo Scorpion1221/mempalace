@@ -1,331 +1,493 @@
 # MemPalace Installation Guide
 
+MemPalace now supports a **singleton-first** local architecture:
+
+- One long-lived local `mempalace-mcp --singleton` server per machine
+- One Unix-domain socket shared by every agent: `~/.mempalace/mcp.sock`
+- Agent hosts keep using stdio MCP, but they talk to the singleton through
+  `mempalace-mcp-bridge`
+- If the singleton is not available, the bridge automatically falls back to
+  launching a local stdio `mempalace-mcp` subprocess
+
+That gives you the best of both worlds:
+
+- **Shared memory backend + shared process** when the singleton is running
+- **Zero hard dependency** on the singleton while bootstrapping or debugging
+
+This guide is the **single source of truth** for installation behavior.
+`docs/INSTALL-FOR-AGENTS.md` is the companion guide for AI agents helping a
+human perform the install.
+
+## Mental model
+
+### What is shared
+
+These are shared across Claude Code, Codex, Cursor, Hermes, and any future
+agent on the same machine:
+
+- `~/.mempalace/palace/` — ChromaDB palace
+- `~/.mempalace/knowledge_graph.sqlite3` — temporal KG
+- `~/.mempalace/env` — single-source runtime configuration
+- `~/.mempalace/mcp.sock` — singleton server socket (when enabled)
+
+### What is per-agent
+
+Each host still has its own local config format:
+
+- Claude Code → plugin cache + `~/.claude/settings.json`
+- Codex → `~/.codex/config.toml` + `~/.codex/hooks.json`
+- Hermes → plugin runtime + launchd plist env
+- Cursor → plugin link + hooks.json + launchctl/systemd env
+
+The job of `scripts/sync-plugins.sh` is to keep those per-agent configs aligned
+with the single source of truth: `~/.mempalace/env`.
+
+### stdio vs singleton mode
+
+MemPalace supports two ways for agents to talk to MCP:
+
+1. **Preferred** — bridge → singleton socket
+   - agent command: `mempalace-mcp-bridge`
+   - shared server: `mempalace-mcp --singleton`
+   - transport: stdio from agent → UDS socket to singleton
+
+2. **Fallback** — direct stdio subprocess
+   - agent command: `mempalace-mcp`
+   - one process per client
+   - still fully supported
+
+The bridge automatically chooses #1 when `~/.mempalace/mcp.sock` is reachable,
+and falls back to #2 when it is not.
+
 ## Prerequisites
 
 - Python 3.10+
-- pip3
-- Claude Code, Codex CLI, or Cursor IDE
-- Docker (for LiteLLM proxy) or `pip install litellm`
+- `pip3`
+- One or more of: Claude Code, Codex CLI, Cursor IDE, Hermes
+- Optional LLM backend:
+  - Docker (recommended for LiteLLM), or
+  - `pip install litellm`, or
+  - your own OpenAI-compatible endpoint, or
+  - offline mode
 
-## Quick Install
+## Quick install
+
+### Fast path — auto-detect agents + install singleton
 
 ```bash
 git clone git@github.com:Scorpion1221/mempalace.git ~/git/mempalace
 cd ~/git/mempalace
-
-# Step 1: Install MemPalace
-bash install.sh          # Both Claude Code + Codex (default)
-# bash install.sh --claude  # Claude Code only
-# bash install.sh --codex   # Codex only
-
-# Step 2: Set up an LLM backend (embedding + recall LLM)
-# Pick one of the four paths documented in "LLM Backend Setup" below.
-# Recommended default (Path A — LiteLLM via Docker):
-mkdir -p ~/.litellm
-cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
-cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
-cp -n ~/git/mempalace/litellm/.env.example      ~/.litellm/.env.example
-[ -f ~/.litellm/.env ] || cp ~/.litellm/.env.example ~/.litellm/.env
-# edit ~/.litellm/.env to add GEMINI_API_KEY
-cd ~/.litellm && docker compose up -d
+bash install.sh --singleton
 ```
 
-That's it. The `install.sh` script handles Python package, CLI, palace init, and
-plugin sync. See "LLM Backend Setup" below for Path B (Python), Path C (your own
-endpoint), or Path D (offline).
+What this does:
 
-## What Gets Installed
+1. Installs the Python package
+2. Installs three binaries on PATH:
+   - `mempalace`
+   - `mempalace-mcp`
+   - `mempalace-mcp-bridge`
+3. Initializes `~/.mempalace/` if missing
+4. Auto-detects Claude / Codex / Hermes / Cursor and syncs supported ones
+5. Installs the platform singleton service:
+   - macOS → launchd user agent
+   - Linux → systemd `--user` service
+6. Starts the singleton immediately
+
+### Explicit agent selection
+
+```bash
+# Claude Code only
+bash install.sh --claude --singleton
+
+# Codex + Hermes
+bash install.sh --codex --hermes --singleton
+
+# All four agents
+bash install.sh --all --singleton
+
+# Contributors: editable install
+bash install.sh --all --singleton --dev
+```
+
+## What gets installed
 
 ### Claude Code
 
 | Component | Location |
-|-----------|----------|
-| Plugin cache | `~/.claude/plugins/cache/mempalace/mempalace/local/` |
-| Hooks | UserPromptSubmit (recall), Stop (auto-save), PreCompact (emergency save) |
-| MCP server | Auto-registered by plugin |
+|---|---|
+| Plugin cache | `~/.claude/plugins/cache/mempalace/mempalace/<version-or-local>/` |
+| MCP command | `mempalace-mcp-bridge` |
+| Hooks | UserPromptSubmit, Stop, PreCompact |
+| Env sync target | `~/.claude/settings.json` → `env` |
 | Skills | `/mempalace:search`, `/mempalace:status`, `/mempalace:mine`, etc. |
 
 ### Codex CLI
 
 | Component | Location |
-|-----------|----------|
-| MCP server | `~/.codex/config.toml` → `[mcp_servers.mempalace]` |
-| Hooks | `~/.codex/hooks.json` → UserPromptSubmit + Stop |
+|---|---|
+| MCP command | `~/.codex/config.toml` → `[mcp_servers.mempalace]` |
+| Hooks | `~/.codex/hooks.json` |
+| Env sync target | `~/.codex/config.toml` → `[mcp_servers.mempalace].env` + `[shell_environment_policy.set]` |
 | Skills | `~/.codex/vendor_imports/skills/skills/.curated/mempalace-*` |
-| Feature flag | `~/.codex/config.toml` → `[features] codex_hooks = true` |
+| Feature flag | `[features] codex_hooks = true` |
 
 ### Cursor IDE
 
 | Component | Location |
-|-----------|----------|
-| Plugin | `~/.cursor/plugins/local/mempalace` (symlink) |
-| Hooks | `sessionStart` (palace map), `stop` (auto-save), `preCompact` (emergency) |
-| MCP server | Auto-registered via `plugin.json.mcpServers` |
-| Rule | `rules/mempalace-recall.mdc` — instructs agent to call `mempalace_search` |
-
-Cursor has no per-prompt hook for context injection. Auto-recall uses:
-- `sessionStart` injects a palace map (top wings, recent saves, KG entities)
-- `rules/mempalace-recall.mdc` tells the agent to call `mempalace_search` MCP
+|---|---|
+| Plugin | `~/.cursor/plugins/local/mempalace` |
+| MCP command | `mempalace-mcp-bridge` |
+| Hooks | `sessionStart`, `stop`, `preCompact` |
+| Env sync target | launchctl (macOS) or user env + systemd unit (Linux) |
+| Rule | `rules/mempalace-recall.mdc` |
 
 ### Hermes
 
-Hermes users: run `bash scripts/sync-plugins.sh --hermes` after the above.
+| Component | Location |
+|---|---|
+| Runtime plugin | `~/.hermes/hermes-agent/plugins/memory/mempalace` |
+| MCP usage | Hermes itself uses Python import, not MCP, for its built-in tools |
+| Env sync target | `~/Library/LaunchAgents/ai.hermes.gateway.plist` (macOS) |
+| Restart behavior | `sync-plugins.sh` restarts Hermes when syncing Hermes |
 
-## LLM Backend Setup
+## Single source of truth: `~/.mempalace/env`
 
-MemPalace only needs an OpenAI-compatible endpoint for embeddings + recall
-LLM. There are four supported deployment paths — pick whichever fits your
-environment. The agent install guide
-([docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md)) walks through each
-path step-by-step; the summary below is for humans installing manually.
+MemPalace configuration is not supposed to be hand-maintained in four different
+agent configs.
 
-### Path A: LiteLLM via Docker (recommended)
+**Always edit:**
 
-We ship templates under `litellm/`. Stage them under `~/.litellm/` so the
-running config doesn't dirty your repo working tree:
+- `~/.mempalace/env`
+
+**Then propagate:**
+
+```bash
+bash ~/git/mempalace/scripts/sync-plugins.sh
+```
+
+This pushes the values into each installed agent's native config format and then
+validates that all of them match the env file.
+
+### Default env template
+
+The install flow creates `~/.mempalace/env` from
+`scripts/mempalace-env.template` if it does not exist.
+
+Current defaults are:
+
+```bash
+export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"
+export MEMPAL_EMBEDDING_ENDPOINT="http://127.0.0.1:4000"
+export MEMPAL_EMBEDDING_KEY="***"
+
+export MEMPAL_LLM_ENDPOINT="http://127.0.0.1:4000/v1"
+export MEMPAL_LLM_MODEL="gemini-3.1-flash-lite-preview"
+export MEMPAL_LLM_KEY="***"
+```
+
+### Hard rule
+
+Do **not** hand-edit:
+
+- `~/.codex/config.toml` for `MEMPAL_*`
+- `~/.claude/settings.json` for `MEMPAL_*`
+- Hermes launchd plist `MEMPAL_*` values
+- Cursor launchctl env manually
+
+Those are generated targets, not authoritative sources.
+
+## Singleton manager
+
+MemPalace now ships a small service manager wrapper:
+
+```bash
+mempalace singleton install --start
+mempalace singleton status
+mempalace singleton stop
+mempalace singleton uninstall
+```
+
+### macOS
+
+- Service manager: **launchd** user agent
+- Template: `integrations/launchd/ai.mempalace.server.plist.template`
+- Installed plist path: `~/Library/LaunchAgents/ai.mempalace.server.plist`
+
+### Linux
+
+- Service manager: **systemd --user**
+- Template: `integrations/systemd/mempalace-server.service.template`
+- Installed unit path: `~/.config/systemd/user/mempalace-server.service`
+
+### How the singleton stays alive
+
+The singleton service launches:
+
+```bash
+mempalace-mcp --singleton
+```
+
+`--singleton` is different from ordinary stdio MCP mode:
+
+- it starts the socket listener
+- it **does not** block on stdin JSON-RPC
+- it waits for SIGTERM / SIGINT like a normal background service
+
+Without `--singleton`, `mempalace-mcp` exits on stdin EOF, which is why a raw
+launchd/systemd wrapper around the stdio mode is not sufficient.
+
+## LLM backend setup
+
+MemPalace needs an OpenAI-compatible endpoint for:
+
+- embeddings
+- recall rewrite / rerank
+- async-save extraction
+
+There are four supported deployment modes.
+
+### Path A — LiteLLM via Docker (recommended)
 
 ```bash
 mkdir -p ~/.litellm
-cp -n ~/git/mempalace/litellm/config.yaml       ~/.litellm/config.yaml
+cp -n ~/git/mempalace/litellm/config.yaml        ~/.litellm/config.yaml
 cp -n ~/git/mempalace/litellm/docker-compose.yml ~/.litellm/docker-compose.yml
-cp -n ~/git/mempalace/litellm/.env.example      ~/.litellm/.env.example
+cp -n ~/git/mempalace/litellm/.env.example       ~/.litellm/.env.example
 [ -f ~/.litellm/.env ] || cp ~/.litellm/.env.example ~/.litellm/.env
 
-# Edit ~/.litellm/.env to add GEMINI_API_KEY (or VERTEXAI_PROJECT/LOCATION)
-# For Vertex: also edit ~/.litellm/config.yaml — disable gemini/*, enable
-# vertex_ai/*, set vertex_credentials: /path/to/service-account.json
-
+# edit ~/.litellm/.env to add GEMINI_API_KEY or Vertex vars
 cd ~/.litellm && docker compose up -d
 curl -fs http://127.0.0.1:4000/health/readiness && echo "LiteLLM proxy: OK"
 ```
 
-Vertex AI shipped examples use the real preview IDs
-(`vertex_ai/gemini-embedding-2-preview`,
-`vertex_ai/gemini-3.1-flash-lite-preview`).
-
-### Path B: LiteLLM via Python (no Docker)
-
-Same `~/.litellm/config.yaml`, no container:
+### Path B — LiteLLM via Python (no Docker)
 
 ```bash
 pip install litellm
 litellm --config ~/.litellm/config.yaml --port 4000 &
 ```
 
-You manage the process — it won't auto-restart on reboot. Wrap it in
-launchd / systemd if you want a managed service.
+This is supported, but you own the process lifecycle.
 
-### Path C: Bring your own endpoint
+### Path C — Bring your own endpoint
 
-Already running vLLM, Ollama, or any OpenAI-compatible gateway? Skip
-LiteLLM entirely and point MemPalace at it via `~/.mempalace/env`:
+Edit `~/.mempalace/env`:
 
 ```bash
 export MEMPAL_EMBEDDING_MODEL="<embedding-model-id>"
-export MEMPAL_EMBEDDING_ENDPOINT="<base-url>"        # no /v1 suffix
+export MEMPAL_EMBEDDING_ENDPOINT="<base-url>"
 export MEMPAL_EMBEDDING_KEY="<api-key>"
 
-export MEMPAL_LLM_ENDPOINT="<base-url>/v1"           # /v1 required
+export MEMPAL_LLM_ENDPOINT="<base-url>/v1"
 export MEMPAL_LLM_MODEL="<llm-model-id>"
 export MEMPAL_LLM_KEY="<api-key>"
 ```
 
-ChromaDB locks embedding dimensionality at first call. Stick with 3072
-or wipe `~/.mempalace/palace/` before switching to a different dim, and
-optionally set `MEMPAL_EMBEDDING_DIMS` to override the default.
+Then:
 
-### Path D: Offline (no LLM)
-
-No proxy, no endpoint. Auto-save still works in **verbatim raw-transcript
-mode** — every Stop hook writes the transcript window into
-`room=raw_transcript` under tag `async_offline_save`, so the palace keeps
-growing. Embedding falls back to ChromaDB's built-in MiniLM (384d). Recall
-uses pure vector search (no rewrite, no rerank).
-
-What's silently disabled:
-
-- LLM-driven KG fact extraction
-- Diary/drawer structuring during auto-save
-- UserPrompt recall when the prompt has no history-reference word
-
-Opt out of the verbatim raw-transcript writer with `MEMPAL_OFFLINE_SAVE=0`.
-
-When you later add a Gemini key (or any OpenAI-compat endpoint), set
-`MEMPAL_*_ENDPOINT/MODEL/KEY` and re-run `sync-plugins.sh`. Existing raw
-drawers remain searchable; new saves switch to the structured LLM path.
-
-
-
-## Environment Variables
-
-MemPalace uses a single-source env file at `~/.mempalace/env` that propagates
-to all agents. The `scripts/sync-plugins.sh` script (called by `install.sh`)
-creates this from `scripts/mempalace-env.template` if missing.
-
-Default values (match LiteLLM proxy defaults):
-```bash
-export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"
-export MEMPAL_EMBEDDING_ENDPOINT="http://127.0.0.1:4000"
-export MEMPAL_EMBEDDING_KEY="sk-litellm-local"
-
-# One LLM endpoint, shared by async-save and recall enhancement.
-# Default-on whenever endpoint+model are set. Opt out with MEMPAL_LLM=0.
-export MEMPAL_LLM_ENDPOINT="http://127.0.0.1:4000/v1"
-export MEMPAL_LLM_MODEL="gemini-3.1-flash-lite-preview"
-export MEMPAL_LLM_KEY="sk-litellm-local"
-```
-
-> **Backward compat**: pre-3.4 envs that set `MEMPAL_RECALL_ENDPOINT` /
-> `MEMPAL_RECALL_MODEL` / `MEMPAL_RECALL_KEY` (or `MEMPAL_RECALL_LLM=1`)
-> are still honored as legacy aliases — no migration needed.
-
-After editing `~/.mempalace/env`, run:
 ```bash
 bash ~/git/mempalace/scripts/sync-plugins.sh
 ```
 
-This propagates the values into every agent's native config format (Claude Code
-`settings.json`, Codex `config.toml`, Hermes launchd plist, Cursor launchctl).
+### Path D — Offline mode
 
-**Why single-source matters**: Manually keeping four agents in sync caused the
-"drawer save silently fails on Hermes" bug (2026-04-25) when Hermes plist
-drifted from the LiteLLM config the other agents had. Step `[7/8]` of
-`sync-plugins.sh` validates all agents match `~/.mempalace/env` and complains
-on drift.
+No LLM endpoint, no proxy.
 
-## Key Features
+- embedding falls back to ChromaDB MiniLM (384d)
+- auto-save falls back to verbatim raw transcript mode
+- recall uses pure vector search, no LLM rewrite or rerank
 
-### Auto-Recall (UserPromptSubmit Hook)
+To switch into offline mode, comment out or unset the `MEMPAL_*` endpoint/model/key
+variables in `~/.mempalace/env`, then re-run sync.
 
-Every user message automatically triggers a MemPalace search. Relevant memories
-are injected into the AI's context via `<mempalace-recall>` tags before the
-model processes the prompt.
+## MCP wiring
 
-- Trivial prompts ("ok", "hi", "continue") are skipped
-- Results are filtered by relevance (cosine distance < 1.5)
-- Current project wing is soft-boosted based on cwd
-
-### Auto-Save (Stop Hook)
-
-Every 3 human messages, the AI is prompted to save session content to MemPalace
-using AAAK-compressed diary entries and verbatim drawers.
-
-### Codex-Specific Notes
-
-- Codex requires `[features] codex_hooks = true` in `config.toml` for
-  `additionalContext` injection to work
-- Codex does NOT support `PreCompact` hook event
-- Codex uses `prompt` field (not `user_prompt`) in hook input; handler supports both
-- Codex reads hooks from `~/.codex/hooks.json` (global), not plugin directory
-
-## Updating
+### Preferred: singleton + bridge
 
 ```bash
-mempalace update              # git pull --rebase + sync all installed agents
+mempalace singleton install --start
+claude mcp add mempalace -- mempalace-mcp-bridge
 ```
 
-The command auto-detects which agents are installed and only syncs those.
-Under the hood it runs `git pull --rebase` then `bash scripts/sync-plugins.sh`.
+The bridge will:
 
-Other useful flags:
+- connect to `~/.mempalace/mcp.sock` if the singleton is available
+- otherwise fall back to spawning a local `mempalace-mcp`
+
+### Forced direct stdio mode
 
 ```bash
-mempalace update --check              # preview: what's behind, which agents will sync
-mempalace update --agents claude,codex  # only sync specific agents
-mempalace update --tag v3.3.308       # check out a specific release tag
-mempalace update --no-pull            # skip git pull, just re-sync plugins
+claude mcp add mempalace -- mempalace-mcp
 ```
 
-**Manual fallback** (if `mempalace update` isn't available yet):
+or temporarily:
 
 ```bash
-cd ~/git/mempalace
-git pull
-bash scripts/sync-plugins.sh
+MEMPAL_NO_SINGLETON=1 mempalace-mcp-bridge
 ```
 
-## Development Workflow
-
-When you modify MemPalace code, use flag-based sync:
+### Quick helper output
 
 ```bash
-bash scripts/sync-plugins.sh              # Sync all 4 agents (auto-skip missing)
-bash scripts/sync-plugins.sh --claude     # Sync Claude Code only
-bash scripts/sync-plugins.sh --codex      # Sync Codex only
-bash scripts/sync-plugins.sh --hermes     # Sync Hermes only
-bash scripts/sync-plugins.sh --cursor     # Sync Cursor only
+mempalace mcp
 ```
 
-The script does 8 things:
-1. Snapshot-reinstall Python package
-2. Sync Claude Code plugin + `settings.json` env
-3. Sync Codex plugin + `config.toml` env
-4. Sync Hermes plugin + launchd plist env
-5. Sync Cursor plugin + launchctl env
-6. Restart Hermes if running
-7. **Validate** all agents' env values match `~/.mempalace/env`
-8. Summary
+This prints the singleton-preferred wiring commands.
 
-## AI Agent-Assisted Install
+## Verification
 
-If you're installing via an AI coding assistant (Claude Code, Codex, Cursor),
-see [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md). That guide tells
-the agent to use `AskUserQuestion` to collect install preferences, then run
-the right commands on your behalf.
+### Core installation
+
+```bash
+mempalace status
+python3 -c "import mempalace; print(mempalace.__version__)"
+```
+
+### Singleton status
+
+```bash
+mempalace singleton status
+```
+
+Expected:
+
+- service is running
+- `~/.mempalace/mcp.sock` exists
+- socket is reachable
+
+### Bridge path
+
+```bash
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"0.1"}}}' \
+  | mempalace-mcp-bridge
+```
+
+Expected JSON response includes:
+
+- `serverInfo.name = mempalace`
+- `serverInfo.version = <current version>`
+
+## Development workflow
+
+When changing MemPalace code:
+
+```bash
+bash scripts/sync-plugins.sh              # all installed agents
+bash scripts/sync-plugins.sh --claude
+bash scripts/sync-plugins.sh --codex
+bash scripts/sync-plugins.sh --hermes
+bash scripts/sync-plugins.sh --cursor
+```
+
+What `sync-plugins.sh` does:
+
+1. Loads `~/.mempalace/env`
+2. Reinstalls the Python package snapshot
+3. Syncs Claude plugin + settings env
+4. Syncs Codex plugin + config env
+5. Syncs Hermes plugin + launchd env
+6. Syncs Cursor plugin + launchctl/system env
+7. Restarts Hermes if needed
+8. Validates all agent configs match the env file
 
 ## Troubleshooting
 
-### "Drawer save silently fails"
+### "Bridge hangs or no response"
 
-Check env var alignment:
+Check whether the singleton is reachable:
+
+```bash
+mempalace singleton status
+ls -la ~/.mempalace/mcp.sock
+```
+
+If singleton is down, the bridge should fall back automatically. To bypass the
+singleton on purpose:
+
+```bash
+MEMPAL_NO_SINGLETON=1 mempalace-mcp-bridge
+```
+
+### "Singleton service keeps restarting"
+
+Check logs:
+
+```bash
+# macOS
+ tail -n 200 ~/.mempalace/logs/mcp.err.log
+
+# Linux
+ journalctl --user -u mempalace-server.service -n 200 --no-pager
+```
+
+### "Socket exists but is stale"
+
+A stale socket file can remain after abrupt termination. This is safe.
+The next `mempalace-mcp --singleton` start unlinks and rebinds it.
+
+If you want to force a clean restart:
+
+```bash
+mempalace singleton stop
+rm -f ~/.mempalace/mcp.sock
+mempalace singleton start
+```
+
+### "Environment drift"
+
 ```bash
 bash ~/git/mempalace/scripts/sync-plugins.sh
 ```
-Step `[7/8]` validates all agents match `~/.mempalace/env`. If drift is
-detected, the script shows which agent has which value.
+
+Step `[7/8]` reports which agent drifted from `~/.mempalace/env`.
 
 ### "Embedding dimension mismatch"
 
-ChromaDB stores embeddings with a fixed dimensionality. The palace is
-initialised with whatever dimension the first embedding call returns (3072 for
-`gemini-embedding-001` with `output_dimensionality: 3072`).
+ChromaDB locks embedding dimensionality at first write. If you change to a
+model with a different output dimension, you must rebuild or wipe the palace.
 
-**Changing `output_dimensionality` in `litellm/config.yaml` after the palace
-exists will silently break every upsert** — ChromaDB rejects vectors with the
-wrong dimension.
+### "Claude plugin version looks stale"
 
-If you must change it, wipe `~/.mempalace/palace/` and re-ingest.
+Three version surfaces exist:
 
-### "LiteLLM proxy not responding"
+- Python runtime version (`mempalace.__version__`)
+- plugin manifests (`plugin.json`, `marketplace.json`)
+- Claude's installed plugin cache path metadata
 
-```bash
-cd ~/.litellm
-docker compose logs -f              # Check logs
-docker compose restart              # Restart proxy
-curl http://127.0.0.1:4000/health/readiness  # Health check
-```
-
-### "Hooks not firing"
-
-- **Claude Code**: Restart after `install.sh` or `sync-plugins.sh`
-- **Codex**: Check `~/.codex/config.toml` has `[features] codex_hooks = true`
-- **Cursor**: Check `~/.cursor/hooks.json` has `mempal-hook.sh` entries
-- **Hermes**: Check plist env: `plutil -p ~/Library/LaunchAgents/ai.hermes.gateway.plist | grep MEMPAL`
+The source of truth is the runtime/package version. The plugin manifests in this
+fork are now aligned to `3.3.310`; if Claude still shows an old installed cache
+entry, re-run install/sync or reinstall the plugin from the UI.
 
 ## Uninstall
 
+### Disable singleton
+
 ```bash
-# Remove Python package
+mempalace singleton uninstall
+```
+
+### Remove package + data
+
+```bash
 pip3 uninstall mempalace
-
-# Remove palace data
 rm -rf ~/.mempalace/
+```
 
-# Remove agent plugins
+### Remove agent-side runtime files
+
+```bash
 rm -rf ~/.claude/plugins/cache/mempalace/
 rm -rf ~/.agents/plugins/mempalace/
 rm -rf ~/.cursor/plugins/local/mempalace
 rm -rf ~/.hermes/hermes-agent/plugins/memory/mempalace
-
-# Remove hooks (manual — check each agent's hooks.json)
 ```
+
+## AI-assisted install
+
+If you're having an AI coding assistant install MemPalace on your behalf, see:
+
+- [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md)
+
+That guide tells the agent what to ask, which command to run, and what to
+verify — without duplicating the system facts documented here.

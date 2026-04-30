@@ -646,6 +646,40 @@ def cmd_instructions(args):
     run_instructions(name=args.name)
 
 
+def cmd_singleton_install(args):
+    from .singleton_manager import cmd_install
+
+    cmd_install(args)
+
+
+
+def cmd_singleton_start(args):
+    from .singleton_manager import cmd_start
+
+    cmd_start(args)
+
+
+
+def cmd_singleton_stop(args):
+    from .singleton_manager import cmd_stop
+
+    cmd_stop(args)
+
+
+
+def cmd_singleton_status(args):
+    from .singleton_manager import cmd_status
+
+    cmd_status(args)
+
+
+
+def cmd_singleton_uninstall(args):
+    from .singleton_manager import cmd_uninstall
+
+    cmd_uninstall(args)
+
+
 def cmd_update(args):
     """Pull latest code and sync plugins to installed agents."""
     from .updater import check, update
@@ -657,20 +691,29 @@ def cmd_update(args):
     update(agents=agents, tag=args.tag or None, pull=not args.no_pull)
 
 
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
-    base_server_cmd = "mempalace-mcp"
+    base_server_cmd = "mempalace-mcp-bridge"
+    direct_server_cmd = "mempalace-mcp"
 
     if args.palace:
         resolved_palace = str(Path(args.palace).expanduser())
         server_cmd = f"{base_server_cmd} --palace {shlex.quote(resolved_palace)}"
+        direct_cmd = f"{direct_server_cmd} --palace {shlex.quote(resolved_palace)}"
     else:
         server_cmd = base_server_cmd
+        direct_cmd = direct_server_cmd
 
-    print("MemPalace MCP quick setup:")
+    print("MemPalace MCP quick setup (singleton-preferred):")
     print(f"  claude mcp add mempalace -- {server_cmd}")
-    print("\nRun the server directly:")
-    print(f"  {server_cmd}")
+    print("\nDefault architecture:")
+    print("  1. Start one local singleton: mempalace singleton install --start")
+    print("  2. Point agents at mempalace-mcp-bridge")
+    print("  3. Bridge talks to ~/.mempalace/mcp.sock when available")
+    print("\nPer-agent fallback (no singleton):")
+    print(f"  claude mcp add mempalace -- {direct_cmd}")
+    print(f"  {direct_cmd}")
 
     if not args.palace:
         print("\nOptional custom palace:")
@@ -1033,6 +1076,26 @@ def main():
         help=("Run non-destructive palace health diagnostics. Exit 0 ok, 1 warn, 2 corrupt."),
     )
 
+    # singleton manager
+    p_singleton = sub.add_parser(
+        "singleton",
+        help="Manage the shared local MemPalace MCP singleton (launchd on macOS, systemd --user on Linux)",
+    )
+    singleton_sub = p_singleton.add_subparsers(dest="singleton_action")
+    p_singleton_install = singleton_sub.add_parser(
+        "install",
+        help="Install the platform-specific singleton service definition",
+    )
+    p_singleton_install.add_argument(
+        "--start",
+        action="store_true",
+        help="Start the singleton immediately after installing the service definition",
+    )
+    singleton_sub.add_parser("start", help="Start (or restart) the singleton service")
+    singleton_sub.add_parser("stop", help="Stop the singleton service")
+    singleton_sub.add_parser("status", help="Show singleton service + socket status")
+    singleton_sub.add_parser("uninstall", help="Remove the singleton service definition")
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1119,6 +1182,21 @@ def main():
             return
         args.name = name
         cmd_instructions(args)
+        return
+
+    if args.command == "singleton":
+        action = getattr(args, "singleton_action", None)
+        singleton_dispatch = {
+            "install": cmd_singleton_install,
+            "start": cmd_singleton_start,
+            "stop": cmd_singleton_stop,
+            "status": cmd_singleton_status,
+            "uninstall": cmd_singleton_uninstall,
+        }
+        if action not in singleton_dispatch:
+            p_singleton.print_help()
+            return
+        singleton_dispatch[action](args)
         return
 
     dispatch = {
