@@ -45,21 +45,32 @@ Architecture, concepts, and mining flows:
 
 ## Install
 
-### Quick Install (2 steps)
+### Quick install (2 steps)
 
 ```bash
-# Step 1: Install MemPalace
+# Step 1: Install MemPalace + local singleton (launchd on macOS, systemd --user on Linux)
 git clone git@github.com:Scorpion1221/mempalace.git ~/git/mempalace
 cd ~/git/mempalace
-bash install.sh                 # Python package + Claude Code/Codex plugins
+bash install.sh --singleton            # auto-detects Claude Code / Codex / Cursor / Hermes
 
 # Step 2: Set up LiteLLM proxy (for embedding + recall LLM)
 cd litellm
-bash setup.sh                   # Auto-detects Docker/Python, guides through config
+bash setup.sh                          # auto-detects Docker/Python, guides through config
 ```
 
-That's it! The scripts handle Python package, CLI, palace init, plugin sync, and
-LiteLLM proxy setup. See [INSTALL.md](INSTALL.md) for details.
+That's it. The installer does the Python package, the three binaries
+(`mempalace`, `mempalace-mcp`, `mempalace-mcp-bridge`), palace init, plugin
+sync, and the platform-appropriate singleton service (launchd on macOS,
+systemd `--user` on Linux).
+
+Agents talk to MemPalace through a shared local UDS socket
+(`~/.mempalace/mcp.sock`) via the `mempalace-mcp-bridge` shim. If the
+singleton is ever unavailable, the bridge automatically falls back to a
+per-agent stdio subprocess — so nothing hard-breaks during bootstrap or
+debugging.
+
+See [INSTALL.md](INSTALL.md) for the full architecture, env rules, and
+backend options (LiteLLM Docker / LiteLLM Python / own endpoint / offline).
 
 ### AI Agent-Assisted Install
 

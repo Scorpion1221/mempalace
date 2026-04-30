@@ -1,0 +1,29 @@
+[Unit]
+Description=MemPalace MCP singleton (shared UDS server)
+Documentation=file://@HOME@/.mempalace/README
+After=default.target
+
+[Service]
+# Direct exec — no shell wrapper — so systemd's SIGTERM reaches the Python
+# process and atexit cleanup runs on shutdown.
+# @MEMPAL_MCP_PATH@ is replaced by `mempalace singleton install`.
+ExecStart=@MEMPAL_MCP_PATH@ --singleton
+
+# Singleton model: always respawn if the server exits non-zero.
+Restart=on-failure
+RestartSec=5s
+
+# Environment: read from ~/.mempalace/env (single source of truth).
+# EnvironmentFile is optional so the unit can still come up before the user
+# has customised their env (falls back to package defaults).
+EnvironmentFile=-@HOME@/.mempalace/env
+
+# systemd user units inherit HOME/USER/XDG_* automatically; other vars
+# must be made explicit so the Python side doesn't depend on shell init.
+Environment=PATH=@PATH@
+
+StandardOutput=append:@HOME@/.mempalace/logs/mcp.out.log
+StandardError=append:@HOME@/.mempalace/logs/mcp.err.log
+
+[Install]
+WantedBy=default.target
