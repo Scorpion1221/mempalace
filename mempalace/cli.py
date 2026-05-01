@@ -1144,7 +1144,7 @@ def main():
     p_update.add_argument(
         "--no-pull",
         action="store_true",
-        help="Skip git pull, only re-run sync-plugins.sh",
+        help="Skip git pull, only re-run install.sh (which then reinstalls + syncs plugins)",
     )
 
     # drain-recovery

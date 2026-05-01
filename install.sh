@@ -20,6 +20,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$SCRIPT_DIR"
+RUNTIME_DIR="${MEMPAL_RUNTIME_DIR:-$HOME/.mempalace/venv}"
+RUNTIME_BIN_DIR="$RUNTIME_DIR/bin"
+RUNTIME_PYTHON="$RUNTIME_BIN_DIR/python3"
+RUNTIME_PIP=("$RUNTIME_PYTHON" -m pip)
+RUNTIME_MANIFEST="${MEMPAL_RUNTIME_MANIFEST:-$HOME/.mempalace/runtime.json}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -31,6 +36,48 @@ info()  { echo -e "${CYAN}[mempalace]${NC} $*"; }
 ok()    { echo -e "${GREEN}[mempalace]${NC} $*"; }
 warn()  { echo -e "${YELLOW}[mempalace]${NC} $*"; }
 fail()  { echo -e "${RED}[mempalace]${NC} $*"; exit 1; }
+
+ensure_runtime() {
+  RUNTIME_CREATED=false
+  if [[ -x "$RUNTIME_PYTHON" ]]; then
+    return 0
+  fi
+
+  local bootstrap_python=""
+  for candidate in python3 python; do
+    if command -v "$candidate" &>/dev/null; then
+      bootstrap_python="$(command -v "$candidate")"
+      break
+    fi
+  done
+  [[ -n "$bootstrap_python" ]] || fail "Neither python3 nor python found to bootstrap $RUNTIME_DIR"
+
+  info "Creating dedicated runtime at $RUNTIME_DIR using $bootstrap_python..."
+  mkdir -p "$(dirname "$RUNTIME_DIR")"
+  "$bootstrap_python" -m venv "$RUNTIME_DIR"
+  [[ -x "$RUNTIME_PYTHON" ]] || fail "Failed to create runtime python at $RUNTIME_PYTHON"
+  RUNTIME_CREATED=true
+}
+
+write_runtime_manifest() {
+  "$RUNTIME_PYTHON" - <<PY
+import json, sysconfig
+from pathlib import Path
+import mempalace
+scripts = Path(sysconfig.get_path('scripts')).resolve()
+manifest = {
+    "version": mempalace.__version__,
+    "python": str(Path("$RUNTIME_PYTHON").resolve()),
+    "scripts_dir": str(scripts),
+    "mcp": str((scripts / "mempalace-mcp").resolve()),
+    "bridge": str((scripts / "mempalace-mcp-bridge").resolve()),
+}
+path = Path("$RUNTIME_MANIFEST").expanduser()
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(manifest, indent=2) + "\n")
+print(path)
+PY
+}
 
 # ─── Parse args ───
 INSTALL_CLAUDE=false
@@ -98,22 +145,25 @@ if $AUTO_DETECT; then
 fi
 
 # ─── Step 1: Python package ───
-if ! command -v python3 &>/dev/null; then
-  fail "python3 not found"
-fi
-
-PYTHON_BIN="$(command -v python3)"
+ensure_runtime
 
 if $DEV_MODE; then
-  info "Installing Python package in editable mode (--dev)..."
-  "$PYTHON_BIN" -m pip install -q -e "$REPO_DIR"
+  info "Installing Python package in editable mode (--dev) into $RUNTIME_DIR..."
+  "${RUNTIME_PIP[@]}" install -q -e "$REPO_DIR"
+elif [[ "$RUNTIME_CREATED" == true ]]; then
+  # Fresh runtime: pull in full dependency tree (chromadb, pyyaml, etc.).
+  info "Installing Python package + dependencies into new runtime $RUNTIME_DIR..."
+  "${RUNTIME_PIP[@]}" install -q --upgrade pip
+  "${RUNTIME_PIP[@]}" install -q "$REPO_DIR"
 else
-  # Snapshot install from the LOCAL checkout (not the remote tag).
-  # This preserves unpushed branch changes such as portable-install work.
-  info "Installing Python package from local checkout snapshot..."
-  "$PYTHON_BIN" -m pip install -q --force-reinstall --no-deps "$REPO_DIR"
+  # Incremental upgrade against an existing runtime that already has deps.
+  # ``--no-deps`` keeps upgrades fast and avoids churn on chromadb/pip metadata.
+  info "Installing Python package from local checkout snapshot into $RUNTIME_DIR..."
+  "${RUNTIME_PIP[@]}" install -q --force-reinstall --no-deps "$REPO_DIR"
 fi
-ok "Python package installed: $($PYTHON_BIN -c 'import mempalace, mempalace.version; print(f"v{mempalace.version.__version__} ({mempalace.__file__})")')"
+ok "Python package installed: $($RUNTIME_PYTHON -c 'import mempalace, mempalace.version; print(f"v{mempalace.version.__version__} ({mempalace.__file__})")')"
+MANIFEST_PATH="$(write_runtime_manifest)"
+ok "Runtime manifest written: $MANIFEST_PATH"
 
 # ─── Step 2: CLI + MCP binaries on PATH ───
 # Three binaries:
@@ -123,7 +173,7 @@ ok "Python package installed: $($PYTHON_BIN -c 'import mempalace, mempalace.vers
 #
 # For GUI agents, prefer system-visible bin dirs. On Apple Silicon macOS,
 # /opt/homebrew/bin is often writable even when /usr/local/bin is not.
-PY_SCRIPT_DIR="$($PYTHON_BIN -c "import sysconfig; print(sysconfig.get_path('scripts'))")"
+PY_SCRIPT_DIR="$($RUNTIME_PYTHON -c "import sysconfig; print(sysconfig.get_path('scripts'))")"
 
 install_symlink() {
   local name="$1"
@@ -135,6 +185,9 @@ install_symlink() {
     return 1
   fi
 
+  # Dedicated-runtime commands should win over stale shims from other venvs.
+  # For MemPalace, a system-visible bin dir is the only reliable way to make
+  # bare `mempalace` resolve to the dedicated runtime across shells / GUI apps.
   if [[ "$prefer_system" == "system" ]]; then
     local linked=false
     for dst_dir in /usr/local/bin /opt/homebrew/bin; do
@@ -153,9 +206,7 @@ install_symlink() {
       warn "    ln -sf $src /opt/homebrew/bin/$name"
     fi
   else
-    if command -v "$name" &>/dev/null; then
-      ok "$name already on PATH: $(which "$name")"
-    elif [[ -d "$HOME/.local/bin" ]] && echo "$PATH" | grep -q "$HOME/.local/bin"; then
+    if [[ -d "$HOME/.local/bin" ]] && echo "$PATH" | grep -q "$HOME/.local/bin"; then
       ln -sf "$src" "$HOME/.local/bin/$name"
       ok "$name symlinked: ~/.local/bin/$name"
     elif [[ -w /opt/homebrew/bin ]]; then
@@ -164,20 +215,22 @@ install_symlink() {
     elif [[ -w /usr/local/bin ]]; then
       ln -sf "$src" "/usr/local/bin/$name"
       ok "$name symlinked: /usr/local/bin/$name"
+    elif command -v "$name" &>/dev/null; then
+      ok "$name already on PATH: $(which "$name")"
     else
       warn "$name not on PATH. Add manually: ln -s $src ~/.local/bin/$name"
     fi
   fi
 }
 
-install_symlink "mempalace" ""
+install_symlink "mempalace" "system"
 install_symlink "mempalace-mcp" "system"
 install_symlink "mempalace-mcp-bridge" "system"
 
 # ─── Step 3: Initialize palace if needed ───
 if [[ ! -d "$HOME/.mempalace/palace" ]]; then
   info "Initializing palace..."
-  "$PYTHON_BIN" -m mempalace init "$HOME/.mempalace" 2>/dev/null || true
+  "$RUNTIME_PYTHON" -m mempalace init "$HOME/.mempalace" 2>/dev/null || true
   ok "Palace initialized at ~/.mempalace/"
 else
   ok "Palace already exists at ~/.mempalace/"
@@ -195,6 +248,10 @@ $INSTALL_CODEX  && SYNC_FLAGS+=("--codex")
 $INSTALL_HERMES && SYNC_FLAGS+=("--hermes")
 $INSTALL_CURSOR && SYNC_FLAGS+=("--cursor")
 
+export MEMPAL_RUNTIME_DIR="$RUNTIME_DIR"
+export MEMPAL_RUNTIME_PYTHON="$RUNTIME_PYTHON"
+export MEMPAL_RUNTIME_MANIFEST="$RUNTIME_MANIFEST"
+
 if [[ ${#SYNC_FLAGS[@]} -gt 0 ]]; then
   info "Syncing plugins via sync-plugins.sh ${SYNC_FLAGS[*]}..."
   bash "$SYNC_SCRIPT" "${SYNC_FLAGS[@]}"
@@ -205,7 +262,7 @@ fi
 # ─── Step 5: Optional singleton service ───
 if $ENABLE_SINGLETON; then
   info "Installing shared-MCP singleton service..."
-  "$PYTHON_BIN" -m mempalace.cli singleton install --start || warn "singleton install failed (see output above)"
+  "$RUNTIME_PYTHON" -m mempalace.cli singleton install --start || warn "singleton install failed (see output above)"
 fi
 
 # ─── Summary ───
@@ -215,14 +272,15 @@ echo -e "${GREEN}  MemPalace installation complete${NC}"
 echo "═══════════════════════════════════════════"
 echo ""
 echo "  Palace:    ~/.mempalace/"
-echo "  Package:   $($PYTHON_BIN -c 'import mempalace; print(mempalace.__file__)')"
+echo "  Runtime:   $RUNTIME_DIR"
+echo "  Package:   $($RUNTIME_PYTHON -c 'import mempalace; print(mempalace.__file__)')"
 echo "  CLI:       $(command -v mempalace 2>/dev/null || echo 'not on PATH')"
 echo "  MCP:       $(command -v mempalace-mcp 2>/dev/null || echo 'not on PATH')"
 echo "  Bridge:    $(command -v mempalace-mcp-bridge 2>/dev/null || echo 'not on PATH')"
 if $ENABLE_SINGLETON; then
-  echo "  Singleton: installed (run: $PYTHON_BIN -m mempalace.cli singleton status)"
+  echo "  Singleton: installed (run: $RUNTIME_PYTHON -m mempalace.cli singleton status)"
 else
-  echo "  Singleton: NOT installed (run: $PYTHON_BIN -m mempalace.cli singleton install --start)"
+  echo "  Singleton: NOT installed (run: $RUNTIME_PYTHON -m mempalace.cli singleton install --start)"
 fi
 echo ""
 
@@ -235,5 +293,5 @@ echo ""
 echo "Next steps:"
 echo "  1. LiteLLM proxy (embedding + recall LLM):"
 echo "       cd $REPO_DIR/litellm && bash setup.sh"
-echo "  2. Verify:      $PYTHON_BIN -m mempalace.cli status && $PYTHON_BIN -m mempalace.cli singleton status"
+echo "  2. Verify:      $RUNTIME_PYTHON -m mempalace.cli status && $RUNTIME_PYTHON -m mempalace.cli singleton status"
 echo "  3. Test recall: /mempalace:search 'your query'"

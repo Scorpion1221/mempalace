@@ -13,10 +13,12 @@
 #   Mixing flags: bash sync-plugins.sh --claude --codex   (sync only those two).
 set -euo pipefail
 
-REPO="$HOME/git/mempalace"
+REPO="${MEMPAL_REPO:-$HOME/git/mempalace}"
 HERMES_REPO="$REPO/integrations/hermes"
 ENV_FILE="$HOME/.mempalace/env"
 ENV_TEMPLATE="$REPO/scripts/mempalace-env.template"
+RUNTIME_DIR="${MEMPAL_RUNTIME_DIR:-$HOME/.mempalace/venv}"
+RUNTIME_PYTHON="${MEMPAL_RUNTIME_PYTHON:-$RUNTIME_DIR/bin/python3}"
 
 # Parse flags — positive "which agents to sync" instead of skip list.
 SYNC_CLAUDE=false
@@ -145,35 +147,29 @@ done
 echo "  ✓ $LOADED_COUNT MEMPAL_* vars loaded from single source"
 
 # --- [1/8] Python package snapshot install ----------------------------------
-# Locate the best pip for installing mempalace. Priority:
-#   1. Repo's own venv (.venv or venv)
-#   2. Currently active venv (VIRTUAL_ENV)
-#   3. Bare `pip` in PATH
-_PIP=""
-for candidate in "$REPO/.venv/bin/pip" "$REPO/venv/bin/pip"; do
+# Prefer the dedicated MemPalace runtime. Fallback to repo-local venv only if
+# the runtime was not bootstrapped yet (e.g. direct sync script invocation).
+_PYTHON=""
+for candidate in "$RUNTIME_PYTHON" "$REPO/.venv/bin/python3" "$REPO/venv/bin/python3"; do
     if [ -x "$candidate" ]; then
-        _PIP="$candidate"
+        _PYTHON="$candidate"
         break
     fi
 done
-if [ -z "$_PIP" ] && [ -n "${VIRTUAL_ENV:-}" ] && [ -x "$VIRTUAL_ENV/bin/pip" ]; then
-    _PIP="$VIRTUAL_ENV/bin/pip"
+if [ -z "$_PYTHON" ] && command -v python3 >/dev/null 2>&1; then
+    _PYTHON="$(command -v python3)"
 fi
-[ -z "$_PIP" ] && _PIP="pip"
+if [ -z "$_PYTHON" ]; then
+    echo "  ✗ No usable python found for package install."
+    echo "    Expected $RUNTIME_PYTHON or a repo-local venv."
+    exit 1
+fi
 
 echo "[1/8] Installing Python package (snapshot, not editable)..."
-if ! "$_PIP" install --force-reinstall --no-deps "$REPO" -q 2>&1; then
-    echo "  ⚠ $_PIP failed. Trying python3 -m pip..."
-    python3 -m pip install --force-reinstall --no-deps "$REPO" -q 2>&1 || {
-        echo "  ✗ Package install failed."
-        echo "    Make sure you're in a venv, or that $REPO/.venv exists."
-        exit 1
-    }
+if ! "$_PYTHON" -m pip install --force-reinstall --no-deps "$REPO" -q 2>&1; then
+    echo "  ✗ Package install failed via $_PYTHON -m pip"
+    exit 1
 fi
-# Use the same python that pip installed into for the version check.
-_PYTHON="${_PIP%/pip}"
-_PYTHON="${_PYTHON%/bin}/bin/python3"
-[ -x "$_PYTHON" ] || _PYTHON="python3"
 echo "  → $("$_PYTHON" -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
 
 # --- [2/8] Claude Code: sync plugin cache + upsert env in settings.json -----

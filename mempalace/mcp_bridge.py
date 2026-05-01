@@ -21,6 +21,7 @@ import os
 import socket
 import subprocess
 import sys
+from pathlib import Path
 
 
 SOCKET_PATH = os.environ.get(
@@ -125,10 +126,23 @@ def _proxy_via_subprocess(argv: list[str], initial_line: str | None = None) -> i
                 proc.kill()
 
 
+def _fallback_server_argv(argv: list[str]) -> list[str]:
+    env_server = os.environ.get("MEMPAL_MCP_SERVER", "").strip()
+    if env_server:
+        return [env_server, *argv]
+
+    current = Path(sys.argv[0]).resolve()
+    sibling = current.with_name("mempalace-mcp")
+    if sibling.exists():
+        return [str(sibling), *argv]
+
+    return [sys.executable, "-m", "mempalace.mcp_server", *argv]
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = argv if argv is not None else sys.argv[1:]
     force_stdio = os.environ.get("MEMPAL_NO_SINGLETON") == "1"
-    fallback_argv = ["mempalace-mcp", *argv]
+    fallback_argv = _fallback_server_argv(argv)
 
     if not force_stdio and _uds_available(SOCKET_PATH):
         return _proxy_via_uds(SOCKET_PATH, fallback_argv)
