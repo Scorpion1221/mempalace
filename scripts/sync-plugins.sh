@@ -171,26 +171,29 @@ if ! "$_PYTHON" -m pip install --force-reinstall --no-deps "$REPO" -q 2>&1; then
     exit 1
 fi
 echo "  → $("$_PYTHON" -c 'import mempalace; print(f"mempalace {mempalace.__version__}")')"
+RUNTIME_VERSION="$($_PYTHON -c 'import mempalace; print(mempalace.__version__)')"
 
 # --- [2/8] Claude Code: sync plugin cache + upsert env in settings.json -----
+CLAUDE_CACHE_ROOT="$HOME/.claude/plugins/cache/mempalace/mempalace"
+CLAUDE_INSTALLED_JSON="$HOME/.claude/plugins/installed_plugins.json"
 CLAUDE_CACHE=""
-if [ -f "$HOME/.claude/plugins/installed_plugins.json" ]; then
-    CLAUDE_CACHE=$(python3 -c "
-import json
-with open('$HOME/.claude/plugins/installed_plugins.json') as f:
-    data = json.load(f)
-for key, entries in data.get('plugins', {}).items():
-    if 'mempalace' in key.lower() and entries:
-        print(entries[0].get('installPath', ''))
-        break
-" 2>/dev/null)
-fi
-if [ -z "$CLAUDE_CACHE" ] || [ ! -d "$CLAUDE_CACHE" ]; then
-    # `find` exits 1 when the dir doesn't exist; pipefail then kills the whole
-    # script under macOS bash 3.2 + `set -euo pipefail`. Suppress that — empty
-    # CLAUDE_CACHE is handled by the next branch and is the expected case
-    # before the user has installed the Claude Code plugin yet.
-    CLAUDE_CACHE=$( { find "$HOME/.claude/plugins/cache/mempalace/mempalace" -maxdepth 1 -mindepth 1 -type d 2>/dev/null || true; } | head -1)
+if [ -f "$CLAUDE_INSTALLED_JSON" ] || [ -d "$CLAUDE_CACHE_ROOT" ]; then
+    CLAUDE_CACHE=$(RUNTIME_VERSION="$RUNTIME_VERSION" CLAUDE_INSTALLED_JSON="$CLAUDE_INSTALLED_JSON" CLAUDE_CACHE_ROOT="$CLAUDE_CACHE_ROOT" python3 - <<'PY'
+from pathlib import Path
+import os
+from mempalace.claude_plugin_sync import sync_claude_cache_metadata
+
+installed = Path(os.environ['CLAUDE_INSTALLED_JSON']).expanduser()
+cache_root = Path(os.environ['CLAUDE_CACHE_ROOT']).expanduser()
+runtime_version = os.environ['RUNTIME_VERSION']
+target = sync_claude_cache_metadata(
+    installed_plugins_path=installed,
+    cache_root=cache_root,
+    runtime_version=runtime_version,
+)
+print(target or "")
+PY
+    )
 fi
 if ! $SYNC_CLAUDE; then
     echo "[2/8] Claude Code: skipped (not in sync list)"

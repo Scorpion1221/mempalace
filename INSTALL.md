@@ -456,8 +456,10 @@ Three version surfaces exist:
 - Claude's installed plugin cache path metadata
 
 The source of truth is the runtime/package version. The plugin manifests in this
-fork are now aligned to `3.3.311`; if Claude still shows an old installed cache
-entry, re-run install/sync or reinstall the plugin from the UI.
+fork are now aligned to `3.3.311`, and `sync-plugins.sh` also rewrites Claude's
+`installed_plugins.json` + versioned cache directory to the runtime version. If
+Claude still shows an old installed cache entry after a sync, that's now a bug in
+the sync path rather than expected metadata drift.
 
 ## Uninstall
 
