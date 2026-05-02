@@ -28,6 +28,18 @@ _REQUIRED_OPERATORS = frozenset({"$eq", "$ne", "$in", "$nin", "$and", "$or", "$c
 _OPTIONAL_OPERATORS = frozenset({"$gt", "$gte", "$lt", "$lte"})
 _SUPPORTED_OPERATORS = _REQUIRED_OPERATORS | _OPTIONAL_OPERATORS
 
+# HNSW tuning to prevent link_lists.bin bloat on large mines (#344).
+#
+# With default params (batch_size=100, sync_threshold=1000, initial capacity
+# 1000), inserting tens of thousands of drawers triggers ~30 index resizes
+# and hundreds of persistDirty() calls. Setting large batch and sync
+# thresholds at collection creation defers persistence until a single large
+# batch completes, breaking the resize+persist feedback loop.
+_HNSW_BLOAT_GUARD = {
+    "hnsw:batch_size": 50_000,
+    "hnsw:sync_threshold": 50_000,
+}
+
 
 def _validate_where(where: Optional[dict]) -> None:
     """Scan a where-clause for unknown operators and raise ``UnsupportedFilterError``.
@@ -750,7 +762,9 @@ class ChromaBackend(BaseBackend):
 
         if create:
             collection = client.get_or_create_collection(
-                collection_name, metadata={"hnsw:space": hnsw_space}, **ef_kwargs
+                collection_name,
+                metadata={"hnsw:space": hnsw_space, **_HNSW_BLOAT_GUARD},
+                **ef_kwargs,
             )
         else:
             collection = client.get_collection(collection_name, **ef_kwargs)
@@ -818,7 +832,9 @@ class ChromaBackend(BaseBackend):
         if embedding_function is not None:
             ef_kwargs["embedding_function"] = embedding_function
         collection = self._client(palace_path).create_collection(
-            collection_name, metadata={"hnsw:space": hnsw_space}, **ef_kwargs
+            collection_name,
+            metadata={"hnsw:space": hnsw_space, **_HNSW_BLOAT_GUARD},
+            **ef_kwargs,
         )
         return ChromaCollection(collection)
 
