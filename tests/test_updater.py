@@ -72,6 +72,39 @@ def test_update_no_pull_skips_git(tmp_path):
     assert "--singleton" in install_calls[0]
 
 
+def test_update_tag_fetches_only_requested_tag(tmp_path):
+    repo = _make_fake_repo(tmp_path)
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    with patch("subprocess.run", side_effect=fake_run), \
+         patch.object(updater, "_runtime_package_version", return_value="3.3.401"):
+        updater.update(repo=repo, pull=True, tag="3.3.401")
+
+    git_calls = [c for c in calls if c[0] == "git"]
+    fetch_calls = [c for c in git_calls if len(c) >= 6 and c[3] == "fetch"]
+    assert len(fetch_calls) == 1
+    fetch_cmd = fetch_calls[0]
+    assert "--tags" not in fetch_cmd
+    assert fetch_cmd == [
+        "git",
+        "-C",
+        str(repo),
+        "fetch",
+        "--force",
+        "origin",
+        "refs/tags/3.3.401:refs/tags/3.3.401",
+    ]
+    checkout_calls = [c for c in git_calls if len(c) >= 5 and c[3] == "checkout"]
+    assert checkout_calls == [["git", "-C", str(repo), "checkout", "3.3.401"]]
+    install_calls = [c for c in calls if "install.sh" in str(c)]
+    assert len(install_calls) == 1
+    assert "--singleton" in install_calls[0]
+
+
 def test_check_does_not_modify(tmp_path, capsys):
     repo = _make_fake_repo(tmp_path)
     with patch.object(updater, "_find_repo", return_value=repo):

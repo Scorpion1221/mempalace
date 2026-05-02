@@ -180,11 +180,29 @@ def update(
 
         if tag:
             print(f"Fetching and checking out tag {tag}...")
-            rc = _git("fetch", "--tags", "origin", repo=repo)
-            if rc != 0:
-                sys.exit(rc)
-            rc = _git("checkout", tag, repo=repo)
-            if rc != 0:
+            requested = tag.strip()
+            candidates = []
+            for candidate in (requested, f"v{requested}" if not requested.startswith("v") else requested.removeprefix("v")):
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
+
+            checked_out = None
+            for candidate in candidates:
+                rc = _git(
+                    "fetch",
+                    "--force",
+                    "origin",
+                    f"refs/tags/{candidate}:refs/tags/{candidate}",
+                    repo=repo,
+                )
+                if rc != 0:
+                    continue
+                rc = _git("checkout", candidate, repo=repo)
+                if rc == 0:
+                    checked_out = candidate
+                    break
+
+            if checked_out is None:
                 print(f"Tag {tag} not found.", file=sys.stderr)
                 sys.exit(1)
         else:
