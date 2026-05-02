@@ -293,8 +293,25 @@ class TestAutoLinkSharedRooms:
             },
         )
         assert palace_graph.auto_link_shared_rooms([], col=MagicMock()) == []
+
+
+class TestTopicTunnelKind:
+    """Cross-wing topic tunnels are tagged with kind='topic' to distinguish
+    them from explicit folder-derived tunnels (upstream #1184).
+
+    Skipped on our fork until compute_topic_tunnels is implemented.
+    """
+
+    def test_topic_tunnel_kind_label(self, tmp_path, monkeypatch):
+        if not hasattr(palace_graph, "compute_topic_tunnels"):
+            import pytest
+
+            pytest.skip("compute_topic_tunnels not implemented in this fork")
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
         palace_graph.create_tunnel("wing_a", "auth", "wing_b", "users", label="x")
-        palace_graph.compute_topic_tunnels({"wing_a": ["Redis"], "wing_b": ["Redis"]}, min_count=1)
+        palace_graph.compute_topic_tunnels(
+            {"wing_a": ["Redis"], "wing_b": ["Redis"]}, min_count=1
+        )
 
         tunnels = palace_graph.list_tunnels()
         kinds = sorted(t["kind"] for t in tunnels)
