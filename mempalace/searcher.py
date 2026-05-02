@@ -101,7 +101,12 @@ def _tokenize(text: str) -> list:
     (e.g. ``"飞书回复"`` → ``["飞书", "书回", "回复"]``).  Bigrams are the
     smallest unit that preserves meaningful Chinese word fragments (most
     Chinese words are 2 characters) while staying dependency-free (no jieba).
+
+    Tolerates ``None`` documents — Chroma can return ``None`` in the
+    ``documents`` field for drawers without text content.
     """
+    if not text:
+        return []
     lower = text.lower()
     tokens: list = []
     for raw_token in _TOKEN_RE.findall(lower):
