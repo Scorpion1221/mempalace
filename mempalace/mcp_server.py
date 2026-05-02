@@ -57,7 +57,9 @@ from .config import (  # noqa: E402
     sanitize_content,
 )
 from .version import __version__  # noqa: E402
-from .backends.chroma import ChromaBackend, ChromaCollection  # noqa: E402
+from chromadb.errors import NotFoundError as _ChromaNotFoundError  # noqa: E402
+
+from .backends.chroma import ChromaBackend, ChromaCollection, _HNSW_BLOAT_GUARD  # noqa: E402
 from .palace import (  # noqa: E402
     PalaceWriteLockTimeout,
     ensure_palace_initialized,
@@ -270,11 +272,23 @@ def _get_collection(create=False):
 
         if needs_rebuild:
             if create:
-                raw = client.get_or_create_collection(
-                    _config.collection_name,
-                    metadata={"hnsw:space": "cosine"},
-                    **ef_kwargs,
-                )
+                # ChromaDB 1.5.x's Rust binding SIGSEGVs when
+                # get_or_create_collection is called with metadata that differs
+                # from what's stored. Split into get -> except create so the
+                # metadata-comparison codepath is skipped for existing
+                # collections (mirrors backend-layer fix from #1262).
+                try:
+                    raw = client.get_collection(_config.collection_name, **ef_kwargs)
+                except _ChromaNotFoundError:
+                    raw = client.create_collection(
+                        _config.collection_name,
+                        metadata={
+                            "hnsw:space": "cosine",
+                            "hnsw:num_threads": 1,
+                            **_HNSW_BLOAT_GUARD,
+                        },
+                        **ef_kwargs,
+                    )
             else:
                 raw = client.get_collection(_config.collection_name, **ef_kwargs)
             _collection_cache = ChromaCollection(
