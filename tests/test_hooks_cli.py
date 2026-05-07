@@ -786,7 +786,11 @@ def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
     }
 
 
-def test_userprompt_llm_can_skip_recall_entirely(tmp_path):
+def test_userprompt_ignores_llm_should_recall_false_and_lets_rerank_decide(tmp_path):
+    """LLM gate's should_recall=false no longer short-circuits the pipeline.
+
+    We trust rerank — which sees actual candidate drawers — to filter relevance,
+    rather than the gate which only sees the prompt and over-prunes."""
     palace_dir = tmp_path / "palace"
     palace_dir.mkdir()
     previous_assistant = "Earlier I explained the Codex hook behavior."
@@ -802,10 +806,22 @@ def test_userprompt_llm_can_skip_recall_entirely(tmp_path):
             "after": None,
         }
 
+    def fake_search_memories(**kwargs):
+        return {"results": [{"wing": "x", "room": "y", "text": "topic-adjacent noise"}]}
+
+    rerank_calls = {}
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        rerank_calls["called"] = True
+        # Rerank sees the candidates and decides nothing is relevant — empty list.
+        return []
+
     with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
         with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
             with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
-                with patch("mempalace.searcher.search_memories") as mock_search:
+                with patch(
+                    "mempalace.searcher.search_memories", side_effect=fake_search_memories
+                ) as mock_search:
                     with patch("mempalace.recall_llm.is_enabled", return_value=True):
                         with patch(
                             "mempalace.recall_llm._get_llm_config",
@@ -815,18 +831,25 @@ def test_userprompt_llm_can_skip_recall_entirely(tmp_path):
                                 "mempalace.recall_llm.decide_recall",
                                 side_effect=fake_decide_recall,
                             ):
-                                result = _capture_hook_output(
-                                    hook_userprompt,
-                                    {
-                                        "session_id": "session-a",
-                                        "prompt": "format this json",
-                                        "cwd": "/tmp/project",
-                                    },
-                                    state_dir=tmp_path,
-                                )
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "format this json",
+                                            "cwd": "/tmp/project",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
 
+    # Pipeline runs through search and rerank despite gate saying skip.
+    mock_search.assert_called()
+    assert rerank_calls.get("called") is True
+    # Rerank filtered everything → empty recall block.
     assert result == {}
-    mock_search.assert_not_called()
 
 
 def test_userprompt_session_local_continue_skips_before_search(tmp_path):

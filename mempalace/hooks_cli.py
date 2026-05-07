@@ -2263,8 +2263,15 @@ def hook_userprompt(data: dict, harness: str):
         search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
         original_query = search_query
 
-    # --- Stage 1: LLM query rewrite (default-on when an LLM endpoint is
-    # configured; opt out via MEMPAL_LLM=0). ---
+    # --- Stage 1: LLM query rewrite + filter selection (default-on when an
+    # LLM endpoint is configured; opt out via MEMPAL_LLM=0).
+    #
+    # NOTE: we deliberately ignore decide_recall's `should_recall` field. The
+    # gate sees only the prompt; rerank can judge against actual candidates,
+    # and the rerank prompt already returns NONE when nothing helps. Letting
+    # rerank decide eliminates the "should-have-recalled but didn't" failure
+    # mode where the gate over-prunes prompts that lack explicit history
+    # markers. A failed/None LLM decide just falls back to the original query.
     llm_config = None
     time_after = None
     rewrite_filters: dict = {}
@@ -2277,7 +2284,7 @@ def hook_userprompt(data: dict, harness: str):
             _log("UserPrompt recall: LLM disabled, running pure vector search (offline mode)")
         if llm_config:
             # Build active context: cwd + palace taxonomy (rooms/halls) + top
-            # KG entities, so the gate can pick valid filter values AND rewrite
+            # KG entities, so the LLM can pick valid filter values AND rewrite
             # the query to echo canonical entity names when the user implicitly
             # references one.
             active_ctx = _build_active_context(cwd, palace_path, preferred_wing=preferred_wing)
@@ -2288,14 +2295,7 @@ def hook_userprompt(data: dict, harness: str):
                 previous_assistant_context={"tail": previous_assistant_tail},
                 active_context=active_ctx,
             )
-            if recall_decision:
-                if not recall_decision.get("should_recall"):
-                    _log(
-                        "UserPrompt recall: LLM skipped recall "
-                        f"reason={recall_decision.get('reason', 'unknown')}"
-                    )
-                    _output({})
-                    return
+            if recall_decision and recall_decision.get("query"):
                 search_query = recall_decision["query"]
                 time_after = recall_decision.get("after")
                 # Validate LLM-suggested filters against real palace taxonomy.
@@ -2332,39 +2332,17 @@ def hook_userprompt(data: dict, harness: str):
                         )
                 _log(
                     "UserPrompt recall: "
-                    f"LLM decided recall reason={recall_decision.get('reason', 'unknown')}, "
+                    f"LLM rewrite reason={recall_decision.get('reason', 'unknown')}, "
                     f"query={search_query[:80]!r}, after={time_after}, "
-                    f"filters={rewrite_filters or 'none'}"
+                    f"filters={rewrite_filters or 'none'}, "
+                    f"gate_should_recall={recall_decision.get('should_recall')}"
                 )
             else:
-                # LLM returned None (API failure / parse error).
-                # If the user explicitly references history, fallback to search.
-                # Otherwise fail closed — don't waste time on generic queries.
-                from .recall_llm import _HISTORY_REFERENCE_HINTS
-
-                prompt_lower = user_prompt.lower()
-                has_history_ref = any(h in prompt_lower for h in _HISTORY_REFERENCE_HINTS)
-                if has_history_ref:
-                    _log(
-                        "UserPrompt recall: LLM decide returned None, but history ref detected — fallback to search"
-                    )
-                else:
-                    _log("UserPrompt recall: LLM decide returned None, fail closed")
-                    _output({})
-                    return
+                # LLM returned None / no query — fall through with the
+                # original prompt as the query. Rerank is the final filter.
+                _log("UserPrompt recall: no LLM rewrite available, using original query")
     except Exception as e:
-        from .recall_llm import _HISTORY_REFERENCE_HINTS
-
-        prompt_lower = user_prompt.lower()
-        has_history_ref = any(h in prompt_lower for h in _HISTORY_REFERENCE_HINTS)
-        if has_history_ref:
-            _log(
-                f"UserPrompt recall: decide+rewrite failed ({e}), but history ref detected — fallback to search"
-            )
-        else:
-            _log(f"UserPrompt recall: decide+rewrite failed ({e}), fail closed")
-            _output({})
-            return
+        _log(f"UserPrompt recall: decide+rewrite failed ({e}), using original query")
 
     # Check budget before search
     if _budget_exceeded():
