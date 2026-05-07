@@ -1965,24 +1965,29 @@ def _get_palace_taxonomy(palace_path: str) -> dict:
         return {}
 
 
-def _get_kg_context_for_recall(hits, query=""):
-    """Query knowledge graph for entities named in the user's QUERY.
+def _collect_kg_candidates(query: str = "") -> list[dict]:
+    """Return KG triples relevant to ``query`` as rerank-ready candidate dicts.
+
+    Each dict mirrors a drawer-hit's shape so the candidate can be merged
+    into the rerank pool. The LLM then judges KG triples against drawer
+    hits using the same relevance bar instead of letting them bypass rerank.
 
     Strategy:
       1. Load all KG entity names.
       2. Match any entity whose name appears as a substring of the raw query
          (case-insensitive). Works for CJK where bigram tokenization would
          otherwise lose entity references ("猫" is 1 char, "Scorpion" is 8).
-      3. Fall back to long-token matching (>=3 chars) so short/proper-noun
-         queries still get some coverage when no entity name appears
-         verbatim.
+      3. Fall back to long-token matching (>=3 chars, or any CJK bigram)
+         so short/proper-noun queries still get coverage when no entity
+         name appears verbatim.
       4. For each matched entity, fetch current facts (valid_to IS NULL).
+      5. Wrap each triple as a hit dict: text="subj → pred → obj",
+         wing="kg", room="triple", matched_via="kg".
 
     We intentionally do NOT pull entities from hit wings — doing so used to
     contaminate recall, dragging in every fact about a project just because
     one of its drawers surfaced unrelated to the user's question.
     """
-    del hits  # kept for caller compatibility; wing-based extraction was noisy
     if not query:
         return []
     try:
@@ -2033,8 +2038,8 @@ def _get_kg_context_for_recall(hits, query=""):
         return []
 
     try:
-        lines = []
-        seen = set()
+        candidates: list[dict] = []
+        seen: set = set()
         for entity in entities[:6]:
             try:
                 facts = kg.query_entity(entity, direction="both")
@@ -2050,11 +2055,23 @@ def _get_kg_context_for_recall(hits, query=""):
                     key = (subj, pred, obj)
                     if key not in seen:
                         seen.add(key)
-                        lines.append(f"- [KG] {subj} → {pred} → {obj}")
-            if len(lines) >= 8:
+                        candidates.append(
+                            {
+                                "text": f"{subj} → {pred} → {obj}",
+                                "wing": "kg",
+                                "room": "triple",
+                                "matched_via": "kg",
+                                # Neutral signal — rerank judges relevance.
+                                "similarity": 0.5,
+                                "distance": 1.0,
+                                "created_at": "",
+                                "source_file": "kg",
+                            }
+                        )
+            if len(candidates) >= 8:
                 break
         kg.close()
-        return lines[:8]
+        return candidates[:8]
     except Exception:
         try:
             kg.close()
@@ -2469,10 +2486,24 @@ def hook_userprompt(data: dict, harness: str):
     # facts (e.g. "user has three cats") as diary entries too. Let the
     # reranker decide — it correctly identifies relevance.
 
-    if not hits:
+    # Collect KG triples that match the query's named entities. Previously
+    # these went straight to the output unfiltered, dragging in topically-
+    # related-but-irrelevant facts (e.g. "LiteLLM → endpoints → 127.0.0.1:4000"
+    # surfaced for "configure Azure gpt-image-2"). Now they enter the rerank
+    # pool alongside drawer hits and get judged against the same relevance bar.
+    kg_candidates = _collect_kg_candidates(query=user_prompt)
+
+    if not hits and not kg_candidates:
         _log("UserPrompt recall: no hits")
         _output({})
         return
+
+    if not hits:
+        # Pure-KG recall: skip tunnel expansion (nothing to expand from)
+        # and feed KG candidates directly into the rerank pool.
+        result = {"results": list(kg_candidates)}
+        hits = result["results"]
+        _log(f"UserPrompt recall: no drawer hits; rerank pool is {len(hits)} KG triples")
 
     # Tunnel expansion: for each unique (wing, room) in the current pool,
     # follow explicit tunnels to surface connected drawers in other wings.
@@ -2586,6 +2617,19 @@ def hook_userprompt(data: dict, harness: str):
     except Exception as e:
         _log(f"UserPrompt recall: tunnel expansion skipped ({e})")
 
+    # Merge KG candidates into the rerank pool. Done after tunnel expansion
+    # so KG triples sit alongside drawer hits + tunnel-expanded drawers as
+    # peer candidates judged by the same rerank pass.
+    if kg_candidates:
+        already_kg = any(h.get("matched_via") == "kg" for h in hits)
+        if not already_kg:
+            result.setdefault("results", []).extend(kg_candidates)
+            hits = result.get("results", []) if isinstance(result, dict) else hits
+            _log(
+                f"UserPrompt recall: KG added {len(kg_candidates)} triples to rerank pool "
+                f"(pool now {len(hits)})"
+            )
+
     # --- Stage 3: LLM rerank + relevance filter ---
     # Always rerank when LLM is available — even small hit sets may contain
     # noise. The reranker filters out irrelevant matches (e.g. drawers that
@@ -2609,20 +2653,29 @@ def hook_userprompt(data: dict, harness: str):
         except Exception as e:
             _log(f"UserPrompt recall: LLM rerank failed ({e}), using BM25 order")
 
-    # Format recall block
-    lines = []
+    # Format recall block — split rerank output by kind so KG triples
+    # render in their own section. Drawer order is preserved within each
+    # section as rerank ordered them.
+    drawer_lines: list[str] = []
+    kg_lines: list[str] = []
     for hit in hits[:USERPROMPT_RECALL_LIMIT]:
+        if hit.get("matched_via") == "kg":
+            triple = hit.get("text", "")
+            if triple:
+                kg_lines.append(f"- [KG] {triple}")
+            continue
         wing = hit.get("wing", "?")
         room = hit.get("room", "general")
         created = hit.get("created_at", "")
         date_tag = f" ({created[:10]})" if created and len(created) >= 10 else ""
         snippet = _truncate_snippet(hit.get("text", ""))
         if snippet:
-            lines.append(f"- [{wing}/{room}]{date_tag} {snippet}")
+            drawer_lines.append(f"- [{wing}/{room}]{date_tag} {snippet}")
 
-    kg_lines = _get_kg_context_for_recall(hits, query=user_prompt)
+    lines = drawer_lines
     if kg_lines:
-        lines.append("")
+        if drawer_lines:
+            lines.append("")
         lines.extend(kg_lines)
 
     memories_body = "\n".join(lines)

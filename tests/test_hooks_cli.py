@@ -1056,10 +1056,10 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
     assert result == {}
 
 
-# --- _get_kg_context_for_recall: CJK token handling ---
+# --- _collect_kg_candidates: CJK token handling + rerank-pool shape ---
 
 
-def test_kg_recall_keeps_cjk_bigrams(monkeypatch):
+def test_kg_candidates_keep_cjk_bigrams(monkeypatch):
     """CJK bigrams (len 2) must NOT be filtered out by the length check.
 
     The tokenizer emits 2-char bigrams for Chinese runs. A plain
@@ -1084,8 +1084,7 @@ def test_kg_recall_keeps_cjk_bigrams(monkeypatch):
 
     monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
 
-    # Pass an empty hits list so the only entity source is the query tokens.
-    hooks_cli._get_kg_context_for_recall([], query="我养了几只猫")
+    hooks_cli._collect_kg_candidates(query="我养了几只猫")
 
     # At least one CJK bigram should have been looked up.
     assert queried, "Expected at least one CJK token to be queried, got none"
@@ -1094,7 +1093,7 @@ def test_kg_recall_keeps_cjk_bigrams(monkeypatch):
     )
 
 
-def test_kg_recall_still_keeps_long_latin_tokens(monkeypatch):
+def test_kg_candidates_still_keep_long_latin_tokens(monkeypatch):
     """Regression guard: long Latin tokens should still be queried."""
     from mempalace import hooks_cli
 
@@ -1112,15 +1111,14 @@ def test_kg_recall_still_keeps_long_latin_tokens(monkeypatch):
 
     monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
 
-    hooks_cli._get_kg_context_for_recall([], query="Alice works at Acme Corporation")
+    hooks_cli._collect_kg_candidates(query="Alice works at Acme Corporation")
 
-    # Expect at least one of the >=3-char Latin tokens to have been queried.
     assert any(t.lower() in {"alice", "works", "acme", "corporation"} for t in queried), (
         f"Expected Latin tokens in {queried!r}"
     )
 
 
-def test_kg_recall_short_latin_tokens_still_filtered(monkeypatch):
+def test_kg_candidates_short_latin_tokens_still_filtered(monkeypatch):
     """Sanity: 2-char non-CJK tokens should NOT be queried (noise filter intact)."""
     from mempalace import hooks_cli
 
@@ -1138,13 +1136,58 @@ def test_kg_recall_short_latin_tokens_still_filtered(monkeypatch):
 
     monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
 
-    # "is" / "at" / "to" are 2-char Latin — must stay filtered.
-    hooks_cli._get_kg_context_for_recall([], query="it is at to")
+    hooks_cli._collect_kg_candidates(query="it is at to")
 
     for t in queried:
         assert len(t) >= 3 or hooks_cli._CJK_CHAR_RE.search(t), (
             f"Unexpectedly queried short non-CJK token {t!r}"
         )
+
+
+def test_kg_candidates_returns_rerank_ready_dicts(monkeypatch):
+    """Returned candidates must have the same shape as drawer hits so they
+    drop into the rerank pool without special-casing."""
+    from mempalace import hooks_cli
+
+    class _FakeKG:
+        def list_entity_names(self):
+            return ["LiteLLM"]
+
+        def query_entity(self, entity, direction="both"):
+            return [
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "endpoints",
+                    "object": "127.0.0.1:4000",
+                    "valid_to": None,
+                },
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "deprecated",
+                    "object": "old_alias",
+                    "valid_to": "2026-01-01",  # closed fact — must be skipped
+                },
+            ]
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    candidates = hooks_cli._collect_kg_candidates(query="how do I configure litellm")
+
+    assert len(candidates) == 1, "Closed fact should be filtered"
+    c = candidates[0]
+    assert c["matched_via"] == "kg"
+    assert c["wing"] == "kg"
+    assert c["room"] == "triple"
+    assert c["text"] == "LiteLLM → endpoints → 127.0.0.1:4000"
+    # Required fields for downstream rerank/format code:
+    assert "similarity" in c
+    assert "distance" in c
+    assert "created_at" in c
 
 
 # --- _ASYNC_SAVE_PROMPT language consistency guidance ---
@@ -1600,6 +1643,183 @@ def test_userprompt_drops_unknown_wing(tmp_path):
     # The hallucinated wing must NOT have reached search_memories.
     assert search_calls, "search_memories should have been called"
     assert search_calls[0].get("wing") is None
+
+
+# --- KG candidates flow through rerank ---
+
+
+def test_userprompt_kg_candidates_enter_rerank_pool(tmp_path, monkeypatch):
+    """KG triples must be merged into the rerank pool — not appended unfiltered.
+
+    Previously KG triples bypassed rerank and went straight to the output,
+    so topically-related-but-irrelevant facts (e.g. "LiteLLM → endpoints"
+    for an "Azure gpt-image-2 config" question) leaked through. They now
+    sit alongside drawer hits and get judged by the same relevance pass.
+    """
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_search_memories(**kwargs):
+        return {
+            "results": [
+                {"wing": "scorpion", "room": "configuration", "text": "drawer hit one"},
+                {"wing": "scorpion", "room": "configuration", "text": "drawer hit two"},
+            ]
+        }
+
+    class _FakeKG:
+        def list_entity_names(self):
+            return ["LiteLLM"]
+
+        def query_entity(self, entity, direction="both"):
+            return [
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "endpoints",
+                    "object": "127.0.0.1:4000",
+                    "valid_to": None,
+                },
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "缺失",
+                    "object": "context_length_字段",
+                    "valid_to": None,
+                },
+            ]
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    rerank_seen: dict = {}
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        rerank_seen["pool"] = list(hits)
+        # Keep the drawer hit only — simulate rerank dropping irrelevant KG noise.
+        return [h for h in hits if h.get("matched_via") != "kg"][:top_k]
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                return_value={
+                                    "should_recall": True,
+                                    "reason": "config_query",
+                                    "query": "configure litellm",
+                                    "after": None,
+                                    "filters": {},
+                                },
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "帮我配置 litellm",
+                                            "cwd": "/tmp/scorpion",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    assert "pool" in rerank_seen, "rerank must have been called"
+    pool = rerank_seen["pool"]
+    kg_in_pool = [h for h in pool if h.get("matched_via") == "kg"]
+    drawers_in_pool = [h for h in pool if h.get("matched_via") != "kg"]
+    assert len(kg_in_pool) == 2, f"both KG triples should be in pool, got {len(kg_in_pool)}"
+    assert len(drawers_in_pool) == 2, f"drawer hits should still be in pool, got {drawers_in_pool}"
+
+    # Output must reflect rerank's decision: KG was filtered, only drawer
+    # survives. So no "[KG]" line should leak into the output.
+    body = result["hookSpecificOutput"]["additionalContext"]
+    assert "drawer hit" in body
+    assert "[KG]" not in body, (
+        "rerank dropped KG triples — they should not appear in output anymore"
+    )
+
+
+def test_userprompt_kg_only_recall_when_no_drawer_hits(tmp_path, monkeypatch):
+    """Pure-KG recall: when search returns 0 drawers but KG matches, the
+    triple still has a chance to surface via rerank."""
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_search_memories(**kwargs):
+        return {"results": []}
+
+    class _FakeKG:
+        def list_entity_names(self):
+            return ["用户"]
+
+        def query_entity(self, entity, direction="both"):
+            return [
+                {
+                    "subject": "用户",
+                    "predicate": "养",
+                    "object": "三只猫",
+                    "valid_to": None,
+                }
+            ]
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        return list(hits[:top_k])
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                return_value={
+                                    "should_recall": True,
+                                    "reason": "personal_fact_query",
+                                    "query": "用户 猫",
+                                    "after": None,
+                                    "filters": {},
+                                },
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "用户养了几只猫",
+                                            "cwd": "/tmp/x",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    body = result["hookSpecificOutput"]["additionalContext"]
+    assert "[KG] 用户 → 养 → 三只猫" in body
 
 
 # --- Offline mode (no LLM) ---
