@@ -224,6 +224,51 @@ def _dispatch(action: str) -> None:
         )
 
 
+def _socket_reachable(timeout_s: float = 0.5) -> tuple[bool, str | None]:
+    """Probe the singleton UDS socket via connect().
+
+    File existence alone is not a reliable readiness signal — a stale socket
+    file may linger from a previous crashed process while a new launchd-spawned
+    interpreter is still importing chromadb (cold start ~1-2s). connect() only
+    succeeds once the listener thread has rebound the socket and is accepting.
+    """
+    if not SOCKET_PATH.exists():
+        return False, "socket path does not exist"
+    import socket as _socket
+
+    s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+    s.settimeout(timeout_s)
+    try:
+        s.connect(str(SOCKET_PATH))
+        return True, None
+    except OSError as exc:
+        return False, str(exc)
+    finally:
+        try:
+            s.close()
+        except OSError:
+            pass
+
+
+def _wait_for_socket(timeout_s: float = 15.0) -> tuple[bool, float]:
+    """Poll the singleton UDS socket until it accepts a connection or we time out.
+
+    Returns (ready, elapsed_seconds). Backs off gently from 100ms to 500ms so
+    we don't busy-loop while the interpreter cold-starts.
+    """
+    start = time.monotonic()
+    delay = 0.1
+    while True:
+        ready, _ = _socket_reachable()
+        if ready:
+            return True, time.monotonic() - start
+        elapsed = time.monotonic() - start
+        if elapsed >= timeout_s:
+            return False, elapsed
+        time.sleep(delay)
+        delay = min(delay + 0.1, 0.5)
+
+
 def _status() -> None:
     system = platform.system()
     if system == "Darwin":
@@ -237,16 +282,11 @@ def _status() -> None:
     print(f"path: {SOCKET_PATH}")
     print(f"exists: {SOCKET_PATH.exists()}")
     if SOCKET_PATH.exists():
-        import socket
-
-        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.5)
-        try:
-            s.connect(str(SOCKET_PATH))
-            s.close()
+        ready, err = _socket_reachable()
+        if ready:
             print("reachable: yes")
-        except OSError as exc:
-            print(f"reachable: no ({exc})")
+        else:
+            print(f"reachable: no ({err})")
 
 
 # ---------------------------------------------------------------------------
@@ -262,12 +302,16 @@ def cmd_install(args) -> None:
 
 def cmd_start(args) -> None:
     _dispatch("start")
-    # Allow a short grace period for the socket to appear.
-    for _ in range(20):
-        if SOCKET_PATH.exists():
-            return
-        time.sleep(0.1)
-    print("  ⚠ socket did not appear within 2s — check logs under ~/.mempalace/logs/")
+    # 2s was too tight: launchd `bootstrap` returns once the job is registered,
+    # but the Python interpreter still has to import chromadb (~1-2s cold) before
+    # the singleton listener thread binds the UDS socket. Wait up to 15s with a
+    # connect probe — only stale-socket-file scenarios get a false "ready".
+    timeout = float(os.environ.get("MEMPAL_SINGLETON_READY_TIMEOUT", "15"))
+    ready, elapsed = _wait_for_socket(timeout_s=timeout)
+    if ready:
+        print(f"  ✓ singleton ready ({elapsed:.1f}s)")
+    else:
+        print(f"  ⚠ singleton not ready after {elapsed:.1f}s — check ~/.mempalace/logs/mcp.err.log")
 
 
 def cmd_stop(args) -> None:
