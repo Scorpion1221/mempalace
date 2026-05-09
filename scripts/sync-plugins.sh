@@ -55,10 +55,14 @@ fi
 # REQUIRED_VARS must be non-empty or the script aborts (embedding is needed
 # for any palace operation). OPTIONAL_VARS are propagated when set but their
 # absence is tolerated — offline / Path D installs intentionally leave them
-# empty. Legacy MEMPAL_RECALL_* aliases are still honored at runtime but are
-# NOT propagated or validated here.
+# empty. MEMPAL_RECALL_* legacy aliases are still honored at runtime by
+# recall_llm.py and ARE propagated here so a single edit in ~/.mempalace/env
+# stays consistent across every agent's native config — otherwise stale
+# RECALL_* values written by older versions of this script silently outlive
+# any endpoint/key change.
 REQUIRED_VARS="MEMPAL_EMBEDDING_MODEL MEMPAL_EMBEDDING_ENDPOINT MEMPAL_EMBEDDING_KEY"
-OPTIONAL_VARS="MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY"
+OPTIONAL_VARS="MEMPAL_LLM_ENDPOINT MEMPAL_LLM_MODEL MEMPAL_LLM_KEY \
+MEMPAL_RECALL_LLM MEMPAL_RECALL_ENDPOINT MEMPAL_RECALL_MODEL MEMPAL_RECALL_KEY"
 PROPAGATED_VARS="$REQUIRED_VARS $OPTIONAL_VARS"
 
 # Smart copy: preserve local env-var fallback defaults in hook scripts
@@ -178,7 +182,7 @@ CLAUDE_CACHE_ROOT="$HOME/.claude/plugins/cache/mempalace/mempalace"
 CLAUDE_INSTALLED_JSON="$HOME/.claude/plugins/installed_plugins.json"
 CLAUDE_CACHE=""
 if [ -f "$CLAUDE_INSTALLED_JSON" ] || [ -d "$CLAUDE_CACHE_ROOT" ]; then
-    CLAUDE_CACHE=$(RUNTIME_VERSION="$RUNTIME_VERSION" CLAUDE_INSTALLED_JSON="$CLAUDE_INSTALLED_JSON" CLAUDE_CACHE_ROOT="$CLAUDE_CACHE_ROOT" python3 - <<'PY'
+    CLAUDE_CACHE=$(RUNTIME_VERSION="$RUNTIME_VERSION" CLAUDE_INSTALLED_JSON="$CLAUDE_INSTALLED_JSON" CLAUDE_CACHE_ROOT="$CLAUDE_CACHE_ROOT" "$_PYTHON" - <<'PY'
 from pathlib import Path
 import os
 from mempalace.claude_plugin_sync import sync_claude_cache_metadata
@@ -226,7 +230,7 @@ elif [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
     # Upsert env vars into ~/.claude/settings.json
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     if [ -f "$CLAUDE_SETTINGS" ]; then
-        python3 - <<PYEOF
+        "$_PYTHON" - <<PYEOF
 import json, os
 path = "$CLAUDE_SETTINGS"
 with open(path) as f:
@@ -290,7 +294,7 @@ else
     SRC_HOOKS_JSON="$REPO/.codex-plugin/hooks.json"
     if [ -f "$SRC_HOOKS_JSON" ]; then
         export USER_HOOKS_JSON SRC_HOOKS_JSON CODEX_PLUGIN
-        python3 - <<'PYEOF'
+        "$_PYTHON" - <<'PYEOF'
 import json, os, pathlib
 src_path = pathlib.Path(os.environ["SRC_HOOKS_JSON"])
 dst_path = pathlib.Path(os.environ["USER_HOOKS_JSON"])
@@ -372,7 +376,7 @@ PYEOF
         # Quoted heredoc: bash does NOT interpolate inside, so Python comments
         # may safely contain (), [], $, etc. Pass shell vars via env instead.
         export CODEX_CONFIG PROPAGATED_VARS
-        python3 - <<'PYEOF'
+        "$_PYTHON" - <<'PYEOF'
 import os, re
 path = os.environ["CODEX_CONFIG"]
 with open(path) as f:
@@ -577,7 +581,7 @@ fi
 # compatibility settings are read). So we merge our hook entries into the
 # user-scoped hooks.json with absolute paths to the plugin's hook script.
 HOOK_CMD="$CURSOR_PLUGIN/hooks/mempal-hook.sh"
-CURSOR_HOOKS_JSON_PATH="$CURSOR_HOOKS_JSON" HOOK_CMD_PATH="$HOOK_CMD" python3 - <<'PYEOF'
+CURSOR_HOOKS_JSON_PATH="$CURSOR_HOOKS_JSON" HOOK_CMD_PATH="$HOOK_CMD" "$_PYTHON" - <<'PYEOF'
 import json, os, pathlib
 path = pathlib.Path(os.environ["CURSOR_HOOKS_JSON_PATH"])
 hook_cmd = os.environ["HOOK_CMD_PATH"]
@@ -655,7 +659,7 @@ if [ "$(uname)" = "Darwin" ]; then
 
     # Persist across reboots via a LaunchAgent plist.
     ENV_PLIST="$HOME/Library/LaunchAgents/ai.mempalace.env.plist"
-    python3 - <<PYEOF
+    "$_PYTHON" - <<PYEOF
 import os, plistlib
 path = "$ENV_PLIST"
 vars_to_set = "$PROPAGATED_VARS".split()
@@ -717,7 +721,7 @@ check_agent_var() {
 # Claude Code (settings.json)
 if [ -f "$HOME/.claude/settings.json" ]; then
     for var in $PROPAGATED_VARS; do
-        actual=$(python3 -c "import json; print(json.load(open('$HOME/.claude/settings.json')).get('env', {}).get('$var', ''))" 2>/dev/null || echo "")
+        actual=$("$_PYTHON" -c "import json; print(json.load(open('$HOME/.claude/settings.json')).get('env', {}).get('$var', ''))" 2>/dev/null || echo "")
         check_agent_var "Claude Code" "$var" "$actual"
     done
 fi
@@ -727,7 +731,7 @@ if [ -f "$HOME/.codex/config.toml" ]; then
     # Python does the TOML parsing reliably (awk range matching on section
     # headers that start with '[' is fragile — the range's terminator regex
     # matches the section header line itself).
-    CODEX_ACTUAL=$(python3 - <<'PYEOF'
+    CODEX_ACTUAL=$("$_PYTHON" - <<'PYEOF'
 import json, re
 with open(f"{__import__('os').path.expanduser('~')}/.codex/config.toml") as f:
     content = f.read()
@@ -751,9 +755,9 @@ print(json.dumps(out))
 PYEOF
 )
     for var in $PROPAGATED_VARS; do
-        actual_mcp=$(echo "$CODEX_ACTUAL" | python3 -c "import json,sys; print(json.load(sys.stdin)['mcp'].get('$var',''))")
+        actual_mcp=$(echo "$CODEX_ACTUAL" | "$_PYTHON" -c "import json,sys; print(json.load(sys.stdin)['mcp'].get('$var',''))")
         check_agent_var "Codex (MCP)" "$var" "$actual_mcp"
-        actual_shell=$(echo "$CODEX_ACTUAL" | python3 -c "import json,sys; print(json.load(sys.stdin)['shell'].get('$var',''))")
+        actual_shell=$(echo "$CODEX_ACTUAL" | "$_PYTHON" -c "import json,sys; print(json.load(sys.stdin)['shell'].get('$var',''))")
         check_agent_var "Codex (shell)" "$var" "$actual_shell"
     done
 fi
