@@ -45,10 +45,9 @@
 # stop_hook_active=true so we let it through. No infinite loop.
 #
 # === MEMPALACE CLI ===
-# The hook ALWAYS mines the active conversation transcript automatically
-# (via `mempalace mine <transcript-dir> --mode convos`). MEMPAL_DIR is an
-# *additional*, optional target for project files — it does not replace
-# the conversation mine.
+# The hook does NOT auto-mine raw conversation transcripts. The AI saves
+# structured/verbatim memory through MCP tools. MEMPAL_DIR is an optional
+# project-file target only.
 #
 # === CONFIGURATION ===
 
@@ -56,9 +55,9 @@ SAVE_INTERVAL=15  # Save every N human messages (adjust to taste)
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
 
-# Optional: project directory (code / notes / docs) to also mine each
-# save trigger. Mined with `--mode projects`. The conversation transcript
-# is always mined regardless — this is purely additive.
+# Optional: project directory (code / notes / docs) to mine each save
+# trigger. Mined with `--mode projects`. Raw transcripts are never mined
+# automatically by this hook.
 # Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
 
@@ -182,20 +181,9 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
 
     echo "[$(date '+%H:%M:%S')] TRIGGERING SAVE at exchange $EXCHANGE_COUNT" >> "$STATE_DIR/hook.log"
 
-    # Auto-mine. Two independent targets — both run if both are set:
-    #   1. TRANSCRIPT_PATH (from Claude Code) → parent dir, --mode convos
-    #      (Claude Code session JSONL — must use the convo miner)
-    #   2. MEMPAL_DIR (user-configured project) → --mode projects
-    #      (code, notes, docs)
-    # MEMPAL_DIR is *additive*, not an override: a user with MEMPAL_DIR
-    # pointed at their project still gets the active conversation mined.
-    if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
-        mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
-            >> "$STATE_DIR/hook.log" 2>&1 &
-    elif [ -n "$TRANSCRIPT_PATH" ]; then
-        echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
-            >> "$STATE_DIR/hook.log"
-    fi
+    # Auto-mine only the optional project target. Raw transcript auto-mine
+    # is intentionally disabled: hooks must not call `mempalace mine` on
+    # conversation transcript directories.
     if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
         mempalace mine "$MEMPAL_DIR" --mode projects \
             >> "$STATE_DIR/hook.log" 2>&1 &

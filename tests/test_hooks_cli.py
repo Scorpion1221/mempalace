@@ -12,6 +12,7 @@ import pytest
 import mempalace.hooks_cli as hooks_cli_mod
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
+    USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS,
     _count_human_messages,
     _extract_recent_messages,
     _get_mine_targets,
@@ -27,6 +28,7 @@ from mempalace.hooks_cli import (
     hook_stop,
     hook_session_start,
     hook_precompact,
+    hook_userprompt,
     run_hook,
 )
 
@@ -175,11 +177,14 @@ def _capture_hook_output(hook_fn, data, harness="claude-code", state_dir=None):
     patches = [patch("mempalace.hooks_cli._output", side_effect=lambda d: buf.write(json.dumps(d)))]
     if state_dir:
         patches.append(patch("mempalace.hooks_cli.STATE_DIR", state_dir))
-    # Mock MempalaceConfig so tests don't depend on user's ~/.mempalace/config.json
-    mock_config = MagicMock()
-    type(mock_config).hook_silent_save = PropertyMock(return_value=True)
-    type(mock_config).hook_desktop_toast = PropertyMock(return_value=False)
-    patches.append(patch("mempalace.config.MempalaceConfig", return_value=mock_config))
+    # Mock MempalaceConfig so Stop/PreCompact tests don't depend on the user's
+    # ~/.mempalace/config.json. UserPrompt tests patch their own palace_path
+    # configs outside this helper; do not shadow those patches here.
+    if getattr(hook_fn, "__name__", "") != "hook_userprompt":
+        mock_config = MagicMock()
+        type(mock_config).hook_silent_save = PropertyMock(return_value=True)
+        type(mock_config).hook_desktop_toast = PropertyMock(return_value=False)
+        patches.append(patch("mempalace.config.MempalaceConfig", return_value=mock_config))
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
@@ -1016,17 +1021,9 @@ def test_precompact_with_timeout(tmp_path):
     assert result == {}
 
 
-def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
-    """Precompact ingests the active transcript via _ingest_transcript.
-
-    With no MEMPAL_DIR, _mine_sync is a no-op; the transcript ingest is
-    the only mining that should fire, and it goes through Popen
-    (background) inside _ingest_transcript. Pre-#1231-review this test
-    asserted against subprocess.run, which corresponded to the
-    duplicate-mine path that has now been removed.
-    """
+def test_precompact_does_not_mine_transcript_dir(tmp_path, monkeypatch):
+    """Precompact must not auto-mine raw conversation transcripts."""
     transcript = tmp_path / "t.jsonl"
-    # _ingest_transcript skips files smaller than 100 bytes, so pad it.
     transcript.write_text("x" * 200)
     monkeypatch.delenv("MEMPAL_DIR", raising=False)
     with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
@@ -1038,12 +1035,280 @@ def test_precompact_mines_transcript_dir(tmp_path, monkeypatch):
             )
     assert result == {}
     mock_run.assert_not_called()
-    mock_popen.assert_called_once()
-    cmd = mock_popen.call_args[0][0]
-    # Mines the transcript's parent dir as convos, into wing "sessions".
-    assert str(tmp_path) in cmd
-    assert cmd[cmd.index("--mode") + 1] == "convos"
-    assert cmd[cmd.index("--wing") + 1] == "sessions"
+    mock_popen.assert_not_called()
+
+# --- hook_userprompt ---
+
+
+def test_userprompt_uses_cached_previous_assistant_tail_for_short_followup(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    previous_assistant = "A" * 550 + "TAIL"
+    (tmp_path / "session-a_last_assistant").write_text(previous_assistant, encoding="utf-8")
+
+    captured = {}
+
+    def fake_search_memories(**kwargs):
+        captured.update(kwargs)
+        return {
+            "results": [
+                {
+                    "wing": "mempalace",
+                    "room": "decisions",
+                    "text": "Remembered context",
+                }
+            ]
+        }
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {"session_id": "session-a", "prompt": "why?", "cwd": "/tmp/project"},
+                        state_dir=tmp_path,
+                    )
+
+    expected_tail = previous_assistant[-USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS:]
+    assert captured["query"] == f"{expected_tail}\n\nwhy?"
+    assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "Remembered context" in result["hookSpecificOutput"]["additionalContext"]
+
+
+def test_userprompt_skips_acknowledgement_even_with_cached_assistant_context(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text("Previous assistant reply", encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {"session_id": "session-a", "prompt": "ok", "cwd": "/tmp/project"},
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+    mock_search.assert_not_called()
+
+
+def test_userprompt_does_not_reuse_cached_assistant_from_other_session(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text("Previous assistant reply", encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {"session_id": "session-b", "prompt": "why?", "cwd": "/tmp/project"},
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+    mock_search.assert_not_called()
+
+
+def test_userprompt_passes_previous_assistant_context_into_rerank(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    previous_assistant = "Earlier I explained the Codex hook behavior."
+    (tmp_path / "session-a_last_assistant").write_text(previous_assistant, encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+    rerank_calls = {}
+
+    def fake_search_memories(**kwargs):
+        return {
+            "results": [
+                {"wing": "mempalace", "room": "decisions", "text": f"hit {i}"} for i in range(6)
+            ]
+        }
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": True,
+            "reason": "short_followup_depends_on_previous_assistant",
+            "query": "codex hooks",
+            "after": None,
+        }
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        rerank_calls["user_prompt"] = user_prompt
+        rerank_calls["previous_assistant_context"] = previous_assistant_context
+        return hits[:top_k]
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                side_effect=fake_decide_recall,
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "why?",
+                                            "cwd": "/tmp/project",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert rerank_calls["user_prompt"] == "why?"
+    assert rerank_calls["previous_assistant_context"] == {
+        "tail": previous_assistant[-USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS:]
+    }
+
+
+def test_userprompt_ignores_llm_should_recall_false_and_lets_rerank_decide(tmp_path):
+    """LLM gate's should_recall=false no longer short-circuits the pipeline.
+
+    We trust rerank — which sees actual candidate drawers — to filter relevance,
+    rather than the gate which only sees the prompt and over-prunes."""
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    previous_assistant = "Earlier I explained the Codex hook behavior."
+    (tmp_path / "session-a_last_assistant").write_text(previous_assistant, encoding="utf-8")
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": False,
+            "reason": "direct_local_task_no_memory_needed",
+            "query": None,
+            "after": None,
+        }
+
+    def fake_search_memories(**kwargs):
+        return {"results": [{"wing": "x", "room": "y", "text": "topic-adjacent noise"}]}
+
+    rerank_calls = {}
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        rerank_calls["called"] = True
+        # Rerank sees the candidates and decides nothing is relevant — empty list.
+        return []
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch(
+                    "mempalace.searcher.search_memories", side_effect=fake_search_memories
+                ) as mock_search:
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                side_effect=fake_decide_recall,
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "format this json",
+                                            "cwd": "/tmp/project",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    # Pipeline runs through search and rerank despite gate saying skip.
+    mock_search.assert_called()
+    assert rerank_calls.get("called") is True
+    # Rerank filtered everything → empty recall block.
+    assert result == {}
+
+
+def test_userprompt_session_local_continue_skips_before_search(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text(
+        "Earlier I explained the remaining work plan.",
+        encoding="utf-8",
+    )
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {
+                            "session_id": "session-a",
+                            "prompt": "继续推进，直到完全修复完成",
+                            "cwd": "/tmp/project",
+                        },
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+    mock_search.assert_not_called()
+
+
+def test_userprompt_history_continue_can_still_recall(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    (tmp_path / "session-a_last_assistant").write_text(
+        "Earlier I explained the previous migration plan.",
+        encoding="utf-8",
+    )
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories") as mock_search:
+                    mock_search.return_value = {
+                        "results": [
+                            {"wing": "mempalace", "room": "decisions", "text": "Remembered context"}
+                        ]
+                    }
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {
+                            "session_id": "session-a",
+                            "prompt": "按之前那个方案继续推进",
+                            "cwd": "/tmp/project",
+                        },
+                        state_dir=tmp_path,
+                    )
+
+    assert result["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    mock_search.assert_called_once()
 
 
 # --- run_hook ---
@@ -1193,6 +1458,585 @@ def test_stop_hook_rejects_injected_stop_hook_active(tmp_path):
     # The injected value is not "true"/"1"/"yes", so the hook should NOT pass through.
     # Save must have been attempted.
     assert mock_save.called
+
+
+# --- _collect_kg_candidates: CJK token handling + rerank-pool shape ---
+
+
+def test_kg_candidates_keep_cjk_bigrams(monkeypatch):
+    """CJK bigrams (len 2) must NOT be filtered out by the length check.
+
+    The tokenizer emits 2-char bigrams for Chinese runs. A plain
+    ``len(t) >= 3`` predicate drops all of them, so Chinese queries
+    would yield zero entities and skip the KG lookup entirely.
+    """
+    from mempalace import hooks_cli
+
+    queried: list = []
+
+    class _FakeKG:
+        def query_entity(self, entity, direction="both"):
+            queried.append(entity)
+            return []
+
+        def close(self):
+            pass
+
+    # Force the KG constructor to return our fake so we can see every
+    # entity it's asked about.
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    hooks_cli._collect_kg_candidates(query="我养了几只猫")
+
+    # At least one CJK bigram should have been looked up.
+    assert queried, "Expected at least one CJK token to be queried, got none"
+    assert any(hooks_cli._CJK_CHAR_RE.search(t) for t in queried), (
+        f"Expected CJK tokens in {queried!r}"
+    )
+
+
+def test_kg_candidates_still_keep_long_latin_tokens(monkeypatch):
+    """Regression guard: long Latin tokens should still be queried."""
+    from mempalace import hooks_cli
+
+    queried: list = []
+
+    class _FakeKG:
+        def query_entity(self, entity, direction="both"):
+            queried.append(entity)
+            return []
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    hooks_cli._collect_kg_candidates(query="Alice works at Acme Corporation")
+
+    assert any(t.lower() in {"alice", "works", "acme", "corporation"} for t in queried), (
+        f"Expected Latin tokens in {queried!r}"
+    )
+
+
+def test_kg_candidates_short_latin_tokens_still_filtered(monkeypatch):
+    """Sanity: 2-char non-CJK tokens should NOT be queried (noise filter intact)."""
+    from mempalace import hooks_cli
+
+    queried: list = []
+
+    class _FakeKG:
+        def query_entity(self, entity, direction="both"):
+            queried.append(entity)
+            return []
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    hooks_cli._collect_kg_candidates(query="it is at to")
+
+    for t in queried:
+        assert len(t) >= 3 or hooks_cli._CJK_CHAR_RE.search(t), (
+            f"Unexpectedly queried short non-CJK token {t!r}"
+        )
+
+
+def test_kg_candidates_returns_rerank_ready_dicts(monkeypatch):
+    """Returned candidates must have the same shape as drawer hits so they
+    drop into the rerank pool without special-casing."""
+    from mempalace import hooks_cli
+
+    class _FakeKG:
+        def list_entity_names(self):
+            return ["LiteLLM"]
+
+        def query_entity(self, entity, direction="both"):
+            return [
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "endpoints",
+                    "object": "127.0.0.1:4000",
+                    "valid_to": None,
+                },
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "deprecated",
+                    "object": "old_alias",
+                    "valid_to": "2026-01-01",  # closed fact — must be skipped
+                },
+            ]
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    candidates = hooks_cli._collect_kg_candidates(query="how do I configure litellm")
+
+    assert len(candidates) == 1, "Closed fact should be filtered"
+    c = candidates[0]
+    assert c["matched_via"] == "kg"
+    assert c["wing"] == "kg"
+    assert c["room"] == "triple"
+    assert c["text"] == "LiteLLM → endpoints → 127.0.0.1:4000"
+    # Required fields for downstream rerank/format code:
+    assert "similarity" in c
+    assert "distance" in c
+    assert "created_at" in c
+
+
+# --- _get_palace_kg_entities ---
+
+
+def test_get_palace_kg_entities_returns_top_entities_by_triple_count(monkeypatch, tmp_path):
+    """Top entities are ranked by current-triple participation count."""
+    from mempalace import hooks_cli
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "kg.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    # alpha_project participates in 3 triples; beta_stack in 2; gamma_tool in 1.
+    kg.add_triple("alpha_project", "uses", "python")
+    kg.add_triple("alpha_project", "depends_on", "beta_stack")
+    kg.add_triple("user", "works_on", "alpha_project")
+    kg.add_triple("beta_stack", "includes", "alpha_project")
+    kg.add_triple("beta_stack", "hosted_at", "aws")
+    kg.add_triple("gamma_tool", "is_a", "cli")
+    kg.close()
+
+    # Patch the lazy import inside _get_palace_kg_entities so it points at our temp DB.
+    def _kg_factory():
+        return KnowledgeGraph(db_path=db_path)
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
+
+    names = hooks_cli._get_palace_kg_entities(limit=10)
+    assert "alpha_project" in names
+    assert "beta_stack" in names
+    assert "gamma_tool" in names
+    # alpha_project should rank first (most triples).
+    assert names[0] == "alpha_project"
+
+
+def test_get_palace_kg_entities_skips_expired_triples(monkeypatch, tmp_path):
+    """Entities only present in expired (valid_to set) triples are excluded."""
+    from mempalace import hooks_cli
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "kg.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    kg.add_triple("ActiveProj", "uses", "Postgres")
+    # Add a triple, then invalidate it so OldProj has no current triples.
+    kg.add_triple("OldProj", "uses", "MySQL")
+    kg.invalidate("OldProj", "uses", "MySQL", ended="2025-01-01")
+    kg.close()
+
+    def _kg_factory():
+        return KnowledgeGraph(db_path=db_path)
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
+
+    names = hooks_cli._get_palace_kg_entities(limit=10)
+    assert "ActiveProj" in names
+    # OldProj's only triple is expired, so it shouldn't appear.
+    assert "OldProj" not in names
+
+
+def test_get_palace_kg_entities_returns_empty_on_failure(monkeypatch):
+    """Defensive: any KG failure returns []."""
+    from mempalace import hooks_cli
+    import mempalace.knowledge_graph as kg_mod
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("kg unavailable")
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _broken)
+    assert hooks_cli._get_palace_kg_entities(limit=10) == []
+
+
+def test_get_palace_kg_entities_respects_limit(monkeypatch, tmp_path):
+    from mempalace import hooks_cli
+    from mempalace.knowledge_graph import KnowledgeGraph
+
+    db_path = str(tmp_path / "kg.sqlite3")
+    kg = KnowledgeGraph(db_path=db_path)
+    for i in range(5):
+        kg.add_triple(f"Entity{i}", "is_a", "thing")
+    kg.close()
+
+    def _kg_factory():
+        return KnowledgeGraph(db_path=db_path)
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", _kg_factory)
+
+    names = hooks_cli._get_palace_kg_entities(limit=3)
+    # 5 entities + "thing" appears as object → at most 3 returned.
+    assert len(names) <= 3
+
+
+# --- preferred_wing propagation + hook-side wing validation ---
+
+
+def test_build_active_context_includes_preferred_wing(tmp_path):
+    from mempalace.hooks_cli import _build_active_context
+
+    # No palace, no entities — but preferred_wing alone should still
+    # promote the return value to a dict that includes the hint.
+    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+        ctx = _build_active_context("/tmp/hermes-agent", preferred_wing="hermes_agent")
+
+    assert isinstance(ctx, dict)
+    assert ctx["preferred_wing"] == "hermes_agent"
+    assert ctx["cwd"] == "/tmp/hermes-agent"
+
+
+def test_build_active_context_falls_back_to_cwd_when_no_extras(tmp_path):
+    from mempalace.hooks_cli import _build_active_context
+
+    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+        ctx = _build_active_context("/tmp/hermes-agent")
+
+    # No preferred_wing, no palace, no entities — still a plain string
+    # to preserve backward-compatible behaviour.
+    assert ctx == "/tmp/hermes-agent"
+
+
+def test_userprompt_applies_gate_wing_filter(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+    search_calls = {}
+
+    def fake_search_memories(**kwargs):
+        search_calls.update(kwargs)
+        return {
+            "results": [
+                {"wing": "hermes_agent", "room": "bugs", "text": f"hit {i}"} for i in range(3)
+            ]
+        }
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": True,
+            "reason": "project_bug_query",
+            "query": "测试失败 排查",
+            "after": None,
+            "filters": {"wing": "hermes_agent", "room": "bugs", "hall": None},
+        }
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        return hits[:top_k]
+
+    # Palace taxonomy validation: wing matches preferred_wing (inferred from cwd),
+    # so it should pass validation even if the palace has no entries.
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch(
+                    "mempalace.hooks_cli._get_palace_taxonomy",
+                    return_value={"rooms": ["bugs"], "halls": [], "wings": ["hermes_agent"]},
+                ):
+                    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+                        with patch(
+                            "mempalace.searcher.search_memories",
+                            side_effect=fake_search_memories,
+                        ):
+                            with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                                with patch(
+                                    "mempalace.recall_llm._get_llm_config",
+                                    return_value={"backend": "stub"},
+                                ):
+                                    with patch(
+                                        "mempalace.recall_llm.decide_recall",
+                                        side_effect=fake_decide_recall,
+                                    ):
+                                        with patch(
+                                            "mempalace.recall_llm.rerank",
+                                            side_effect=fake_rerank,
+                                        ):
+                                            _capture_hook_output(
+                                                hook_userprompt,
+                                                {
+                                                    "session_id": "session-a",
+                                                    "prompt": "测试失败怎么查",
+                                                    "cwd": "/tmp/hermes-agent",
+                                                },
+                                                state_dir=tmp_path,
+                                            )
+
+    assert search_calls.get("wing") == "hermes_agent"
+    assert search_calls.get("room") == "bugs"
+
+
+def test_userprompt_drops_unknown_wing(tmp_path):
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+    search_calls = []
+
+    def fake_search_memories(**kwargs):
+        search_calls.append(kwargs)
+        return {"results": []}
+
+    def fake_decide_recall(*args, **kwargs):
+        return {
+            "should_recall": True,
+            "reason": "project_bug_query",
+            "query": "测试失败 排查",
+            "after": None,
+            "filters": {"wing": "nonexistent_project", "room": None, "hall": None},
+        }
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        return hits[:top_k]
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch(
+                    "mempalace.hooks_cli._get_palace_taxonomy",
+                    return_value={
+                        "rooms": ["bugs"],
+                        "halls": [],
+                        "wings": ["hermes_agent", "mempalace"],
+                    },
+                ):
+                    with patch("mempalace.hooks_cli._get_palace_kg_entities", return_value=[]):
+                        with patch(
+                            "mempalace.searcher.search_memories",
+                            side_effect=fake_search_memories,
+                        ):
+                            with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                                with patch(
+                                    "mempalace.recall_llm._get_llm_config",
+                                    return_value={"backend": "stub"},
+                                ):
+                                    with patch(
+                                        "mempalace.recall_llm.decide_recall",
+                                        side_effect=fake_decide_recall,
+                                    ):
+                                        with patch(
+                                            "mempalace.recall_llm.rerank",
+                                            side_effect=fake_rerank,
+                                        ):
+                                            _capture_hook_output(
+                                                hook_userprompt,
+                                                {
+                                                    "session_id": "session-a",
+                                                    "prompt": "测试失败怎么查",
+                                                    "cwd": "/tmp/hermes-agent",
+                                                },
+                                                state_dir=tmp_path,
+                                            )
+
+    # The hallucinated wing must NOT have reached search_memories.
+    assert search_calls, "search_memories should have been called"
+    assert search_calls[0].get("wing") is None
+
+
+# --- KG candidates flow through rerank ---
+
+
+def test_userprompt_kg_candidates_enter_rerank_pool(tmp_path, monkeypatch):
+    """KG triples must be merged into the rerank pool — not appended unfiltered.
+
+    Previously KG triples bypassed rerank and went straight to the output,
+    so topically-related-but-irrelevant facts (e.g. "LiteLLM → endpoints"
+    for an "Azure gpt-image-2 config" question) leaked through. They now
+    sit alongside drawer hits and get judged by the same relevance pass.
+    """
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_search_memories(**kwargs):
+        return {
+            "results": [
+                {"wing": "scorpion", "room": "configuration", "text": "drawer hit one"},
+                {"wing": "scorpion", "room": "configuration", "text": "drawer hit two"},
+            ]
+        }
+
+    class _FakeKG:
+        def list_entity_names(self):
+            return ["LiteLLM"]
+
+        def query_entity(self, entity, direction="both"):
+            return [
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "endpoints",
+                    "object": "127.0.0.1:4000",
+                    "valid_to": None,
+                },
+                {
+                    "subject": "LiteLLM",
+                    "predicate": "缺失",
+                    "object": "context_length_字段",
+                    "valid_to": None,
+                },
+            ]
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    rerank_seen: dict = {}
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        rerank_seen["pool"] = list(hits)
+        # Keep the drawer hit only — simulate rerank dropping irrelevant KG noise.
+        return [h for h in hits if h.get("matched_via") != "kg"][:top_k]
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                return_value={
+                                    "should_recall": True,
+                                    "reason": "config_query",
+                                    "query": "configure litellm",
+                                    "after": None,
+                                    "filters": {},
+                                },
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "帮我配置 litellm",
+                                            "cwd": "/tmp/scorpion",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    assert "pool" in rerank_seen, "rerank must have been called"
+    pool = rerank_seen["pool"]
+    kg_in_pool = [h for h in pool if h.get("matched_via") == "kg"]
+    drawers_in_pool = [h for h in pool if h.get("matched_via") != "kg"]
+    assert len(kg_in_pool) == 2, f"both KG triples should be in pool, got {len(kg_in_pool)}"
+    assert len(drawers_in_pool) == 2, f"drawer hits should still be in pool, got {drawers_in_pool}"
+
+    # Output must reflect rerank's decision: KG was filtered, only drawer
+    # survives. So no "[KG]" line should leak into the output.
+    body = result["hookSpecificOutput"]["additionalContext"]
+    assert "drawer hit" in body
+    assert "[KG]" not in body, (
+        "rerank dropped KG triples — they should not appear in output anymore"
+    )
+
+
+def test_userprompt_kg_only_recall_when_no_drawer_hits(tmp_path, monkeypatch):
+    """Pure-KG recall: when search returns 0 drawers but KG matches, the
+    triple still has a chance to surface via rerank."""
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_search_memories(**kwargs):
+        return {"results": []}
+
+    class _FakeKG:
+        def list_entity_names(self):
+            return ["用户"]
+
+        def query_entity(self, entity, direction="both"):
+            return [
+                {
+                    "subject": "用户",
+                    "predicate": "养",
+                    "object": "三只猫",
+                    "valid_to": None,
+                }
+            ]
+
+        def close(self):
+            pass
+
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "KnowledgeGraph", lambda *a, **kw: _FakeKG())
+
+    def fake_rerank(user_prompt, hits, top_k=5, config=None, previous_assistant_context=None):
+        return list(hits[:top_k])
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "1"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    with patch("mempalace.recall_llm.is_enabled", return_value=True):
+                        with patch(
+                            "mempalace.recall_llm._get_llm_config",
+                            return_value={"backend": "stub"},
+                        ):
+                            with patch(
+                                "mempalace.recall_llm.decide_recall",
+                                return_value={
+                                    "should_recall": True,
+                                    "reason": "personal_fact_query",
+                                    "query": "用户 猫",
+                                    "after": None,
+                                    "filters": {},
+                                },
+                            ):
+                                with patch(
+                                    "mempalace.recall_llm.rerank",
+                                    side_effect=fake_rerank,
+                                ):
+                                    result = _capture_hook_output(
+                                        hook_userprompt,
+                                        {
+                                            "session_id": "session-a",
+                                            "prompt": "用户养了几只猫",
+                                            "cwd": "/tmp/x",
+                                        },
+                                        state_dir=tmp_path,
+                                    )
+
+    body = result["hookSpecificOutput"]["additionalContext"]
+    assert "[KG] 用户 → 养 → 三只猫" in body
+
+
+# --- Offline mode (no LLM) ---
+
+
+def _make_palace(tmp_path: Path, monkeypatch) -> Path:
+    palace = tmp_path / "palace"
+    palace.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("MEMPAL_PALACE_PATH", str(palace))
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "default")
+    return palace
 
 
 # --- Absent palace root: hooks must not recreate ~/.mempalace ---

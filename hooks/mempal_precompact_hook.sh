@@ -41,17 +41,16 @@
 # to save everything. After the AI saves, compaction proceeds normally.
 #
 # === MEMPALACE CLI ===
-# The hook ALWAYS mines the active conversation transcript synchronously
-# before compaction (via `mempalace mine <transcript-dir> --mode convos`).
-# MEMPAL_DIR is an *additional*, optional target for project files — it
-# does not replace the conversation mine.
+# The hook does NOT auto-mine raw conversation transcripts before compaction.
+# The AI saves structured/verbatim memory through MCP tools. MEMPAL_DIR is
+# an optional project-file target only.
 
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
 
-# Optional: project directory (code / notes / docs) to also mine before
-# compaction. Mined with `--mode projects`. The conversation transcript
-# is always mined regardless — this is purely additive.
+# Optional: project directory (code / notes / docs) to mine before
+# compaction. Mined with `--mode projects`. Raw transcripts are never
+# mined automatically by this hook.
 # Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
 
@@ -102,17 +101,8 @@ is_valid_transcript_path() {
 
 echo "[$(date '+%H:%M:%S')] PRE-COMPACT triggered for session $SESSION_ID" >> "$STATE_DIR/hook.log"
 
-# Run ingest synchronously so memories land before compaction. Two
-# independent targets — both run if both are set:
-#   1. TRANSCRIPT_PATH (from Claude Code) → parent dir, --mode convos
-#   2. MEMPAL_DIR → --mode projects
-if is_valid_transcript_path "$TRANSCRIPT_PATH" && [ -f "$TRANSCRIPT_PATH" ]; then
-    mempalace mine "$(dirname "$TRANSCRIPT_PATH")" --mode convos \
-        >> "$STATE_DIR/hook.log" 2>&1
-elif [ -n "$TRANSCRIPT_PATH" ]; then
-    echo "[$(date '+%H:%M:%S')] Skipping invalid transcript path: $TRANSCRIPT_PATH" \
-        >> "$STATE_DIR/hook.log"
-fi
+# Mine only the optional project target before compaction. Raw transcript
+# auto-mine is intentionally disabled.
 if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
     mempalace mine "$MEMPAL_DIR" --mode projects \
         >> "$STATE_DIR/hook.log" 2>&1

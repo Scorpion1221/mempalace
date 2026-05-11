@@ -20,6 +20,63 @@ SAVE_INTERVAL = 15
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 PALACE_ROOT = Path.home() / ".mempalace"
 
+# Matches any CJK character (Chinese, Japanese kana, Korean hangul syllables).
+# Used so the KG recall path keeps 2-char CJK bigrams from ``_tokenize``.
+_CJK_CHAR_RE = re.compile(r"[一-鿿぀-ヿ가-힯]")
+
+# UserPromptSubmit recall settings
+USERPROMPT_RECALL_LIMIT = 5
+USERPROMPT_RECALL_POOL = 10
+USERPROMPT_MAX_SNIPPET_CHARS = 400
+USERPROMPT_MAX_DISTANCE = 1.5
+USERPROMPT_MIN_QUERY_LEN = 6
+USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS = 500
+USERPROMPT_BUDGET_SECONDS = 15
+
+USERPROMPT_SKIP_PHRASES = frozenset(
+    {
+        "hi",
+        "hello",
+        "hey",
+        "嗨",
+        "你好",
+        "ok",
+        "okay",
+        "好",
+        "好的",
+        "行",
+        "嗯",
+        "对",
+        "cool",
+        "nice",
+        "great",
+        "sounds good",
+        "yes",
+        "no",
+        "是",
+        "是的",
+        "不",
+        "不是",
+        "continue",
+        "go",
+        "go on",
+        "next",
+        "继续",
+        "thanks",
+        "thank you",
+        "thx",
+        "谢谢",
+        "done",
+        "完成",
+        "搞定",
+        "stop",
+        "quit",
+        "exit",
+    }
+)
+USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES = frozenset({"continue", "go", "go on", "next", "继续"})
+USERPROMPT_HARD_SKIP_PHRASES = USERPROMPT_SKIP_PHRASES - USERPROMPT_CONTEXTUAL_FOLLOWUP_PHRASES
+
 
 def _detached_popen_kwargs() -> dict:
     """Kwargs that fully detach a Popen child so the hook process can exit.
@@ -55,7 +112,10 @@ def _palace_root_exists() -> bool:
     the kill-switch would be bypassed and ``STATE_DIR.mkdir()`` would later
     crash on ``NotADirectoryError``.
     """
-    return PALACE_ROOT.is_dir()
+    # STATE_DIR is the operative root used by tests and by installed hooks
+    # (`~/.mempalace/hook_state` by default). Checking its parent preserves the
+    # user-removable kill switch while letting tests redirect state safely.
+    return STATE_DIR.parent.is_dir()
 
 
 def _mempalace_python() -> str:
@@ -113,6 +173,47 @@ def _sanitize_session_id(session_id: str) -> str:
     """Only allow alnum, dash, underscore to prevent path traversal."""
     sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)
     return sanitized or "unknown"
+
+
+def _session_state_path(session_id: str, key: str) -> Path:
+    """Return the per-session hook state file for ``key``.
+
+    Session ids are sanitized before path construction and keys are restricted
+    to simple identifier characters so hook-side state never becomes a path
+    traversal primitive.
+    """
+    safe_session = _sanitize_session_id(str(session_id))
+    safe_key = re.sub(r"[^a-zA-Z0-9_-]", "", str(key)) or "state"
+    return STATE_DIR / f"{safe_session}_{safe_key}"
+
+
+def _read_session_state_text(session_id: str, key: str, *, max_chars: int = 20_000) -> str:
+    """Best-effort read of a small per-session hook state file.
+
+    The UserPrompt hook uses this to recover the last assistant reply tail for
+    short follow-up prompts. It must never create ``STATE_DIR`` or raise — hook
+    recall is opportunistic and should silently degrade when state is missing.
+    """
+    try:
+        path = _session_state_path(session_id, key)
+        if not path.is_file():
+            return ""
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    if max_chars > 0 and len(text) > max_chars:
+        return text[-max_chars:]
+    return text
+
+
+def _tail_chars(text: str, limit: int) -> str:
+    """Return the last ``limit`` characters of ``text`` after stripping whitespace."""
+    if not text or limit <= 0:
+        return ""
+    text = str(text).strip()
+    if len(text) <= limit:
+        return text
+    return text[-limit:]
 
 
 def _validate_transcript_path(transcript_path: str) -> Path:
@@ -237,6 +338,91 @@ def _output(data: dict):
 
     sys.stdout.buffer.write(payload)
     sys.stdout.buffer.flush()
+
+
+def _output_additional_context(additional_context: str, harness: str, hook_event_name: str) -> None:
+    """Emit hook output that injects additional context for the active harness."""
+    if harness == "claude-code":
+        _output(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": hook_event_name,
+                    "additionalContext": additional_context,
+                }
+            }
+        )
+        return
+
+    # Codex and other harnesses currently accept the same top-level shape used
+    # by generic hook runners. Keep the exact context verbatim.
+    _output({"additionalContext": additional_context})
+
+
+def _search_via_mcp_socket(
+    *,
+    query: str,
+    wing: str | None = None,
+    n_results: int = USERPROMPT_RECALL_LIMIT,
+    max_distance: float = USERPROMPT_MAX_DISTANCE,
+    preferred_wing: str | None = None,
+) -> dict | None:
+    """Best-effort hot-path search through the singleton MCP UDS.
+
+    Returns ``None`` when the socket is unavailable, disabled, times out, or
+    returns a malformed response so callers can fall back to in-process search.
+    ``preferred_wing`` is accepted for call-site compatibility; the MCP tool
+    schema does not expose that ranking hint, so filtered/project-sensitive
+    paths should use direct ``search_memories`` instead.
+    """
+    del preferred_wing
+    if os.environ.get("MEMPAL_MCP_DISABLE_SOCKET") == "1":
+        return None
+    socket_path = os.environ.get(
+        "MEMPAL_MCP_SOCKET",
+        os.path.join(os.path.expanduser("~"), ".mempalace", "mcp.sock"),
+    )
+    if not os.path.exists(socket_path):
+        return None
+    try:
+        import socket
+
+        request = {
+            "jsonrpc": "2.0",
+            "id": "hook-search",
+            "method": "tools/call",
+            "params": {
+                "name": "mempalace_search",
+                "arguments": {
+                    "query": query,
+                    "limit": n_results,
+                    "wing": wing,
+                    "max_distance": max_distance,
+                },
+            },
+        }
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+            sock.settimeout(float(os.environ.get("MEMPAL_MCP_SOCKET_TIMEOUT", "0.25")))
+            sock.connect(socket_path)
+            sock.sendall((json.dumps(request, ensure_ascii=False) + "\n").encode("utf-8"))
+            data = b""
+            while not data.endswith(b"\n"):
+                chunk = sock.recv(65536)
+                if not chunk:
+                    break
+                data += chunk
+        if not data:
+            return None
+        response = json.loads(data.decode("utf-8").strip())
+        if response.get("error"):
+            return None
+        content = (response.get("result") or {}).get("content") or []
+        if not content:
+            return None
+        text = content[0].get("text") if isinstance(content[0], dict) else None
+        parsed = json.loads(text) if isinstance(text, str) else None
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
 
 
 def _get_mine_targets() -> list[tuple[str, str]]:
@@ -427,10 +613,9 @@ def _spawn_mine(cmd: list) -> None:
 def _maybe_auto_ingest():
     """Background-mine MEMPAL_DIR (project files) if set.
 
-    Transcript convos are ingested separately via ``_ingest_transcript``
-    in the hook handlers — this function does not handle them, to avoid
-    asymmetric interpreter handling and PID-file overwrite when both
-    targets fire from a single hook call (#1231 review).
+    Hooks deliberately do not auto-mine raw conversation transcripts. The
+    AI-facing save checkpoint writes structured/verbatim memories through MCP;
+    ``MEMPAL_DIR`` is the only optional background mining target here.
 
     Per-target dedup is done by ``_spawn_mine`` itself: each (dir, mode)
     target gets its own PID slot, so distinct targets never block each
@@ -450,9 +635,8 @@ def _maybe_auto_ingest():
 def _mine_sync():
     """Synchronously mine MEMPAL_DIR (precompact path).
 
-    Transcript convos are ingested separately via ``_ingest_transcript``
-    in ``hook_precompact`` — keeping them out of this function avoids
-    timeout stacking against the harness 30s ceiling (#1231 review).
+    Hooks deliberately do not auto-mine raw conversation transcripts, so the
+    precompact path only handles the optional project directory.
     """
     targets = _get_mine_targets()
     if not targets:
@@ -777,7 +961,6 @@ def hook_stop(data: dict, harness: str):
                 result = _save_diary_direct(
                     transcript_path, session_id, wing=project_wing, toast=toast
                 )
-                _ingest_transcript(transcript_path)
             _maybe_auto_ingest()
             # Only advance save marker after successful save
             count = result.get("count", 0)
@@ -806,8 +989,6 @@ def hook_stop(data: dict, harness: str):
                 last_save_file.write_text(str(exchange_count), encoding="utf-8")
             except OSError:
                 pass
-            if transcript_path:
-                _ingest_transcript(transcript_path)
             _maybe_auto_ingest()
             reason = STOP_BLOCK_REASON + f" Write diary entry to wing={project_wing}."
             _output({"decision": "block", "reason": reason})
@@ -833,26 +1014,796 @@ def hook_session_start(data: dict, harness: str):
 
 
 def hook_precompact(data: dict, harness: str):
-    """Precompact hook: mine transcript synchronously, then allow compaction."""
+    """Precompact hook: save via checkpoint policy, then allow compaction."""
     if not _palace_root_exists():
         _output({})
         return
     parsed = _parse_harness_input(data, harness)
     session_id = parsed["session_id"]
-    transcript_path = parsed["transcript_path"]
 
     _log(f"PRE-COMPACT triggered for session {session_id}")
 
-    # Capture tool output via our normalize path before compaction loses it
-    if transcript_path:
-        _ingest_transcript(transcript_path)
-
-    # Mine MEMPAL_DIR synchronously so project data lands before
-    # compaction proceeds. Transcript convos were already kicked off
-    # above via _ingest_transcript.
+    # Mine only MEMPAL_DIR synchronously so project data lands before
+    # compaction proceeds. Raw transcripts are not auto-mined by policy.
     _mine_sync()
 
     _output({})
+
+
+def _infer_wing_from_cwd(cwd: str) -> str:
+    """Infer a MemPalace wing name from the working directory.
+
+    Maps directory basenames to known wings, e.g. 'solvely-web' -> 'solvely_web'.
+    Returns None if no mapping is found.
+    """
+    if not cwd:
+        return None
+    basename = os.path.basename(cwd.rstrip("/"))
+    # Normalize: dashes to underscores, lowercase
+    candidate = basename.replace("-", "_").lower()
+    return candidate or None
+
+
+def _get_palace_taxonomy(palace_path: str) -> dict:
+    """Snapshot the current palace taxonomy for the LLM gate.
+
+    Returns {"rooms": [...top by count], "halls": [...top by count],
+    "wings": [...top by count]}, all sorted by descending drawer count and
+    capped at 12 entries each. Used as the source of truth so the rewrite
+    LLM only suggests filter values that actually exist in the palace right
+    now, and so the hook can validate LLM-suggested wing names.
+
+    Returns {} on any failure — callers treat it as no taxonomy hint.
+    """
+    try:
+        from collections import Counter
+
+        import chromadb
+
+        client = chromadb.PersistentClient(path=palace_path)
+        try:
+            col = client.get_collection("mempalace_drawers")
+        except Exception:
+            return {}
+        r = col.get(include=["metadatas"])
+        metas = r.get("metadatas") or []
+        rooms = Counter(m.get("room") for m in metas if m and m.get("room"))
+        halls = Counter(m.get("hall") for m in metas if m and m.get("hall"))
+        wings = Counter(m.get("wing") for m in metas if m and m.get("wing"))
+        return {
+            "rooms": [r for r, _ in rooms.most_common(12)],
+            "halls": [h for h, _ in halls.most_common(12)],
+            "wings": [w for w, _ in wings.most_common(12)],
+        }
+    except Exception:
+        return {}
+
+
+def _collect_kg_candidates(query: str = "") -> list[dict]:
+    """Return KG triples relevant to ``query`` as rerank-ready candidate dicts.
+
+    Each dict mirrors a drawer-hit's shape so the candidate can be merged
+    into the rerank pool. The LLM then judges KG triples against drawer
+    hits using the same relevance bar instead of letting them bypass rerank.
+
+    Strategy:
+      1. Load all KG entity names.
+      2. Match any entity whose name appears as a substring of the raw query
+         (case-insensitive). Works for CJK where bigram tokenization would
+         otherwise lose entity references ("猫" is 1 char, "Scorpion" is 8).
+      3. Fall back to long-token matching (>=3 chars, or any CJK bigram)
+         so short/proper-noun queries still get coverage when no entity
+         name appears verbatim.
+      4. For each matched entity, fetch current facts (valid_to IS NULL).
+      5. Wrap each triple as a hit dict: text="subj → pred → obj",
+         wing="kg", room="triple", matched_via="kg".
+
+    We intentionally do NOT pull entities from hit wings — doing so used to
+    contaminate recall, dragging in every fact about a project just because
+    one of its drawers surfaced unrelated to the user's question.
+    """
+    if not query:
+        return []
+    try:
+        from .knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+    except Exception:
+        return []
+
+    try:
+        entity_names = kg.list_entity_names()
+    except Exception:
+        entity_names = []
+
+    query_lower = query.lower()
+    entities: list = []
+    seen_entities: set = set()
+    for name in entity_names:
+        if not name:
+            continue
+        if name.lower() in query_lower:
+            key = name.lower()
+            if key not in seen_entities:
+                seen_entities.add(key)
+                entities.append(name)
+        if len(entities) >= 6:
+            break
+
+    # Fallback: long-token match (primarily helps English queries where the
+    # user typed a word that isn't yet an entity — we still try a lookup).
+    # CJK queries: keep any token containing a CJK char even if it's only
+    # 2 chars (bigram), so Chinese queries don't fall through with zero
+    # entities. Without this check, the tokenizer's CJK bigrams (all len=2)
+    # would be silently dropped by the len>=3 filter.
+    if not entities:
+        from .searcher import _tokenize
+
+        tokens = _tokenize(query)
+        for t in tokens:
+            if (_CJK_CHAR_RE.search(t) or len(t) >= 3) and t.lower() not in seen_entities:
+                seen_entities.add(t.lower())
+                entities.append(t)
+            if len(entities) >= 6:
+                break
+
+    if not entities:
+        kg.close()
+        return []
+
+    try:
+        candidates: list[dict] = []
+        seen: set = set()
+        for entity in entities[:6]:
+            try:
+                facts = kg.query_entity(entity, direction="both")
+            except Exception:
+                continue
+            for f in facts:
+                if f.get("valid_to") is not None:
+                    continue
+                subj = f.get("subject", "")
+                pred = f.get("predicate", "")
+                obj = f.get("object", "")
+                if subj and pred and obj:
+                    key = (subj, pred, obj)
+                    if key not in seen:
+                        seen.add(key)
+                        candidates.append(
+                            {
+                                "text": f"{subj} → {pred} → {obj}",
+                                "wing": "kg",
+                                "room": "triple",
+                                "matched_via": "kg",
+                                # Neutral signal — rerank judges relevance.
+                                "similarity": 0.5,
+                                "distance": 1.0,
+                                "created_at": "",
+                                "source_file": "kg",
+                            }
+                        )
+            if len(candidates) >= 8:
+                break
+        kg.close()
+        return candidates[:8]
+    except Exception:
+        try:
+            kg.close()
+        except Exception:
+            pass
+        return []
+
+
+def _truncate_snippet(text: str, max_chars: int = USERPROMPT_MAX_SNIPPET_CHARS) -> str:
+    """Truncate text to max_chars, appending ellipsis if needed."""
+    if not text or len(text) <= max_chars:
+        return text
+    return text[:max_chars] + "…"
+
+
+def _get_palace_kg_entities(limit: int = 60) -> list[str]:
+    """Return the top KG entity names by triple count (most "important" first).
+
+    Used to feed the recall gate so it can rewrite user queries to include
+    canonical entity names already in the palace, boosting both vector and
+    KG recall (e.g. user mentions "the prod gateway" → query is rewritten to
+    include "auth-gateway-prod" verbatim when that's the canonical entity name).
+
+    Returns empty list on any failure — this is best-effort context, never
+    a hard requirement.
+    """
+    if limit <= 0:
+        return []
+    try:
+        import sqlite3
+
+        from .knowledge_graph import KnowledgeGraph
+
+        kg = KnowledgeGraph()
+        try:
+            conn = sqlite3.connect(kg.db_path, timeout=5)
+            try:
+                # Rank entities by participation in CURRENT (non-expired)
+                # triples. Schema: triples(subject, object) → entities(id);
+                # name is the human-readable form we want to expose to the LLM.
+                rows = conn.execute(
+                    """
+                    SELECT e.name, COUNT(t.id) AS c
+                    FROM entities e
+                    LEFT JOIN triples t
+                      ON (t.subject = e.id OR t.object = e.id)
+                      AND t.valid_to IS NULL
+                    GROUP BY e.id
+                    HAVING c > 0
+                    ORDER BY c DESC, e.name ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+            finally:
+                conn.close()
+            names: list[str] = []
+            seen: set[str] = set()
+            for row in rows:
+                name = row[0]
+                if not isinstance(name, str):
+                    continue
+                name = name.strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+            return names
+        finally:
+            kg.close()
+    except Exception:
+        return []
+
+
+def _build_active_context(
+    cwd: str, palace_path: str = None, preferred_wing: str | None = None
+) -> object:
+    """Build active_context payload for the recall gate.
+
+    Includes the workdir (project hint), palace taxonomy (rooms/halls for
+    valid filter values), top KG entity names (so the gate can rewrite
+    queries to echo canonical entity names), and the inferred preferred_wing
+    (so the gate can default filters.wing to the active project for
+    project-scoped queries). Falls back to a plain cwd string when no extras
+    are available, keeping the shape backward compatible with older gate
+    prompts.
+    """
+    ctx: dict = {"cwd": cwd}
+    if palace_path:
+        taxonomy = _get_palace_taxonomy(palace_path)
+        if taxonomy:
+            ctx["palace"] = taxonomy
+    entities = _get_palace_kg_entities(limit=60)
+    if entities:
+        ctx["entities"] = entities
+    if preferred_wing:
+        ctx["preferred_wing"] = preferred_wing
+    if len(ctx) == 1:  # only cwd — nothing extra to expose
+        return cwd
+    return ctx
+
+
+def hook_userprompt(data: dict, harness: str):
+    """UserPromptSubmit hook: search MemPalace and inject relevant memories.
+
+    Pipeline (with LLM enhancement when API key is available):
+      1. LLM query rewrite — transform user prompt into optimized search terms
+      2. Vector search — fetch candidate pool (RECALL_POOL size)
+      3. BM25 hybrid rank — initial ranking
+      4. LLM rerank — select top RECALL_LIMIT from the pool
+
+    Each LLM stage degrades gracefully: if no API key or call fails,
+    falls back to the original query / BM25-only ranking.
+    """
+    parsed = _parse_harness_input(data, harness)
+    session_id = parsed["session_id"]
+    user_prompt = data.get("user_prompt", "") or data.get("prompt", "")
+    cwd = parsed.get("cwd", "") or data.get("cwd", "")
+    previous_assistant_message = _read_session_state_text(session_id, "last_assistant")
+    previous_assistant_tail = _tail_chars(
+        previous_assistant_message, USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS
+    )
+
+    prompt_stripped = user_prompt.strip() if user_prompt else ""
+    if not prompt_stripped:
+        _output({})
+        return
+
+    prompt_normalized = prompt_stripped.lower()
+
+    # Skip system/internal prompts (e.g. Codex title generation, hook errors)
+    _SYSTEM_PROMPT_MARKERS = (
+        "you are a helpful assistant",
+        "you will be presented with a user prompt",
+        "generate a short title",
+        "hook timed out",
+        "hook (failed)",
+        "hook (completed)",
+    )
+    prompt_lower_head = prompt_normalized[:200]
+    for marker in _SYSTEM_PROMPT_MARKERS:
+        if marker in prompt_lower_head:
+            _log(f"UserPrompt recall: skipped system/internal prompt ({marker!r})")
+            _output({})
+            return
+
+    # Skip trivial prompts: too short or common filler phrases
+    if prompt_normalized in USERPROMPT_HARD_SKIP_PHRASES:
+        _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
+        _output({})
+        return
+
+    if len(prompt_stripped) < USERPROMPT_MIN_QUERY_LEN and not previous_assistant_tail:
+        _log(f"UserPrompt recall: skipped trivial prompt {prompt_stripped!r}")
+        _output({})
+        return
+
+    try:
+        from .recall_llm import local_recall_decision
+
+        local_decision = local_recall_decision(
+            prompt_stripped,
+            previous_assistant_context={"tail": previous_assistant_tail},
+            active_context=cwd,
+        )
+        if local_decision and not local_decision.get("should_recall"):
+            _log(f"UserPrompt recall: local skip reason={local_decision.get('reason', 'unknown')}")
+            _output({})
+            return
+    except Exception as e:
+        _log(f"UserPrompt recall: local gate failed ({e}), continuing")
+
+    # Lazy import to avoid startup cost when other hooks run
+    try:
+        from .config import MempalaceConfig
+        from .searcher import search_memories
+    except ImportError:
+        _log("WARNING: Could not import mempalace searcher — skipping recall")
+        _output({})
+        return
+
+    config = MempalaceConfig()
+    palace_path = config.palace_path
+
+    if not os.path.isdir(palace_path):
+        _log(f"Palace path not found: {palace_path}")
+        _output({})
+        return
+
+    preferred_wing = _infer_wing_from_cwd(cwd)
+    _log(
+        "UserPrompt recall: "
+        f"query={user_prompt[:80]!r}, wing={preferred_wing}, "
+        f"session={session_id}, prev_assistant_chars={len(previous_assistant_tail)}"
+    )
+
+    import time as _time
+
+    _budget_start = _time.monotonic()
+
+    def _budget_exceeded():
+        return (_time.monotonic() - _budget_start) > USERPROMPT_BUDGET_SECONDS
+
+    search_query = user_prompt
+    original_query = user_prompt
+    if previous_assistant_tail:
+        search_query = f"{previous_assistant_tail}\n\n{user_prompt}"
+        original_query = search_query
+
+    # --- Stage 1: LLM query rewrite + filter selection (default-on when an
+    # LLM endpoint is configured; opt out via MEMPAL_LLM=0).
+    #
+    # NOTE: we deliberately ignore decide_recall's `should_recall` field. The
+    # gate sees only the prompt; rerank can judge against actual candidates,
+    # and the rerank prompt already returns NONE when nothing helps. Letting
+    # rerank decide eliminates the "should-have-recalled but didn't" failure
+    # mode where the gate over-prunes prompts that lack explicit history
+    # markers. A failed/None LLM decide just falls back to the original query.
+    llm_config = None
+    time_after = None
+    rewrite_filters: dict = {}
+    try:
+        from .recall_llm import is_enabled, _get_llm_config, decide_recall, rerank
+
+        if is_enabled():
+            llm_config = _get_llm_config()
+        else:
+            _log("UserPrompt recall: LLM disabled, running pure vector search (offline mode)")
+        if llm_config:
+            # Build active context: cwd + palace taxonomy (rooms/halls) + top
+            # KG entities, so the LLM can pick valid filter values AND rewrite
+            # the query to echo canonical entity names when the user implicitly
+            # references one.
+            active_ctx = _build_active_context(cwd, palace_path, preferred_wing=preferred_wing)
+            taxonomy = active_ctx.get("palace") if isinstance(active_ctx, dict) else {}
+            recall_decision = decide_recall(
+                user_prompt,
+                config=llm_config,
+                previous_assistant_context={"tail": previous_assistant_tail},
+                active_context=active_ctx,
+            )
+            if recall_decision and recall_decision.get("query"):
+                search_query = recall_decision["query"]
+                time_after = recall_decision.get("after")
+                # Validate LLM-suggested filters against real palace taxonomy.
+                # Drop any value the LLM hallucinated so we never filter to an
+                # empty result set over a bogus hall/room name.
+                raw_filters = recall_decision.get("filters") or {}
+                valid_rooms = set(taxonomy.get("rooms", [])) if taxonomy else set()
+                valid_halls = set(taxonomy.get("halls", [])) if taxonomy else set()
+                valid_wings = set(taxonomy.get("wings", [])) if taxonomy else set()
+                if raw_filters.get("room") and (
+                    not valid_rooms or raw_filters["room"] in valid_rooms
+                ):
+                    rewrite_filters["room"] = raw_filters["room"]
+                if raw_filters.get("hall") and (
+                    not valid_halls or raw_filters["hall"] in valid_halls
+                ):
+                    rewrite_filters["hall"] = raw_filters["hall"]
+                if raw_filters.get("wing"):
+                    # Accept the LLM's wing only when it's real — either it
+                    # matches preferred_wing (inferred from CWD) or it's
+                    # present in the palace's known wings. This prevents
+                    # hallucinated wing names from filtering to an empty
+                    # result set.
+                    candidate_wing = raw_filters["wing"]
+                    if candidate_wing == preferred_wing or (
+                        valid_wings and candidate_wing in valid_wings
+                    ):
+                        rewrite_filters["wing"] = candidate_wing
+                    else:
+                        _log(
+                            "UserPrompt recall: dropping unknown wing "
+                            f"{candidate_wing!r} (preferred={preferred_wing!r}, "
+                            f"known={sorted(valid_wings)})"
+                        )
+                _log(
+                    "UserPrompt recall: "
+                    f"LLM rewrite reason={recall_decision.get('reason', 'unknown')}, "
+                    f"query={search_query[:80]!r}, after={time_after}, "
+                    f"filters={rewrite_filters or 'none'}, "
+                    f"gate_should_recall={recall_decision.get('should_recall')}"
+                )
+            else:
+                # LLM returned None / no query — fall through with the
+                # original prompt as the query. Rerank is the final filter.
+                _log("UserPrompt recall: no LLM rewrite available, using original query")
+    except Exception as e:
+        _log(f"UserPrompt recall: decide+rewrite failed ({e}), using original query")
+
+    # Check budget before search
+    if _budget_exceeded():
+        _log("UserPrompt recall: budget exceeded after LLM decide, bailing")
+        _output({})
+        return
+
+    # --- Stage 2: Vector search + BM25 hybrid rank ---
+    # Fetch a larger pool when LLM rerank is available
+    pool_size = USERPROMPT_RECALL_POOL if llm_config else USERPROMPT_RECALL_LIMIT
+    extra = [original_query] if search_query != original_query else []
+    result = None
+    # MCP socket path doesn't support room/hall filter — skip it when filtered.
+    if not extra and not rewrite_filters:
+        result = _search_via_mcp_socket(
+            query=search_query,
+            wing=None,
+            n_results=pool_size,
+            max_distance=USERPROMPT_MAX_DISTANCE,
+            preferred_wing=preferred_wing,
+        )
+        if result is not None:
+            _log("UserPrompt recall: used MCP socket (hot path)")
+    if result is None:
+        try:
+            result = search_memories(
+                query=search_query,
+                palace_path=palace_path,
+                wing=rewrite_filters.get("wing"),
+                room=rewrite_filters.get("room"),
+                hall=rewrite_filters.get("hall"),
+                preferred_wing=preferred_wing,
+                n_results=pool_size,
+                max_distance=USERPROMPT_MAX_DISTANCE,
+                after=time_after,
+                extra_queries=extra,
+            )
+            # Two-stage fallback when the filtered search returns 0 hits.
+            #
+            # `wing` is a project-scoping SIGNAL, not a convenience: if the
+            # gate decided the query is about the active project and the
+            # palace has nothing for it, the truthful recall is empty. We
+            # must NOT abandon `wing` and drop back into a global search —
+            # doing so drags in drawers from unrelated projects as noise.
+            #
+            # `room`/`hall` are narrower hints and can be relaxed: the gate
+            # may have mis-classified the topic room, so a wing-only retry
+            # is a safe widening. Wing itself is never widened here.
+            if (
+                rewrite_filters
+                and isinstance(result, dict)
+                and not result.get("error")
+                and len(result.get("results") or []) == 0
+            ):
+                wing_filter = rewrite_filters.get("wing")
+                narrower = {k: v for k, v in rewrite_filters.items() if k != "wing"}
+                if wing_filter and narrower:
+                    _log(
+                        "UserPrompt recall: filtered search returned 0 hits, "
+                        f"widening within wing={wing_filter!r} (dropping {sorted(narrower)})"
+                    )
+                    result = search_memories(
+                        query=search_query,
+                        palace_path=palace_path,
+                        wing=wing_filter,
+                        preferred_wing=preferred_wing,
+                        n_results=pool_size,
+                        max_distance=USERPROMPT_MAX_DISTANCE,
+                        after=time_after,
+                        extra_queries=extra,
+                    )
+                    if (
+                        isinstance(result, dict)
+                        and not result.get("error")
+                        and len(result.get("results") or []) == 0
+                    ):
+                        _log(
+                            "UserPrompt recall: no hits for "
+                            f"wing={wing_filter!r}; returning empty recall "
+                            "(refusing to cross-project contaminate)"
+                        )
+                        _output({})
+                        return
+                elif wing_filter:
+                    # wing was the only filter and had 0 hits — stop here.
+                    _log(
+                        f"UserPrompt recall: no hits for wing={wing_filter!r}; "
+                        "returning empty recall"
+                    )
+                    _output({})
+                    return
+                else:
+                    # No wing filter — safe to fully widen (likely a
+                    # hallucinated room/hall label).
+                    _log(
+                        "UserPrompt recall: filtered search returned 0 hits, "
+                        f"retrying without filters={rewrite_filters}"
+                    )
+                    result = search_memories(
+                        query=search_query,
+                        palace_path=palace_path,
+                        wing=None,
+                        preferred_wing=preferred_wing,
+                        n_results=pool_size,
+                        max_distance=USERPROMPT_MAX_DISTANCE,
+                        after=time_after,
+                        extra_queries=extra,
+                    )
+        except Exception as e:
+            _log(f"WARNING: search_memories failed: {e}")
+            _output({})
+            return
+
+    # Distinguish "no results" from "search error" (e.g. embedding failure)
+    if isinstance(result, dict) and "error" in result:
+        _log(f"WARNING: search returned error: {result['error']}")
+        _output({})
+        return
+
+    hits = result.get("results", []) if isinstance(result, dict) else []
+
+    # Note: diary entries are NOT filtered out. Previously we filtered them
+    # as "session logs", but the async save now stores valuable personal
+    # facts (e.g. "user has three cats") as diary entries too. Let the
+    # reranker decide — it correctly identifies relevance.
+
+    # Collect KG triples that match the query's named entities. Previously
+    # these went straight to the output unfiltered, dragging in topically-
+    # related-but-irrelevant facts (e.g. "LiteLLM → endpoints → 127.0.0.1:4000"
+    # surfaced for "configure Azure gpt-image-2"). Now they enter the rerank
+    # pool alongside drawer hits and get judged against the same relevance bar.
+    kg_candidates = _collect_kg_candidates(query=user_prompt)
+
+    if not hits and not kg_candidates:
+        _log("UserPrompt recall: no hits")
+        _output({})
+        return
+
+    if not hits:
+        # Pure-KG recall: skip tunnel expansion (nothing to expand from)
+        # and feed KG candidates directly into the rerank pool.
+        result = {"results": list(kg_candidates)}
+        hits = result["results"]
+        _log(f"UserPrompt recall: no drawer hits; rerank pool is {len(hits)} KG triples")
+
+    # Tunnel expansion: for each unique (wing, room) in the current pool,
+    # follow explicit tunnels to surface connected drawers in other wings.
+    # Rerank will filter irrelevant additions; we're just broadening candidates.
+    try:
+        from .palace import get_collection
+        from .palace_graph import follow_tunnels as _follow_tunnels
+
+        # Load the drawers collection once so follow_tunnels can populate
+        # `drawer_preview` (first 300 chars of connected drawer content).
+        # Without this, follow_tunnels returns only the tunnel label — rerank
+        # then gets a one-sentence candidate it almost always rejects, and the
+        # expansion does nothing.
+        try:
+            _tunnel_col = get_collection(palace_path, create=False)
+        except Exception as e:
+            _log(f"UserPrompt recall: tunnel expansion collection load failed ({e})")
+            _tunnel_col = None
+
+        # Hits from search_memories don't carry a stable drawer_id; tunnel
+        # hits do (drawer_id of the connected endpoint). Dedup is therefore
+        # only meaningful among tunnel additions themselves — search hits
+        # live in different wings/rooms by construction (tunnels cross wings).
+        existing_tunnel_ids = set()
+        seen_pairs = set()
+        tunnel_added = 0
+        MAX_TUNNEL_EXPANSION = 5
+
+        for hit in list(result.get("results") or []):
+            if tunnel_added >= MAX_TUNNEL_EXPANSION:
+                break
+            w = (hit.get("wing") or "").strip()
+            r = (hit.get("room") or "").strip()
+            if not w or not r or (w, r) in seen_pairs:
+                continue
+            seen_pairs.add((w, r))
+            try:
+                connected = _follow_tunnels(w, r, col=_tunnel_col)
+            except Exception as e:
+                _log(f"UserPrompt recall: follow_tunnels({w!r}, {r!r}) failed: {e}")
+                continue
+            # Backfill drawer_preview when a tunnel was created without an
+            # explicit drawer_id (the dominant case — auto-save binds tunnels
+            # to (wing, room) only). Fetch one representative drawer from the
+            # connected location so rerank has real content to evaluate
+            # instead of just the tunnel's one-sentence label.
+            if _tunnel_col is not None and connected:
+                for c in connected:
+                    if c.get("drawer_preview"):
+                        continue
+                    cw = c.get("connected_wing")
+                    cr = c.get("connected_room")
+                    if not (cw and cr):
+                        continue
+                    try:
+                        sample = _tunnel_col.get(
+                            where={"$and": [{"wing": cw}, {"room": cr}]},
+                            limit=1,
+                            include=["documents"],
+                        )
+                        docs = (
+                            sample.get("documents")
+                            if isinstance(sample, dict)
+                            else getattr(sample, "documents", None)
+                        )
+                        if docs and docs[0]:
+                            c["drawer_preview"] = docs[0][:300]
+                    except Exception as e:
+                        _log(
+                            "UserPrompt recall: tunnel preview backfill "
+                            f"({cw!r}, {cr!r}) failed: {e}"
+                        )
+            for c in connected or []:
+                if tunnel_added >= MAX_TUNNEL_EXPANSION:
+                    break
+                cid = c.get("drawer_id") or c.get("tunnel_id") or id(c)
+                if cid in existing_tunnel_ids:
+                    continue
+                existing_tunnel_ids.add(cid)
+                # follow_tunnels returns connection records. When col= was
+                # passed above, `drawer_preview` holds the first 300 chars
+                # of the connected drawer content — real substance for the
+                # reranker to judge. Fall back to label only if the drawer
+                # was deleted or never had an id.
+                tunnel_wing = c.get("connected_wing", "")
+                tunnel_room = c.get("connected_room", "")
+                tunnel_text = c.get("drawer_preview") or c.get("label", "")
+                if not tunnel_text:
+                    continue  # no content to rerank against — skip silently
+                result.setdefault("results", []).append(
+                    {
+                        "text": tunnel_text,
+                        "wing": tunnel_wing,
+                        "room": tunnel_room,
+                        "created_at": c.get("filed_at") or c.get("created_at", ""),
+                        "matched_via": "tunnel",
+                        "similarity": 0.5,  # neutral — rerank decides
+                        "distance": 1.0,
+                        "source_file": c.get("source_file", "?"),
+                    }
+                )
+                tunnel_added += 1
+
+        if tunnel_added:
+            # Refresh hits view so the rerank stage below sees the additions.
+            hits = result.get("results", []) if isinstance(result, dict) else hits
+            _log(
+                f"UserPrompt recall: tunnel expansion added {tunnel_added} drawers "
+                f"(pool now {len(result.get('results') or [])})"
+            )
+    except Exception as e:
+        _log(f"UserPrompt recall: tunnel expansion skipped ({e})")
+
+    # Merge KG candidates into the rerank pool. Done after tunnel expansion
+    # so KG triples sit alongside drawer hits + tunnel-expanded drawers as
+    # peer candidates judged by the same rerank pass.
+    if kg_candidates:
+        already_kg = any(h.get("matched_via") == "kg" for h in hits)
+        if not already_kg:
+            result.setdefault("results", []).extend(kg_candidates)
+            hits = result.get("results", []) if isinstance(result, dict) else hits
+            _log(
+                f"UserPrompt recall: KG added {len(kg_candidates)} triples to rerank pool "
+                f"(pool now {len(hits)})"
+            )
+
+    # --- Stage 3: LLM rerank + relevance filter ---
+    # Always rerank when LLM is available — even small hit sets may contain
+    # noise. The reranker filters out irrelevant matches (e.g. drawers that
+    # mention the keyword as a technical example, not as actual content).
+    if llm_config and len(hits) >= 1 and not _budget_exceeded():
+        try:
+            reranked = rerank(
+                user_prompt,  # use original prompt for relevance judgment
+                hits,
+                top_k=USERPROMPT_RECALL_LIMIT,
+                config=llm_config,
+                previous_assistant_context={"tail": previous_assistant_tail},
+            )
+            if reranked is not None:
+                if len(reranked) == 0:
+                    _log(f"UserPrompt recall: LLM filtered all {len(hits)} hits as irrelevant")
+                    _output({})
+                    return
+                _log(f"UserPrompt recall: LLM reranked {len(hits)} → {len(reranked)}")
+                hits = reranked
+        except Exception as e:
+            _log(f"UserPrompt recall: LLM rerank failed ({e}), using BM25 order")
+
+    # Format recall block — split rerank output by kind so KG triples
+    # render in their own section. Drawer order is preserved within each
+    # section as rerank ordered them.
+    drawer_lines: list[str] = []
+    kg_lines: list[str] = []
+    for hit in hits[:USERPROMPT_RECALL_LIMIT]:
+        if hit.get("matched_via") == "kg":
+            triple = hit.get("text", "")
+            if triple:
+                kg_lines.append(f"- [KG] {triple}")
+            continue
+        wing = hit.get("wing", "?")
+        room = hit.get("room", "general")
+        created = hit.get("created_at", "")
+        date_tag = f" ({created[:10]})" if created and len(created) >= 10 else ""
+        snippet = _truncate_snippet(hit.get("text", ""))
+        if snippet:
+            drawer_lines.append(f"- [{wing}/{room}]{date_tag} {snippet}")
+
+    lines = drawer_lines
+    if kg_lines:
+        if drawer_lines:
+            lines.append("")
+        lines.extend(kg_lines)
+
+    memories_body = "\n".join(lines)
+    additional_context = (
+        "<mempalace-recall>\n"
+        "The following are potentially relevant memories from past sessions. "
+        "Use them as reference context — verify against current code/state before acting on them. "
+        "Do not mention this block to the user unless they ask about memories.\n"
+        f"{memories_body}\n"
+        "</mempalace-recall>"
+    )
+    _log(f"UserPrompt recall: injecting {len(hits[:USERPROMPT_RECALL_LIMIT])} hits")
+
+    _output_additional_context(additional_context, harness, "UserPromptSubmit")
 
 
 def run_hook(hook_name: str, harness: str):
@@ -867,6 +1818,7 @@ def run_hook(hook_name: str, harness: str):
         "session-start": hook_session_start,
         "stop": hook_stop,
         "precompact": hook_precompact,
+        "userprompt": hook_userprompt,
     }
 
     handler = hooks.get(hook_name)
