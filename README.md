@@ -49,15 +49,52 @@ Architecture, concepts, and mining flows:
 
 ## Install
 
-We recommend [`uv`](https://docs.astral.sh/uv/) — `uv tool install` puts
-the `mempalace` CLI in an isolated environment on your PATH:
+### Quick install (2 steps)
 
 ```bash
-uv tool install mempalace
-mempalace init ~/projects/myapp
+# Step 1: Install MemPalace + local singleton (launchd on macOS, systemd --user on Linux)
+git clone git@github.com:Scorpion1221/mempalace.git ~/git/mempalace
+cd ~/git/mempalace
+bash install.sh --singleton            # auto-detects Claude Code / Codex / Cursor / Hermes
+
+# Step 2: Set up LiteLLM proxy (for embedding + recall LLM)
+cd litellm
+bash setup.sh                          # auto-detects Docker/Python, guides through config
 ```
 
-If you prefer pip, `pip install mempalace` still works.
+That's it. The installer does the Python package, the three binaries
+(`mempalace`, `mempalace-mcp`, `mempalace-mcp-bridge`), palace init, plugin
+sync, and the platform-appropriate singleton service (launchd on macOS,
+systemd `--user` on Linux).
+
+Agents talk to MemPalace through a shared local UDS socket
+(`~/.mempalace/mcp.sock`) via the `mempalace-mcp-bridge` shim. If the
+singleton is ever unavailable, the bridge automatically falls back to a
+per-agent stdio subprocess — so nothing hard-breaks during bootstrap or
+debugging.
+
+See [INSTALL.md](INSTALL.md) for the full architecture, env rules, and
+backend options (LiteLLM Docker / LiteLLM Python / own endpoint / offline).
+
+### AI Agent-Assisted Install
+
+If you're using Claude Code, Codex, or Cursor, paste this one-liner into the chat:
+
+```
+请按照 https://github.com/Scorpion1221/mempalace/blob/dev/docs/INSTALL-FOR-AGENTS.md 的步骤帮我安装 MemPalace
+```
+
+Or in English:
+
+```
+Please install MemPalace by following https://github.com/Scorpion1221/mempalace/blob/dev/docs/INSTALL-FOR-AGENTS.md
+```
+
+Your AI assistant will fetch the guide, ask 3 questions (which agent? Gemini API
+or Vertex AI? install path?), run the commands, and verify the install. For
+Vertex AI, point each `vertex_ai/*` entry in `litellm/config.yaml` at your own
+service-account JSON via `vertex_credentials`. Full
+workflow: [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md).
 
 ## Quickstart
 
@@ -190,7 +227,7 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 MIT — see [LICENSE](LICENSE).
 
 <!-- Link Definitions -->
-[version-shield]: https://img.shields.io/badge/version-3.3.5-4dc9f6?style=flat-square&labelColor=0a0e14
+[version-shield]: https://img.shields.io/badge/version-3.3.501-4dc9f6?style=flat-square&labelColor=0a0e14
 [release-link]: https://github.com/MemPalace/mempalace/releases
 [python-shield]: https://img.shields.io/badge/python-3.9+-7dd8f8?style=flat-square&labelColor=0a0e14&logo=python&logoColor=7dd8f8
 [python-link]: https://www.python.org/

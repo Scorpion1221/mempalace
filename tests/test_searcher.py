@@ -235,7 +235,6 @@ class TestBM25NoneSafety:
         assert scores[1] == 0.0
         assert scores[0] > 0.0
 
-
 # ── search() (CLI print function) ─────────────────────────────────────
 
 

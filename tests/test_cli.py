@@ -699,10 +699,12 @@ def test_mcp_command_prints_setup_guidance(monkeypatch, capsys):
     main()
 
     captured = capsys.readouterr()
-    assert "MemPalace MCP quick setup:" in captured.out
-    assert "claude mcp add mempalace -- mempalace-mcp" in captured.out
+    assert "MemPalace MCP quick setup (singleton-preferred):" in captured.out
+    assert "claude mcp add mempalace -- mempalace-mcp-bridge" in captured.out
+    assert "\nPer-agent fallback (no singleton):\n" in captured.out
+    assert "mempalace-mcp" in captured.out
     assert "\nOptional custom palace:\n" in captured.out
-    assert "mempalace-mcp --palace /path/to/palace" in captured.out
+    assert "mempalace-mcp-bridge --palace /path/to/palace" in captured.out
     assert "[--palace /path/to/palace]" not in captured.out
     assert captured.err == ""
 

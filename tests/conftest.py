@@ -34,6 +34,106 @@ from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
 
 
+class _DeterministicTestEmbedding:
+    """Tiny offline embedding function for tests that touch real ChromaDB."""
+
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    @staticmethod
+    def name() -> str:
+        return "default"
+
+    def default_space(self):
+        return "cosine"
+
+    def get_config(self):
+        return {}
+
+    @staticmethod
+    def _embed_one(text: str) -> list[float]:
+        import hashlib
+        import math
+        import re
+
+        dims = 64
+        vec = [0.0] * dims
+        tokens = re.findall(r"\w+", (text or "").lower())
+        if not tokens:
+            tokens = [text or ""]
+        for token in tokens:
+            digest = hashlib.blake2b(token.encode("utf-8"), digest_size=8).digest()
+            idx = int.from_bytes(digest[:4], "big") % dims
+            sign = 1.0 if digest[4] % 2 == 0 else -1.0
+            vec[idx] += sign
+        norm = math.sqrt(sum(v * v for v in vec)) or 1.0
+        return [v / norm for v in vec]
+
+    def __call__(self, input):
+        if isinstance(input, str):
+            input = [input]
+        return [self._embed_one(str(item)) for item in input]
+
+    def embed_query(self, input):
+        return self(input)
+
+    def embed_documents(self, input):
+        return self(input)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_embedding_env(monkeypatch, request):
+    """Tests must not use the caller's external embedding proxy settings.
+
+    Several fixtures create Chroma collections directly. If the developer has
+    MEMPAL_EMBEDDING_* configured, those tests can otherwise hit the network or
+    reopen a default Chroma collection with a proxy embedding function. Clear
+    the embedding env by default; tests that exercise proxy embeddings set the
+    variables explicitly with monkeypatch.
+    """
+    for name in (
+        "MEMPAL_EMBEDDING_MODEL",
+        "MEMPAL_EMBEDDING_ENDPOINT",
+        "MEMPAL_EMBEDDING_KEY",
+        "MEMPAL_EMBEDDING_DIMS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    try:
+        from mempalace import embedding
+
+        embedding.reset_cache()
+        if request.node.path.name != "test_embedding.py":
+            monkeypatch.setattr(embedding, "_build_ef_class", lambda: _DeterministicTestEmbedding)
+            try:
+                import chromadb.api.types as chroma_types
+                import chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 as onnx_ef
+
+                monkeypatch.setattr(
+                    chroma_types,
+                    "ONNXMiniLM_L6_V2",
+                    _DeterministicTestEmbedding,
+                    raising=False,
+                )
+                monkeypatch.setattr(
+                    onnx_ef,
+                    "ONNXMiniLM_L6_V2",
+                    _DeterministicTestEmbedding,
+                    raising=False,
+                )
+            except Exception:
+                pass
+    except Exception:
+        pass
+    yield
+    try:
+        from mempalace import embedding
+
+        embedding.reset_cache()
+    except Exception:
+        pass
+
+
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
     """Reset cached MCP state between tests without importing mcp_server.
@@ -127,8 +227,14 @@ def config(tmp_dir, palace_path):
 @pytest.fixture
 def collection(palace_path):
     """A ChromaDB collection pre-seeded in the temp palace."""
+    from mempalace.embedding import get_embedding_function
+
     client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    col = client.get_or_create_collection(
+        "mempalace_drawers",
+        metadata={"hnsw:space": "cosine"},
+        embedding_function=get_embedding_function("cpu"),
+    )
     yield col
     client.delete_collection("mempalace_drawers")
     del client

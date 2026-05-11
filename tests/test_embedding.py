@@ -6,7 +6,15 @@ import mempalace.embedding as embedding
 @pytest.fixture(autouse=True)
 def isolate_embedding_state(monkeypatch):
     monkeypatch.setattr(embedding, "_EF_CACHE", {})
+    monkeypatch.setattr(embedding, "_PROXY_EF_CACHE", "UNSET")
     monkeypatch.setattr(embedding, "_WARNED", set())
+    for name in (
+        "MEMPAL_EMBEDDING_MODEL",
+        "MEMPAL_EMBEDDING_ENDPOINT",
+        "MEMPAL_EMBEDDING_KEY",
+        "MEMPAL_EMBEDDING_DIMS",
+    ):
+        monkeypatch.delenv(name, raising=False)
 
 
 def test_auto_picks_cuda(monkeypatch):
@@ -96,3 +104,96 @@ def test_describe_device_uses_resolved_effective_device(monkeypatch):
     )
 
     assert embedding.describe_device("auto") == "cuda"
+
+
+def test_proxy_embedding_takes_precedence_when_model_is_set(monkeypatch):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+
+    result = embedding.get_embedding_function("cpu")
+
+    assert isinstance(result, embedding.ProxyEmbeddingFunction)
+    assert result._model == "gemini-embedding-2"
+    assert result._dimensions == embedding.DEFAULT_EMBEDDING_DIMS
+    assert result._url == "http://localhost:4000/v1/embeddings"
+
+
+def test_proxy_embedding_custom_dimensions(monkeypatch):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_DIMS", "768")
+
+    result = embedding.get_embedding_function("cpu")
+
+    assert isinstance(result, embedding.ProxyEmbeddingFunction)
+    assert result._dimensions == 768
+
+
+def test_proxy_incomplete_env_falls_back_to_onnx(monkeypatch, caplog):
+    class DummyEF:
+        def __init__(self, preferred_providers):
+            self.preferred_providers = preferred_providers
+
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setattr(embedding, "_build_ef_class", lambda: DummyEF)
+    monkeypatch.setattr(
+        embedding,
+        "_resolve_providers",
+        lambda device: (["CPUExecutionProvider"], "cpu"),
+    )
+
+    result = embedding.get_embedding_function("cpu")
+
+    assert isinstance(result, DummyEF)
+    assert "MEMPAL_EMBEDDING_ENDPOINT" in caplog.text
+
+
+def test_proxy_cache_does_not_store_missing_env(monkeypatch):
+    class DummyEF:
+        def __init__(self, preferred_providers):
+            self.preferred_providers = preferred_providers
+
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setattr(embedding, "_build_ef_class", lambda: DummyEF)
+    monkeypatch.setattr(
+        embedding,
+        "_resolve_providers",
+        lambda device: (["CPUExecutionProvider"], "cpu"),
+    )
+
+    assert isinstance(embedding.get_embedding_function("cpu"), DummyEF)
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    embedding.reset_cache()
+    assert isinstance(embedding.get_embedding_function("cpu"), embedding.ProxyEmbeddingFunction)
+
+
+def test_proxy_embed_batch_openai_shape(monkeypatch):
+    import json
+    from unittest.mock import MagicMock
+
+    response = {"data": [{"embedding": [0.1, 0.2]}, {"embedding": [0.3, 0.4]}]}
+    captured = {}
+
+    def mock_urlopen(req, timeout=None):
+        captured["url"] = req.full_url
+        captured["headers"] = dict(req.header_items())
+        captured["body"] = json.loads(req.data)
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(response).encode()
+        mock_resp.__enter__ = lambda s: s
+        mock_resp.__exit__ = MagicMock(return_value=False)
+        return mock_resp
+
+    monkeypatch.setattr("urllib.request.urlopen", mock_urlopen)
+    ef = embedding.ProxyEmbeddingFunction(
+        api_key="k", model="m", dimensions=2, endpoint="http://localhost:4000"
+    )
+
+    assert ef._embed_batch(["hello", "world"]) == [[0.1, 0.2], [0.3, 0.4]]
+    assert captured["url"] == "http://localhost:4000/v1/embeddings"
+    assert captured["body"] == {"model": "m", "input": ["hello", "world"], "dimensions": 2}
+    headers = {k.lower(): v for k, v in captured["headers"].items()}
+    assert headers["authorization"] == "Bearer k"

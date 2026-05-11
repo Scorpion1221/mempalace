@@ -37,3 +37,8 @@ venv/
 # ChromaDB local data
 *.sqlite3-journal
 .envrc
+
+# Integration worktree process files (do not commit)
+INTEGRATION_BRIEF.md
+STATUS_BRIEF.md
+.git-local/

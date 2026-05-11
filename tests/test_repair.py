@@ -1567,6 +1567,31 @@ def test_rebuild_from_sqlite_source_missing_chroma_db(tmp_path):
     assert not dest.exists()
 
 
+def test_rebuild_from_verbatim_wraps_from_sqlite_in_place(tmp_path, monkeypatch):
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    (palace / "chroma.sqlite3").write_text("stub")
+
+    archive = tmp_path / "palace.pre-rebuild-20260511-120000"
+    calls = {}
+
+    def fake_rebuild_from_sqlite(**kwargs):
+        calls.update(kwargs)
+        archive.mkdir()
+        return {"mempalace_drawers": 2, "mempalace_closets": 1}
+
+    monkeypatch.setattr(repair, "rebuild_from_sqlite", fake_rebuild_from_sqlite)
+
+    report = repair.rebuild_from_verbatim(palace)
+
+    assert calls["source_palace"] == str(palace.resolve())
+    assert calls["dest_palace"] == str(palace.resolve())
+    assert calls["archive_existing_dest"] is True
+    assert report.drawers_processed == 2
+    assert report.closets_processed == 1
+    assert report.archive_path == archive
+
+
 def test_rebuild_from_sqlite_in_place_validates_source_before_archiving(tmp_path):
     """In-place + archive_existing_dest=True with a dir that lacks
     chroma.sqlite3 must NOT rename the dir before bailing. An earlier

@@ -6,6 +6,7 @@ import logging
 import os
 import pickle
 import sqlite3
+import threading
 from numbers import Integral
 from pathlib import Path
 from typing import Any, Optional
@@ -850,9 +851,24 @@ class ChromaCollection(BaseCollection):
     directly without going through ``ChromaBackend``.
     """
 
-    def __init__(self, collection, palace_path: Optional[str] = None):
+    def __init__(
+        self,
+        collection,
+        palace_path: Optional[str] = None,
+        *,
+        backend: Optional["ChromaBackend"] = None,
+        collection_name: Optional[str] = None,
+        embedding_function: Any = None,
+        hnsw_space: str = "cosine",
+        create: bool = False,
+    ):
         self._collection = collection
         self._palace_path = palace_path
+        self._backend = backend
+        self._collection_name = collection_name
+        self._embedding_function = embedding_function
+        self._hnsw_space = hnsw_space
+        self._create = create
 
     @contextlib.contextmanager
     def _write_lock(self):
@@ -869,6 +885,68 @@ class ChromaCollection(BaseCollection):
         with mine_palace_lock(self._palace_path):
             yield
 
+    def refresh_for_write(self) -> None:
+        """Re-bind through a guaranteed-fresh client before mutating.
+
+        Called while holding ``mine_palace_lock``. If another process wrote
+        while this process was waiting, the cached Chroma client can have stale
+        HNSW state; the backend write path reopens when the DB stat changed.
+        """
+        if self._backend is None or self._palace_path is None or self._collection_name is None:
+            return
+
+        client = self._backend._client_for_write(self._palace_path)
+        ef_kwargs: dict[str, Any] = {}
+        if self._embedding_function is not None:
+            ef_kwargs["embedding_function"] = self._embedding_function
+        if self._create:
+            self._collection = client.get_or_create_collection(
+                self._collection_name,
+                metadata={
+                    "hnsw:space": self._hnsw_space,
+                    "hnsw:num_threads": 1,
+                    **_HNSW_BLOAT_GUARD,
+                },
+                **ef_kwargs,
+            )
+        else:
+            self._collection = client.get_collection(self._collection_name, **ef_kwargs)
+
+    def refresh_for_read(self) -> None:
+        """Re-bind through the backend's current client before reading.
+
+        The write-freshness path may close/reopen a cached Chroma client to
+        avoid stale HNSW state after writes. Existing collection wrapper
+        instances should remain usable; refresh their raw collection handle
+        before read calls so callers holding an older wrapper don't hit a
+        closed rust client.
+        """
+        if self._backend is None or self._palace_path is None or self._collection_name is None:
+            return
+
+        client = self._backend._client(self._palace_path)
+        ef_kwargs: dict[str, Any] = {}
+        if self._embedding_function is not None:
+            ef_kwargs["embedding_function"] = self._embedding_function
+        try:
+            self._collection = client.get_collection(self._collection_name, **ef_kwargs)
+        except _ChromaNotFoundError:
+            if not self._create:
+                raise
+            self._collection = client.get_or_create_collection(
+                self._collection_name,
+                metadata={
+                    "hnsw:space": self._hnsw_space,
+                    "hnsw:num_threads": 1,
+                    **_HNSW_BLOAT_GUARD,
+                },
+                **ef_kwargs,
+            )
+
+    def _note_post_write(self) -> None:
+        if self._backend is not None and self._palace_path is not None:
+            self._backend._note_post_write(self._palace_path)
+
     # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------
@@ -880,7 +958,9 @@ class ChromaCollection(BaseCollection):
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
         with self._write_lock():
+            self.refresh_for_write()
             self._collection.add(**kwargs)
+            self._note_post_write()
 
     def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {"documents": documents, "ids": ids}
@@ -889,7 +969,9 @@ class ChromaCollection(BaseCollection):
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
         with self._write_lock():
+            self.refresh_for_write()
             self._collection.upsert(**kwargs)
+            self._note_post_write()
 
     def update(
         self,
@@ -909,7 +991,9 @@ class ChromaCollection(BaseCollection):
         if embeddings is not None:
             kwargs["embeddings"] = embeddings
         with self._write_lock():
+            self.refresh_for_write()
             self._collection.update(**kwargs)
+            self._note_post_write()
 
     # ------------------------------------------------------------------
     # Reads
@@ -958,6 +1042,7 @@ class ChromaCollection(BaseCollection):
         if where_document is not None:
             kwargs["where_document"] = where_document
 
+        self.refresh_for_read()
         raw = self._collection.query(**kwargs)
 
         num_queries = (
@@ -1027,6 +1112,7 @@ class ChromaCollection(BaseCollection):
         if offset is not None:
             kwargs["offset"] = offset
 
+        self.refresh_for_read()
         raw = self._collection.get(**kwargs)
         out_ids = list(raw.get("ids") or [])
         out_docs = list(raw.get("documents") or []) if spec.documents else []
@@ -1054,9 +1140,12 @@ class ChromaCollection(BaseCollection):
         if where is not None:
             kwargs["where"] = where
         with self._write_lock():
+            self.refresh_for_write()
             self._collection.delete(**kwargs)
+            self._note_post_write()
 
     def count(self):
+        self.refresh_for_read()
         return self._collection.count()
 
     @property
@@ -1069,6 +1158,7 @@ class ChromaCollection(BaseCollection):
         Returns ``{}`` when metadata is absent so callers can do a plain
         ``.get("hnsw:space")`` without None-checks.
         """
+        self.refresh_for_read()
         return self._collection.metadata or {}
 
 
@@ -1106,6 +1196,9 @@ class ChromaBackend(BaseBackend):
         self._clients: dict[str, Any] = {}
         # palace_path -> (inode, mtime) of chroma.sqlite3 at cache time.
         self._freshness: dict[str, tuple[int, float]] = {}
+        # palace_path -> (size, mtime_ns, inode) at last write-path refresh.
+        self._write_freshness: dict[str, tuple[int, int, int]] = {}
+        self._cache_lock = threading.RLock()
         self._closed = False
 
     @staticmethod
@@ -1138,6 +1231,16 @@ class ChromaBackend(BaseBackend):
             return (st.st_ino, st.st_mtime)
         except OSError:
             return (0, 0.0)
+
+    @staticmethod
+    def _db_stat_full(palace_path: str) -> tuple[int, int, int]:
+        """Return ``(size, mtime_ns, inode)`` for write-path freshness."""
+        db_path = os.path.join(palace_path, "chroma.sqlite3")
+        try:
+            st = os.stat(db_path)
+            return (st.st_size, st.st_mtime_ns, st.st_ino)
+        except OSError:
+            return (0, 0, 0)
 
     def _client(self, palace_path: str):
         """Return a cached ``PersistentClient``, rebuilding on inode/mtime change.
@@ -1199,6 +1302,40 @@ class ChromaBackend(BaseBackend):
             # may still be (0, 0.0) on first open.
             self._freshness[palace_path] = self._db_stat(palace_path)
         return cached
+
+    def _client_for_write(self, palace_path: str):
+        """Return a fresh ``PersistentClient`` for a write under palace lock."""
+        if self._closed:
+            from .base import BackendClosedError
+
+            raise BackendClosedError("ChromaBackend has been closed")
+
+        palace_path = str(palace_path)
+        with self._cache_lock:
+            current_stat = self._db_stat_full(palace_path)
+            cached_stat = self._write_freshness.get(palace_path)
+            cached_client = self._clients.get(palace_path)
+
+            if cached_client is None or current_stat != cached_stat:
+                _close_client(self._clients.pop(palace_path, None))
+                self._freshness.pop(palace_path, None)
+                ChromaBackend._prepare_palace_for_open(palace_path)
+                cached_client = chromadb.PersistentClient(path=palace_path)
+                self._clients[palace_path] = cached_client
+                self._freshness[palace_path] = self._db_stat(palace_path)
+
+            self._write_freshness[palace_path] = self._db_stat_full(palace_path)
+            return cached_client
+
+    def _note_post_write(self, palace_path: str) -> None:
+        """Record the DB stat after a write committed by this process."""
+        if self._closed:
+            return
+        palace_path = str(palace_path)
+        with self._cache_lock:
+            if palace_path in self._clients:
+                self._freshness[palace_path] = self._db_stat(palace_path)
+                self._write_freshness[palace_path] = self._db_stat_full(palace_path)
 
     # ------------------------------------------------------------------
     # Public static helpers (legacy; prefer :meth:`get_collection`)
@@ -1335,7 +1472,15 @@ class ChromaBackend(BaseBackend):
         else:
             collection = client.get_collection(collection_name, **ef_kwargs)
         _pin_hnsw_threads(collection)
-        return ChromaCollection(collection, palace_path=palace_path)
+        return ChromaCollection(
+            collection,
+            palace_path=palace_path,
+            backend=self,
+            collection_name=collection_name,
+            embedding_function=ef,
+            hnsw_space=hnsw_space,
+            create=create,
+        )
 
     def close_palace(self, palace) -> None:
         """Drop cached handles for ``palace`` and release its SQLite file lock.
@@ -1350,12 +1495,14 @@ class ChromaBackend(BaseBackend):
             return
         _close_client(self._clients.pop(path, None))
         self._freshness.pop(path, None)
+        self._write_freshness.pop(path, None)
 
     def close(self) -> None:
         for client in self._clients.values():
             _close_client(client)
         self._clients.clear()
         self._freshness.clear()
+        self._write_freshness.clear()
         self._closed = True
 
     def health(self, palace: Optional[PalaceRef] = None) -> HealthStatus:
@@ -1394,7 +1541,15 @@ class ChromaBackend(BaseBackend):
             },
             **ef_kwargs,
         )
-        return ChromaCollection(collection, palace_path=palace_path)
+        return ChromaCollection(
+            collection,
+            palace_path=palace_path,
+            backend=self,
+            collection_name=collection_name,
+            embedding_function=ef,
+            hnsw_space=hnsw_space,
+            create=True,
+        )
 
 
 def _normalize_get_collection_args(args, kwargs):

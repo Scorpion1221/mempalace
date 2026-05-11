@@ -35,7 +35,9 @@ import shutil
 import sqlite3
 import time
 from collections import defaultdict
+from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Iterator, Optional
 
 from chromadb.errors import NotFoundError as ChromaNotFoundError
@@ -86,6 +88,23 @@ def _recoverable_collections() -> tuple[str, ...]:
 # should call ``_recoverable_collections()`` so config changes are picked
 # up at call time.
 RECOVERABLE_COLLECTIONS = (COLLECTION_NAME, CLOSETS_COLLECTION_NAME)
+
+
+@dataclass(frozen=True)
+class RebuildFromVerbatimReport:
+    """Outcome of a ``rebuild_from_verbatim`` invocation."""
+
+    palace_path: Path
+    counts: dict[str, int]
+    archive_path: Optional[Path] = None
+
+    @property
+    def drawers_processed(self) -> int:
+        return self.counts.get(_drawers_collection_name(), 0)
+
+    @property
+    def closets_processed(self) -> int:
+        return self.counts.get(CLOSETS_COLLECTION_NAME, 0)
 
 
 def _get_palace_path():
@@ -1105,6 +1124,45 @@ def rebuild_from_sqlite(
         backend.close()
 
 
+def rebuild_from_verbatim(
+    palace_path: str | Path,
+    *,
+    quarantine_first: bool = True,
+    batch_size: int = 500,
+    progress_cb=None,
+) -> RebuildFromVerbatimReport:
+    """Rebuild a palace from verbatim documents stored in ``chroma.sqlite3``.
+
+    This is Sir's Layer-4 recovery entrypoint expressed on top of upstream's
+    stronger ``rebuild_from_sqlite`` implementation. SQLite's
+    ``chroma:document`` rows are the verbatim source of truth; HNSW files are
+    rebuilt by re-upserting into a fresh palace. The existing palace is moved
+    aside to ``<palace>.pre-rebuild-*`` before rebuilding, preserving a
+    forensic copy and keeping closets in the recovery set.
+    """
+    del quarantine_first  # upstream from-sqlite in-place mode archives instead of deleting
+    palace = Path(palace_path).expanduser().resolve()
+    before = set(palace.parent.glob(f"{palace.name}.pre-rebuild-*"))
+    if progress_cb:
+        progress_cb("start", 0, 0)
+    counts = rebuild_from_sqlite(
+        source_palace=str(palace),
+        dest_palace=str(palace),
+        archive_existing_dest=True,
+        batch_size=batch_size,
+    )
+    after = set(palace.parent.glob(f"{palace.name}.pre-rebuild-*"))
+    new_archives = sorted(after - before, key=lambda p: p.stat().st_mtime if p.exists() else 0)
+    archive_path = new_archives[-1] if new_archives else None
+    if progress_cb:
+        progress_cb("done", sum(counts.values()), sum(counts.values()))
+    return RebuildFromVerbatimReport(
+        palace_path=palace,
+        counts=counts,
+        archive_path=archive_path,
+    )
+
+
 def status(palace_path=None, collection_name: Optional[str] = None) -> dict:
     """Read-only health check: compare sqlite vs HNSW element counts.
 
@@ -1423,7 +1481,7 @@ def repair_max_seq_id(
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser(description="MemPalace repair tools")
-    p.add_argument("command", choices=["status", "scan", "prune", "rebuild"])
+    p.add_argument("command", choices=["status", "scan", "prune", "rebuild", "rebuild-from-verbatim"])
     p.add_argument("--palace", default=None, help="Palace directory path")
     p.add_argument("--wing", default=None, help="Scan only this wing")
     p.add_argument("--confirm", action="store_true", help="Actually delete corrupt IDs")
@@ -1439,3 +1497,5 @@ if __name__ == "__main__":
         prune_corrupt(palace_path=path, confirm=args.confirm)
     elif args.command == "rebuild":
         rebuild_index(palace_path=path)
+    elif args.command == "rebuild-from-verbatim":
+        rebuild_from_verbatim(path or _get_palace_path())

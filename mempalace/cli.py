@@ -760,6 +760,23 @@ def cmd_repair(args):
         os.path.expanduser(args.palace) if args.palace else config.palace_path
     )
 
+    if getattr(args, "rebuild_from_verbatim", False):
+        from .migrate import confirm_destructive_action
+        from .repair import rebuild_from_verbatim
+
+        if not confirm_destructive_action(
+            "Rebuild from verbatim", palace_path, assume_yes=getattr(args, "yes", False)
+        ):
+            return
+        report = rebuild_from_verbatim(palace_path)
+        if not report.counts:
+            sys.exit(1)
+        print(f"  Drawers processed: {report.drawers_processed}")
+        print(f"  Closets processed: {report.closets_processed}")
+        if report.archive_path:
+            print(f"  Original palace archived at: {report.archive_path}")
+        return
+
     if getattr(args, "mode", "legacy") == "max-seq-id":
         from .repair import repair_max_seq_id
 
@@ -965,20 +982,74 @@ def cmd_instructions(args):
     run_instructions(name=args.name)
 
 
+def cmd_singleton_install(args):
+    from .singleton_manager import cmd_install
+
+    cmd_install(args)
+
+
+
+def cmd_singleton_start(args):
+    from .singleton_manager import cmd_start
+
+    cmd_start(args)
+
+
+
+def cmd_singleton_stop(args):
+    from .singleton_manager import cmd_stop
+
+    cmd_stop(args)
+
+
+
+def cmd_singleton_status(args):
+    from .singleton_manager import cmd_status
+
+    cmd_status(args)
+
+
+
+def cmd_singleton_uninstall(args):
+    from .singleton_manager import cmd_uninstall
+
+    cmd_uninstall(args)
+
+
+def cmd_update(args):
+    """Pull latest code and sync plugins to installed agents."""
+    from .updater import check, update
+
+    if args.check:
+        check()
+        return
+    agents = [a.strip() for a in args.agents.split(",") if a.strip()] if args.agents else None
+    update(agents=agents, tag=args.tag or None, pull=not args.no_pull)
+
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
-    base_server_cmd = "mempalace-mcp"
+    base_server_cmd = "mempalace-mcp-bridge"
+    direct_server_cmd = "mempalace-mcp"
 
     if args.palace:
         resolved_palace = str(Path(args.palace).expanduser())
         server_cmd = f"{base_server_cmd} --palace {shlex.quote(resolved_palace)}"
+        direct_cmd = f"{direct_server_cmd} --palace {shlex.quote(resolved_palace)}"
     else:
         server_cmd = base_server_cmd
+        direct_cmd = direct_server_cmd
 
-    print("MemPalace MCP quick setup:")
+    print("MemPalace MCP quick setup (singleton-preferred):")
     print(f"  claude mcp add mempalace -- {server_cmd}")
-    print("\nRun the server directly:")
-    print(f"  {server_cmd}")
+    print("\nDefault architecture:")
+    print("  1. Start one local singleton: mempalace singleton install --start")
+    print("  2. Point agents at mempalace-mcp-bridge")
+    print("  3. Bridge talks to ~/.mempalace/mcp.sock when available")
+    print("\nPer-agent fallback (no singleton):")
+    print(f"  claude mcp add mempalace -- {direct_cmd}")
+    print(f"  {direct_cmd}")
 
     if not args.palace:
         print("\nOptional custom palace:")
@@ -1380,7 +1451,7 @@ def main():
     p_hook_run.add_argument(
         "--hook",
         required=True,
-        choices=["session-start", "stop", "precompact"],
+        choices=["session-start", "stop", "precompact", "userprompt"],
         help="Hook name to run",
     )
     p_hook_run.add_argument(
@@ -1418,6 +1489,14 @@ def main():
             "extraction returns exactly 10,000 drawers and the SQLite ground-truth check "
             "either matches or can't be read. Use only after independently confirming "
             "the palace really contains that count."
+        ),
+    )
+    p_repair.add_argument(
+        "--rebuild-from-verbatim",
+        action="store_true",
+        help=(
+            "Archive the existing palace and rebuild HNSW from verbatim "
+            "documents stored in chroma.sqlite3 (also rebuilds closets)."
         ),
     )
     p_repair.add_argument(
@@ -1480,6 +1559,26 @@ def main():
         help="Compare sqlite vs HNSW element counts (read-only; never opens a chromadb client)",
     )
 
+    # singleton manager
+    p_singleton = sub.add_parser(
+        "singleton",
+        help="Manage the shared local MemPalace MCP singleton (launchd on macOS, systemd --user on Linux)",
+    )
+    singleton_sub = p_singleton.add_subparsers(dest="singleton_action")
+    p_singleton_install = singleton_sub.add_parser(
+        "install",
+        help="Install the platform-specific singleton service definition",
+    )
+    p_singleton_install.add_argument(
+        "--start",
+        action="store_true",
+        help="Start the singleton immediately after installing the service definition",
+    )
+    singleton_sub.add_parser("start", help="Start (or restart) the singleton service")
+    singleton_sub.add_parser("stop", help="Stop the singleton service")
+    singleton_sub.add_parser("status", help="Show singleton service + socket status")
+    singleton_sub.add_parser("uninstall", help="Remove the singleton service definition")
+
     # mcp
     sub.add_parser(
         "mcp",
@@ -1502,6 +1601,34 @@ def main():
     )
 
     sub.add_parser("status", help="Show what's been filed")
+
+    # update
+    p_update = sub.add_parser(
+        "update",
+        help="Pull latest code and sync plugins to all installed agents",
+    )
+    p_update.add_argument(
+        "--check",
+        action="store_true",
+        help="Show what would change without touching anything",
+    )
+    p_update.add_argument(
+        "--agents",
+        type=str,
+        default="",
+        help="Comma-separated agent list (claude,codex,hermes,cursor). Default: auto-detect",
+    )
+    p_update.add_argument(
+        "--tag",
+        type=str,
+        default="",
+        help="Check out a specific tag instead of pulling the current branch",
+    )
+    p_update.add_argument(
+        "--no-pull",
+        action="store_true",
+        help="Skip git pull, only re-run install.sh (which then reinstalls + syncs plugins)",
+    )
 
     args = parser.parse_args()
 
@@ -1526,6 +1653,21 @@ def main():
         cmd_instructions(args)
         return
 
+    if args.command == "singleton":
+        action = getattr(args, "singleton_action", None)
+        singleton_dispatch = {
+            "install": cmd_singleton_install,
+            "start": cmd_singleton_start,
+            "stop": cmd_singleton_stop,
+            "status": cmd_singleton_status,
+            "uninstall": cmd_singleton_uninstall,
+        }
+        if action not in singleton_dispatch:
+            p_singleton.print_help()
+            return
+        singleton_dispatch[action](args)
+        return
+
     dispatch = {
         "init": cmd_init,
         "mine": cmd_mine,
@@ -1540,6 +1682,7 @@ def main():
         "repair-status": cmd_repair_status,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "update": cmd_update,
     }
     dispatch[args.command](args)
 

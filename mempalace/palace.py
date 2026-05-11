@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import threading
+from pathlib import Path
 from typing import Optional
 
 from .backends.chroma import ChromaBackend
@@ -529,6 +530,44 @@ def mine_palace_lock(palace_path: str):
 # lock). Kept so third-party callers that imported it continue to work; new
 # code should use `mine_palace_lock(palace_path)` for per-palace scoping.
 mine_global_lock = mine_palace_lock
+
+# Backward-compatible name from Sir's portable-runtime branch. The canonical
+# implementation is upstream's per-palace `mine_palace_lock` with holder
+# diagnostics; callers importing `palace_write_lock` get the same primitive.
+palace_write_lock = mine_palace_lock
+
+
+def ensure_palace_initialized(palace_path: str | Path) -> None:
+    """Idempotently ensure the ChromaDB palace schema exists.
+
+    ChromaDB's first ``PersistentClient`` open runs internal schema creation.
+    Serializing that first open through the canonical palace lock prevents
+    concurrent first-start races. Once ``chroma.sqlite3`` exists and is
+    non-empty, the fast path is lock-free.
+    """
+    palace_path = Path(palace_path).expanduser().resolve()
+    sqlite_path = palace_path / "chroma.sqlite3"
+    try:
+        if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
+            return
+    except OSError:
+        pass
+
+    palace_path.mkdir(parents=True, exist_ok=True)
+    with mine_palace_lock(str(palace_path)):
+        try:
+            if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
+                return
+        except OSError:
+            pass
+
+        import chromadb
+
+        client = chromadb.PersistentClient(path=str(palace_path))
+        client.list_collections()
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:

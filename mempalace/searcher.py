@@ -29,7 +29,16 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
 
+# Split on non-word boundaries. Latin/Cyrillic/digits stay word-level;
+# CJK ideographs are split into overlapping bigrams below.
 _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
+
+# CJK Unified Ideographs + Extension A + CJK Compat Ideographs + some Kana
+_CJK_RE = re.compile(
+    r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+    r"\U00020000-\U0002a6df\U0002a700-\U0002ebef]+",
+    re.UNICODE,
+)
 
 
 def _first_or_empty(results, key: str) -> list:
@@ -47,16 +56,81 @@ def _first_or_empty(results, key: str) -> list:
     return outer[0] or []
 
 
+def _query_result_rows(results):
+    """Yield ``(document, metadata, distance)`` rows across all query_texts.
+
+    Chroma returns a list-of-lists for each included field when callers pass
+    multiple ``query_texts``. The historical helper above intentionally kept
+    the first-query semantics; hook recall needs ``extra_queries`` to widen the
+    candidate pool, so this helper flattens every query result defensively.
+    """
+    if isinstance(results, dict):
+        documents = results.get("documents") or []
+        metadatas = results.get("metadatas") or []
+        distances = results.get("distances") or []
+    else:
+        documents = getattr(results, "documents", None) or []
+        metadatas = getattr(results, "metadatas", None) or []
+        distances = getattr(results, "distances", None) or []
+
+    outer_len = max(len(documents), len(metadatas), len(distances))
+    for idx in range(outer_len):
+        docs = documents[idx] if idx < len(documents) and documents[idx] is not None else []
+        metas = metadatas[idx] if idx < len(metadatas) and metadatas[idx] is not None else []
+        dists = distances[idx] if idx < len(distances) and distances[idx] is not None else []
+        for doc, meta, dist in zip(docs, metas, dists):
+            yield doc, meta, dist
+
+
 def _tokenize(text: str) -> list:
-    """Lowercase + strip to alphanumeric tokens of length ≥ 2.
+    r"""Lowercase + strip to alphanumeric tokens of length ≥ 2.
+
+    CJK scripts lack whitespace word boundaries, so a single ``\w{2,}``
+    regex treats an entire Chinese sentence as one token. BM25 then fails
+    because a query token like ``"之前做的飞书回复表情的补丁"`` will never
+    exactly match any document token.
+
+    Fix: detect CJK runs and split them into overlapping character bigrams
+    (e.g. ``"飞书回复"`` → ``["飞书", "书回", "回复"]``). Bigrams are the
+    smallest unit that preserves meaningful Chinese word fragments while
+    staying dependency-free.
 
     Tolerates ``None`` documents — Chroma can return ``None`` in the
-    ``documents`` field for drawers without text content, which would
-    otherwise raise ``AttributeError`` mid-rerank.
+    ``documents`` field for drawers without text content.
     """
     if not text:
         return []
-    return _TOKEN_RE.findall(text.lower())
+    lower = text.lower()
+    tokens: list = []
+    for raw_token in _TOKEN_RE.findall(lower):
+        cjk_runs = _CJK_RE.findall(raw_token)
+        if not cjk_runs:
+            # Pure Latin / digits / Cyrillic — keep as-is
+            tokens.append(raw_token)
+            continue
+        # Mixed or pure CJK token: extract bigrams from CJK runs,
+        # keep non-CJK fragments as word tokens.
+        pos = 0
+        for run in cjk_runs:
+            idx = raw_token.find(run, pos)
+            # Non-CJK prefix between previous run and this one
+            if idx > pos:
+                prefix = raw_token[pos:idx]
+                if len(prefix) >= 2:
+                    tokens.append(prefix)
+            # CJK bigrams (+ single-char fallback for 1-char runs)
+            if len(run) == 1:
+                tokens.append(run)
+            else:
+                for i in range(len(run) - 1):
+                    tokens.append(run[i : i + 2])
+            pos = idx + len(run)
+        # Non-CJK suffix after last CJK run
+        if pos < len(raw_token):
+            suffix = raw_token[pos:]
+            if len(suffix) >= 2:
+                tokens.append(suffix)
+    return tokens
 
 
 def _bm25_scores(
@@ -123,6 +197,8 @@ def _hybrid_rank(
     query: str,
     vector_weight: float = 0.6,
     bm25_weight: float = 0.4,
+    preferred_wing: str = None,
+    wing_boost: float = 0.15,
 ) -> list:
     """Re-rank ``results`` by a convex combination of vector similarity and BM25.
 
@@ -133,6 +209,9 @@ def _hybrid_rank(
     * BM25 is real Okapi-BM25 with corpus-relative IDF over the candidates
       themselves. Since the absolute scale is unbounded, BM25 is min-max
       normalized within the candidate set so weights are commensurable.
+    * When ``preferred_wing`` is set, results from that wing receive a small
+      additive boost. This soft-prioritizes the active project without
+      filtering out stronger cross-wing matches.
 
     Candidates with ``distance=None`` are treated as vector-unknown
     (no vector signal available) and scored on BM25 contribution alone.
@@ -158,21 +237,29 @@ def _hybrid_rank(
         else:
             vec_sim = max(0.0, 1.0 - distance)
         r["bm25_score"] = round(raw, 3)
-        scored.append((vector_weight * vec_sim + bm25_weight * norm, r))
+        score = vector_weight * vec_sim + bm25_weight * norm
+        if preferred_wing and r.get("wing") == preferred_wing:
+            score += wing_boost
+        scored.append((score, r))
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     results[:] = [r for _, r in scored]
     return results
 
 
-def build_where_filter(wing: str = None, room: str = None) -> dict:
-    """Build ChromaDB where filter for wing/room filtering."""
-    if wing and room:
-        return {"$and": [{"wing": wing}, {"room": room}]}
-    elif wing:
-        return {"wing": wing}
-    elif room:
-        return {"room": room}
+def build_where_filter(wing: str = None, room: str = None, hall: str = None) -> dict:
+    """Build ChromaDB where filter for wing/room/hall filtering."""
+    clauses = []
+    if wing:
+        clauses.append({"wing": wing})
+    if room:
+        clauses.append({"room": room})
+    if hall:
+        clauses.append({"hall": hall})
+    if len(clauses) > 1:
+        return {"$and": clauses}
+    if clauses:
+        return clauses[0]
     return {}
 
 
@@ -379,6 +466,8 @@ def _bm25_only_via_sqlite(
     palace_path: str,
     wing: str = None,
     room: str = None,
+    hall: str = None,
+    after: str = None,
     n_results: int = 5,
     max_candidates: int = 500,
     _include_internal: bool = False,
@@ -414,7 +503,7 @@ def _bm25_only_via_sqlite(
     def _metadata_filter_sql(row_id_expr: str) -> tuple[str, list[str]]:
         clauses = []
         params = []
-        for key, value in (("wing", wing), ("room", room)):
+        for key, value in (("wing", wing), ("room", room), ("hall", hall)):
             if not value:
                 continue
             clauses.append(
@@ -527,7 +616,7 @@ def _bm25_only_via_sqlite(
         if not candidate_ids:
             return {
                 "query": query,
-                "filters": {"wing": wing, "room": room},
+                "filters": {"wing": wing, "room": room, "hall": hall, "after": after},
                 "total_before_filter": 0,
                 "results": [],
                 "fallback": "bm25_only_via_sqlite",
@@ -563,6 +652,12 @@ def _bm25_only_via_sqlite(
             continue
         if room and meta.get("room") != room:
             continue
+        if hall and meta.get("hall") != hall:
+            continue
+        if after:
+            filed_at = meta.get("filed_at", "") or ""
+            if filed_at < after:
+                continue
         full_source = meta.get("source_file", "") or ""
         candidates.append(
             {
@@ -605,7 +700,7 @@ def _bm25_only_via_sqlite(
 
     return {
         "query": query,
-        "filters": {"wing": wing, "room": room},
+        "filters": {"wing": wing, "room": room, "hall": hall, "after": after},
         "total_before_filter": len(candidates),
         "results": hits,
         "fallback": "bm25_only_via_sqlite",
@@ -619,6 +714,8 @@ def _merge_bm25_union_candidates(
     palace_path: str,
     wing: str,
     room: str,
+    hall: str,
+    after: str,
     n_results: int,
     max_distance: float = 0.0,
 ) -> None:
@@ -653,6 +750,8 @@ def _merge_bm25_union_candidates(
             palace_path,
             wing=wing,
             room=room,
+            hall=hall,
+            after=after,
             n_results=n_results * 3,
             _include_internal=True,
         ).get("results", [])
@@ -711,6 +810,8 @@ def _apply_candidate_strategy(
     palace_path: str,
     wing: str,
     room: str,
+    hall: str,
+    after: str,
     n_results: int,
     max_distance: float = 0.0,
 ) -> None:
@@ -721,7 +822,17 @@ def _apply_candidate_strategy(
     """
     merger = _CANDIDATE_MERGERS[strategy]
     if merger is not None:
-        merger(hits, query, palace_path, wing, room, n_results, max_distance=max_distance)
+        merger(
+            hits,
+            query,
+            palace_path,
+            wing,
+            room,
+            hall,
+            after,
+            n_results,
+            max_distance=max_distance,
+        )
 
 
 def search_memories(
@@ -729,8 +840,12 @@ def search_memories(
     palace_path: str,
     wing: str = None,
     room: str = None,
+    hall: str = None,
     n_results: int = 5,
     max_distance: float = 0.0,
+    preferred_wing: str = None,
+    after: str = None,
+    extra_queries: list = None,
     vector_disabled: bool = False,
     candidate_strategy: str = "vector",
     collection_name: str = None,
@@ -744,6 +859,7 @@ def search_memories(
         palace_path: Path to the ChromaDB palace directory.
         wing: Optional wing filter.
         room: Optional room filter.
+        hall: Optional hall filter.
         n_results: Max results to return.
         max_distance: Max cosine distance threshold. The palace collection uses
             cosine distance (hnsw:space=cosine) — 0 = identical, 2 = opposite.
@@ -771,6 +887,9 @@ def search_memories(
               When ``max_distance > 0.0`` is also set, BM25-only candidates
               are skipped — they have no vector distance and would silently
               violate the requested distance threshold.
+        preferred_wing: Soft rank boost for the active project/wing.
+        after: ISO-ish timestamp/date lower bound applied to ``filed_at``.
+        extra_queries: Additional query rewrites to merge into the candidate pool.
     """
     # Validate the strategy eagerly so invalid values fail the same way
     # regardless of whether the call routes through the vector path or
@@ -783,6 +902,8 @@ def search_memories(
             palace_path,
             wing=wing,
             room=room,
+            hall=hall,
+            after=after,
             n_results=n_results,
             collection_name=collection_name,
         )
@@ -796,7 +917,11 @@ def search_memories(
             "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
         }
 
-    where = build_where_filter(wing, room)
+    where = build_where_filter(wing, room, hall)
+    all_queries = [query] + (extra_queries or [])
+    all_queries = list(dict.fromkeys(q for q in all_queries if q and str(q).strip()))
+    if not all_queries:
+        all_queries = [query]
 
     # Hybrid retrieval: always query drawers directly (the floor), then use
     # closet hits to boost rankings. Closets are a ranking SIGNAL, never a
@@ -807,8 +932,8 @@ def search_memories(
     # and closet-first routing hides drawers that direct search would find.
     try:
         dkwargs = {
-            "query_texts": [query],
-            "n_results": n_results * 3,  # over-fetch for re-ranking
+            "query_texts": all_queries,
+            "n_results": n_results * (10 if after else 3),  # over-fetch for re-ranking
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
@@ -822,20 +947,14 @@ def search_memories(
     try:
         closets_col = get_closets_collection(palace_path, create=False)
         ckwargs = {
-            "query_texts": [query],
+            "query_texts": all_queries,
             "n_results": n_results * 2,
             "include": ["documents", "metadatas", "distances"],
         }
         if where:
             ckwargs["where"] = where
         closet_results = closets_col.query(**ckwargs)
-        for rank, (cdoc, cmeta, cdist) in enumerate(
-            zip(
-                _first_or_empty(closet_results, "documents"),
-                _first_or_empty(closet_results, "metadatas"),
-                _first_or_empty(closet_results, "distances"),
-            )
-        ):
+        for rank, (cdoc, cmeta, cdist) in enumerate(_query_result_rows(closet_results)):
             cmeta = cmeta or {}
             source = cmeta.get("source_file", "")
             if source and source not in closet_boost_by_source:
@@ -851,16 +970,17 @@ def search_memories(
     CLOSET_DISTANCE_CAP = 1.5  # cosine dist > 1.5 = too weak to use as signal
 
     scored: list = []
-    for doc, meta, dist in zip(
-        _first_or_empty(drawer_results, "documents"),
-        _first_or_empty(drawer_results, "metadatas"),
-        _first_or_empty(drawer_results, "distances"),
-    ):
+    drawer_rows = list(_query_result_rows(drawer_results))
+    for doc, meta, dist in drawer_rows:
         meta = meta or {}
         doc = doc or ""
         # Filter on raw distance before rounding to avoid precision loss.
         if max_distance > 0.0 and dist > max_distance:
             continue
+        if after:
+            filed_at = meta.get("filed_at", "") or ""
+            if filed_at < after:
+                continue
 
         meta = meta or {}
         source = meta.get("source_file", "") or ""
@@ -975,6 +1095,8 @@ def search_memories(
         palace_path,
         wing,
         room,
+        hall,
+        after,
         n_results,
         max_distance=max_distance,
     )
@@ -984,7 +1106,7 @@ def search_memories(
     # would return up to 4× ``n_results`` (vector hits + BM25 union pool),
     # breaking the existing ``search_memories`` size contract that the MCP
     # ``limit`` parameter is built on.
-    hits = _hybrid_rank(hits, query)[:n_results]
+    hits = _hybrid_rank(hits, query, preferred_wing=preferred_wing)[:n_results]
     for h in hits:
         h.pop("_sort_key", None)
         h.pop("_source_file_full", None)
@@ -992,7 +1114,7 @@ def search_memories(
 
     return {
         "query": query,
-        "filters": {"wing": wing, "room": room},
-        "total_before_filter": len(_first_or_empty(drawer_results, "documents")),
+        "filters": {"wing": wing, "room": room, "hall": hall, "after": after},
+        "total_before_filter": len(drawer_rows),
         "results": hits,
     }
