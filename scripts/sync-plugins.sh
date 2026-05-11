@@ -533,6 +533,21 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     done
     echo "  → plugin files synced"
 
+    # The Hermes runtime is itself a git checkout.  This plugin is managed by
+    # MemPalace, not Hermes git, so keep it out of `git status`; otherwise
+    # `hermes update` sees the untracked plugin directory and repeatedly
+    # autostashes/restores it before every update.
+    HERMES_GIT_EXCLUDE="$HOME/.hermes/hermes-agent/.git/info/exclude"
+    if [ -d "$(dirname "$HERMES_GIT_EXCLUDE")" ] \
+        && ! grep -qxF '/plugins/memory/mempalace/' "$HERMES_GIT_EXCLUDE" 2>/dev/null; then
+        {
+            echo ""
+            echo "# Locally installed MemPalace memory provider (managed outside Hermes git)"
+            echo "/plugins/memory/mempalace/"
+        } >> "$HERMES_GIT_EXCLUDE"
+        echo "  → Hermes git exclude updated"
+    fi
+
     HERMES_VENV="$HOME/.hermes/hermes-agent/venv"
     if [ -f "$HERMES_VENV/bin/python" ]; then
         "$HERMES_VENV/bin/python" -m pip install --force-reinstall --no-deps "$REPO" -q 2>/dev/null && echo "  → Hermes venv updated" || true
