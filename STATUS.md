@@ -8,14 +8,37 @@
 
 ## TL;DR
 
-- 集成分支 `integration/v3.3.5-sync` **HEAD 仍在 upstream 基线 `bc5c354`**，所有改动以 **unstaged working tree diff** 形式存在（**0 个新 commit**）。
-- 23 个 tracked 文件被 modify (+3147 / -268)，10+ 个 fork 特有的文件以 untracked 形式从 fork `dev` 分支继承到 worktree（**与 dev 内容 7/8 一致**，1 个 INSTALL.md 有差异，待人工审）。
+- 集成分支 `integration/v3.3.5-sync` 已拆分为 **7 个干净 commit**（基于 `bc5c354`），含 1 个 docs + 5 个 feat + 1 个 release。
+- 42 个文件变更（+7904 / -270 对比 `bc5c354`）。
 - **9 个 KEEP commit 的功能特征 100% 在 worktree 中可观测到**；通过文件存在性 + 关键标识符 grep 验证。
 - **4 个设计决策（A 钩子 / B embedding 双路径 / C lock 别名 / D repair 多模式）全部落地**，每条都能在源码里指认实现位置。
 - **10 个 DROP commit 全部确认未引入**（对应 fork hack 的标识符全部缺席，上游版本的实现全部在位）。
-- **5 个 ruff errors**：3 个是 fork 决策导致的复杂度（设计权衡，非 bug）；1 个 W605 转义警告（5 秒可修）；1 个 F811 测试类重复定义（真 merge bug，应在 Phase 2 修掉）。
-- **测试**：上一轮 codex 跑过的最后一次结果是 **1762 passed / 9 skipped**（早先的 10 failed 是本地环境问题：onnx 模型下载需联网 + `/tmp` UDS PermissionError，与代码无关）。
-- **Phase 2 建议**：✅ 可进 Phase 2 审阅。**先把所有 worktree 改动 commit 成一个或多个干净的 commit**，再做 PR 评审。当前 0-commit 状态使 `git log` 无法对账。
+- **Ruff: 5 errors → 2 errors**（F811 / W605 / F401 已修；剩余 2 个 C901 复杂度是 fork recall pipeline 的设计权衡，可接受）。
+- **测试**：最近一轮 1762 passed / 9 skipped；Pre-Phase-2 修改后的关键套件（searcher + hooks_cli + embedding = 155 tests）100% 通过。
+- **Phase 2 状态**：✅ **Ready to Review**。7 个 commit 可按顺序 review，`git log upstream/develop..HEAD` 干净对账。
+
+## Pre-Phase-2 整理（2026-05-11 完成）
+
+在最初审计基础上，完成 3 项强制动作：
+
+1. ✅ **Commit 化** — 所有 worktree 改动拆成 6 个功能 commit + 原有 1 个 docs commit。
+2. ✅ **F811 修复** — `tests/test_searcher.py` 删除重复的第二个 `TestBM25NoneSafety` 类（39 行纯粘贴重复），避免测试被静默覆盖。
+3. ✅ **W605 + F401 修复** — `searcher.py:86` docstring 改 raw string；`singleton_manager.py:21` 删 unused `Iterable` import。
+4. ✅ **INSTALL.md 确认** — wt 版本是**更新的**（反映 Sir 后来的 launchd plist 迁移 + 3.3.501 版本号），dev 那版是过时的，保留 wt 版本。
+5. ✅ **.gitignore 补充** — 把 `INTEGRATION_BRIEF.md`、`STATUS_BRIEF.md`、`.git-local/` 过程文件屏蔽。
+
+### Commit 链（按时间顺序）
+
+```
+005b748 feat(install): portable install scripts + UDS singleton infrastructure
+8623fee feat(plugin-sync): align Claude/Codex/Cursor plugin caches to runtime version
+a3af25f feat(singleton): UDS singleton server + stdio MCP bridge + tag-aware updater
+d288905 feat(recall): LLM recall pipeline + KG rerank + hooks no-auto-mine policy
+2e08bf3 feat(integration): apply design decisions B/C/D + searcher CJK + cli union
+2100b95 chore(release): bump to 3.3.501 (sync upstream v3.3.5)
+```
+
+(还有一个更早的 `53331f8 docs: add integration status report` — 就是本文档的初版 commit)
 
 ---
 
