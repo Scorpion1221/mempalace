@@ -70,6 +70,10 @@ from .backends.chroma import (  # noqa: E402
     _pin_hnsw_threads,
     hnsw_capacity_status,
 )
+from .palace import (  # noqa: E402
+    MineAlreadyRunning,
+    ensure_palace_initialized,
+)
 from .query_sanitizer import sanitize_query  # noqa: E402
 from .searcher import search_memories  # noqa: E402
 from .palace_graph import (  # noqa: E402
@@ -94,6 +98,16 @@ def _parse_args():
         "--palace",
         metavar="PATH",
         help="Path to the palace directory (overrides config file and env var)",
+    )
+    parser.add_argument(
+        "--singleton",
+        action="store_true",
+        help=(
+            "Run as a managed singleton: start the UDS listener and block on "
+            "signals instead of reading JSON-RPC from stdin. Use this under "
+            "launchd/systemd so the process does not exit when stdin is "
+            "closed/EOF. Env override: MEMPAL_MCP_SINGLETON=1."
+        ),
     )
     args, unknown = parser.parse_known_args()
     if unknown:
@@ -2293,6 +2307,123 @@ def _restore_stdout():
     sys.stdout = _REAL_STDOUT
 
 
+_SOCKET_PATH = os.path.join(os.path.expanduser("~"), ".mempalace", "mcp.sock")
+
+
+def _handle_socket_client(conn):
+    try:
+        data = b""
+        while True:
+            chunk = conn.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+            if b"\n" in data:
+                break
+        if not data:
+            return
+        request = json.loads(data.decode("utf-8").strip())
+        response = handle_request(request)
+        if response is not None:
+            conn.sendall(json.dumps(response).encode("utf-8") + b"\n")
+    except Exception as e:
+        try:
+            err = {"jsonrpc": "2.0", "error": {"code": -32603, "message": str(e)}, "id": None}
+            conn.sendall(json.dumps(err).encode("utf-8") + b"\n")
+        except Exception:
+            pass
+    finally:
+        conn.close()
+
+
+def _start_socket_listener():
+    import atexit
+    import socket
+    import threading
+
+    if os.environ.get("MEMPAL_MCP_DISABLE_SOCKET") == "1":
+        logger.info("Socket listener disabled by MEMPAL_MCP_DISABLE_SOCKET=1")
+        return
+
+    sock_dir = os.path.dirname(_SOCKET_PATH)
+    os.makedirs(sock_dir, exist_ok=True)
+    if os.path.exists(_SOCKET_PATH):
+        try:
+            os.unlink(_SOCKET_PATH)
+        except OSError:
+            return
+    try:
+        server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        server.bind(_SOCKET_PATH)
+        # Default backlog is intentionally generous: bridge clients are
+        # short-lived (one connect per JSON-RPC line) and a bursty agent
+        # startup can open 5–10 connections back-to-back. A too-small
+        # backlog surfaces as ``ConnectionRefusedError`` on the bridge
+        # side, which we want to avoid even at moderate concurrency.
+        try:
+            backlog = int(os.environ.get("MEMPAL_MCP_BACKLOG", "64"))
+        except ValueError:
+            backlog = 64
+        server.listen(max(1, backlog))
+    except OSError:
+        return
+
+    def _cleanup():
+        try:
+            server.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(_SOCKET_PATH)
+        except Exception:
+            pass
+
+    atexit.register(_cleanup)
+
+    def _accept_loop():
+        while True:
+            try:
+                conn, _ = server.accept()
+                threading.Thread(target=_handle_socket_client, args=(conn,), daemon=True).start()
+            except OSError:
+                break
+
+    threading.Thread(target=_accept_loop, daemon=True).start()
+    logger.info("Socket listener started at %s", _SOCKET_PATH)
+
+
+def _run_startup_health_check():
+    """Probe palace health at server boot. NEVER fatal — server must come up.
+
+    Writes diagnostics to stderr (not stdout — stdout is the MCP JSON-RPC
+    channel). The user can still use the MCP doctor / repair tools to fix
+    things once the server is reachable.
+    """
+    palace_dir = _config.palace_path
+    # Skip when the palace dir doesn't exist yet — first-run case where the
+    # user is about to call ``mempalace init``. Surfacing a "corrupt" warning
+    # would be misleading.
+    if not os.path.isdir(palace_dir):
+        return
+    try:
+        from .health import check_palace_health
+
+        report = check_palace_health(palace_dir)
+        if report.status == "corrupt":
+            issues_summary = [f"{i.code}: {i.message}" for i in report.issues]
+            sys.stderr.write(
+                f"[mempalace] WARNING: palace at {palace_dir} appears corrupt.\n"
+                f"  issues: {issues_summary}\n"
+                f"  Run: mempalace doctor   # for details\n"
+                f"  Run: mempalace repair --rebuild-from-verbatim   # to recover\n"
+                f"  Continuing in degraded mode — writes may fail or compound corruption.\n"
+            )
+        elif report.status == "warn":
+            sys.stderr.write(f"[mempalace] palace health: warn ({len(report.issues)} issues)\n")
+    except Exception as e:
+        sys.stderr.write(f"[mempalace] health check failed (non-fatal): {e}\n")
+
+
 def main():
     _restore_stdout()
     # Force UTF-8 on stdio. MCP JSON-RPC is UTF-8, but Python on Windows
@@ -2310,6 +2441,48 @@ def main():
     # is visible at startup rather than on first use (#1222). Pure
     # filesystem read; never opens a chromadb client.
     _refresh_vector_disabled_flag()
+    _start_socket_listener()
+    # Bootstrap the ChromaDB schema BEFORE the health check (or any other
+    # code) opens the palace. Prevents the first-open race where N MCP
+    # servers spinning up against a brand-new palace each fire CREATE TABLE
+    # statements concurrently and N-1 crash. Idempotent — fast no-op once
+    # chroma.sqlite3 exists.
+    try:
+        ensure_palace_initialized(_config.palace_path)
+    except MineAlreadyRunning as exc:
+        sys.stderr.write(
+            f"[mempalace] palace bootstrap lock busy (non-fatal): {exc}\n"
+            "  Another writer holds palace_write_lock. Continuing — first write will retry.\n"
+        )
+    except Exception as exc:
+        sys.stderr.write(f"[mempalace] palace bootstrap failed (non-fatal): {exc}\n")
+    _run_startup_health_check()
+
+    singleton_mode = _args.singleton or os.environ.get("MEMPAL_MCP_SINGLETON") == "1"
+    if singleton_mode:
+        # Managed-service mode: no stdio peer to read from. Block on a signal
+        # event so launchd/systemd see a long-lived process while the UDS
+        # listener keeps serving bridge clients in its background thread.
+        import signal
+        import threading
+
+        stop_event = threading.Event()
+
+        def _handle_signal(signum, _frame):
+            logger.info("Received signal %s, shutting down singleton", signum)
+            stop_event.set()
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                signal.signal(sig, _handle_signal)
+            except (OSError, ValueError):
+                # Some environments (windows, non-main thread) can refuse
+                # signal installation — accept the default handler instead.
+                pass
+        logger.info("Singleton mode active (UDS listener only). Waiting for SIGTERM/SIGINT...")
+        stop_event.wait()
+        return
+
     while True:
         try:
             line = sys.stdin.readline()
