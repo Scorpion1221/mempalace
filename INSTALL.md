@@ -36,7 +36,7 @@ Each host still has its own local config format:
 
 - Claude Code → plugin cache + `~/.claude/settings.json`
 - Codex → `~/.codex/config.toml` + `~/.codex/hooks.json`
-- Hermes → plugin runtime + launchd plist env
+- Hermes → plugin runtime + `~/.hermes/.env`
 - Cursor → plugin link + hooks.json + launchctl/systemd env
 
 The job of `scripts/sync-plugins.sh` is to keep those per-agent configs aligned
@@ -148,7 +148,7 @@ bash install.sh --all --singleton --dev
 |---|---|
 | Runtime plugin | `~/.hermes/hermes-agent/plugins/memory/mempalace` |
 | MCP usage | Hermes itself uses Python import, not MCP, for its built-in tools |
-| Env sync target | `~/Library/LaunchAgents/ai.hermes.gateway.plist` (macOS) |
+| Env sync target | `~/.hermes/.env` |
 | Restart behavior | `sync-plugins.sh` restarts Hermes when syncing Hermes |
 
 ## Single source of truth: `~/.mempalace/env`
@@ -192,7 +192,7 @@ Do **not** hand-edit:
 
 - `~/.codex/config.toml` for `MEMPAL_*`
 - `~/.claude/settings.json` for `MEMPAL_*`
-- Hermes launchd plist `MEMPAL_*` values
+- Hermes `~/.hermes/.env` `MEMPAL_*` values
 - Cursor launchctl env manually
 
 Those are generated targets, not authoritative sources.

@@ -517,13 +517,13 @@ PYEOF
     fi
 fi
 
-# --- [4/8] Hermes: sync plugin + upsert launchd plist env -------------------
+# --- [4/8] Hermes: sync plugin + upsert ~/.hermes/.env ----------------------
 HERMES_RUNTIME="$HOME/.hermes/hermes-agent/plugins/memory/mempalace"
-HERMES_PLIST="$HOME/Library/LaunchAgents/ai.hermes.gateway.plist"
+HERMES_ENV_FILE="$HOME/.hermes/.env"
 if ! $SYNC_HERMES; then
     echo "[4/8] Hermes: skipped (not in sync list)"
 elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
-    echo "[4/8] Syncing Hermes plugin + plist env..."
+    echo "[4/8] Syncing Hermes plugin + ~/.hermes/.env..."
     mkdir -p "$HERMES_RUNTIME"
     for f in "$HERMES_REPO/plugins/memory/mempalace/"*.py \
              "$HERMES_REPO/plugins/memory/mempalace/"*.yaml \
@@ -538,18 +538,51 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
         "$HERMES_VENV/bin/python" -m pip install --force-reinstall --no-deps "$REPO" -q 2>/dev/null && echo "  → Hermes venv updated" || true
     fi
 
-    # Upsert env vars into the launchd plist.
-    if [ -f "$HERMES_PLIST" ]; then
-        for var in $PROPAGATED_VARS; do
-            val="${!var:-}"
-            [ -z "$val" ] && continue
-            # PlistBuddy's Add fails if key exists, Set fails if key doesn't.
-            # Try Set first, fall back to Add.
-            /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:$var $val" "$HERMES_PLIST" 2>/dev/null \
-                || /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:$var string $val" "$HERMES_PLIST" 2>/dev/null || true
-        done
-        echo "  → 7 env vars upserted in launchd plist"
-    fi
+    # Upsert env vars into Hermes' canonical env file, not the launchd plist.
+    # Hermes launchd service definitions are generated data.  Writing MEMPAL_*
+    # into ~/Library/LaunchAgents/ai.hermes.gateway.plist makes
+    # `hermes gateway status` report the service as stale and those edits are
+    # lost on the next `hermes gateway start`.  ~/.hermes/.env is loaded by the
+    # gateway on startup and survives service-definition refreshes.
+    HERMES_ENV_FILE="$HERMES_ENV_FILE" PROPAGATED_VARS="$PROPAGATED_VARS" "$_PYTHON" - <<'PYEOF'
+import os
+import pathlib
+import stat
+
+env_path = pathlib.Path(os.environ["HERMES_ENV_FILE"]).expanduser()
+env_path.parent.mkdir(parents=True, exist_ok=True)
+raw = env_path.read_text(encoding="utf-8", errors="ignore") if env_path.exists() else ""
+lines = raw.splitlines()
+vars_to_write = [
+    key for key in os.environ.get("PROPAGATED_VARS", "").split()
+    if os.environ.get(key)
+]
+values = {key: os.environ[key] for key in vars_to_write}
+seen = set()
+out = []
+for line in lines:
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#") or "=" not in line:
+        out.append(line)
+        continue
+    key = line.split("=", 1)[0].strip()
+    if key in values:
+        out.append(f"{key}={values[key]}")
+        seen.add(key)
+    else:
+        out.append(line)
+
+missing = [key for key in vars_to_write if key not in seen]
+if missing:
+    if out and out[-1].strip():
+        out.append("")
+    out.append("# MemPalace runtime configuration")
+    out.extend(f"{key}={values[key]}" for key in missing)
+
+env_path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
+env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
+print(f"  → {len(vars_to_write)} env vars upserted in ~/.hermes/.env")
+PYEOF
 else
     echo "[4/8] Hermes plugin source not found, skipping"
 fi
@@ -713,7 +746,10 @@ check_agent_var() {
         echo "  ⚠ $agent: $var is missing"
         DRIFT=1
     elif [ "$actual" != "$expected" ]; then
-        echo "  ⚠ $agent: $var drift (got '$actual', expected '$expected')"
+        # Do not print env values here: several propagated MEMPAL_* entries are
+        # API keys / tokens.  The var name is enough to identify what needs a
+        # resync without leaking secrets into terminal logs.
+        echo "  ⚠ $agent: $var drift (values differ)"
         DRIFT=1
     fi
 }
@@ -762,10 +798,30 @@ PYEOF
     done
 fi
 
-# Hermes (plist)
-if [ -f "$HERMES_PLIST" ]; then
+# Hermes (~/.hermes/.env)
+if [ -f "$HERMES_ENV_FILE" ]; then
+    HERMES_ACTUAL_JSON="$(mktemp "${TMPDIR:-/tmp}/mempalace-hermes-env-actual.XXXXXX")"
+    HERMES_ENV_FILE="$HERMES_ENV_FILE" PROPAGATED_VARS="$PROPAGATED_VARS" "$_PYTHON" - <<'PYEOF' > "$HERMES_ACTUAL_JSON"
+import json
+import os
+import pathlib
+
+env_path = pathlib.Path(os.environ["HERMES_ENV_FILE"]).expanduser()
+out = {}
+for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#") or "=" not in line:
+        continue
+    key, value = line.split("=", 1)
+    key = key.strip()
+    if key in os.environ.get("PROPAGATED_VARS", "").split():
+        out[key] = value
+print(json.dumps(out))
+PYEOF
+    HERMES_ACTUAL=$(cat "$HERMES_ACTUAL_JSON")
+    rm -f "$HERMES_ACTUAL_JSON"
     for var in $PROPAGATED_VARS; do
-        actual=$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$var" "$HERMES_PLIST" 2>/dev/null || echo "")
+        actual=$(echo "$HERMES_ACTUAL" | "$_PYTHON" -c "import json,sys; print(json.load(sys.stdin).get('$var',''))")
         check_agent_var "Hermes" "$var" "$actual"
     done
 fi
@@ -815,7 +871,7 @@ fi
 # --- [8/8] Summary ----------------------------------------------------------
 echo "[8/8] Summary"
 echo "  single-source env: $ENV_FILE"
-echo "  propagated to: Claude Code, Codex (2 blocks), Hermes, Cursor (launchctl + plist)"
+echo "  propagated to: Claude Code, Codex (2 blocks), Hermes (~/.hermes/.env), Cursor (launchctl + plist)"
 echo ""
 echo "Done. Claude Code / Codex / Cursor need a new session to pick up changes."
 echo "Hermes already restarted."

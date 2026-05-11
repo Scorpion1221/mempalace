@@ -181,7 +181,7 @@ export MEMPAL_RECALL_KEY=your-litellm-key                  # LiteLLM master key
 | **Claude Code** | `settings.json` → `env` section | `~/.claude/settings.json` |
 | **Codex** (MCP) | `config.toml` → `[mcp_servers.mempalace]` → `env` | `~/.codex/config.toml` |
 | **Codex** (hooks) | `config.toml` → `[shell_environment_policy.set]` | `~/.codex/config.toml` |
-| **Hermes** | launchd plist → `EnvironmentVariables` | `~/Library/LaunchAgents/ai.hermes.gateway.plist` |
+| **Hermes** | dotenv file loaded by Hermes gateway | `~/.hermes/.env` |
 
 > **Codex gotcha**: Codex has TWO separate process trees — MCP server and hook subprocesses. They read env vars from different config sections. If you only set `[mcp_servers.mempalace].env`, hooks will fail silently (SSL errors, missing API key).
 
@@ -219,24 +219,17 @@ MEMPAL_RECALL_MODEL = "gemini-3.1-flash-lite-preview"
 MEMPAL_RECALL_KEY = "your-litellm-key"
 ```
 
-**Hermes** — add to `~/Library/LaunchAgents/ai.hermes.gateway.plist` inside `<dict>` under `EnvironmentVariables`:
-```xml
-<key>MEMPAL_EMBEDDING_MODEL</key>
-<string>gemini-embedding-2-preview</string>
-<key>MEMPAL_EMBEDDING_ENDPOINT</key>
-<string>http://127.0.0.1:4000</string>
-<key>MEMPAL_EMBEDDING_KEY</key>
-<string>your-litellm-key</string>
-<key>MEMPAL_RECALL_LLM</key>
-<string>1</string>
-<key>MEMPAL_RECALL_ENDPOINT</key>
-<string>http://127.0.0.1:4000/v1</string>
-<key>MEMPAL_RECALL_MODEL</key>
-<string>gemini-3.1-flash-lite-preview</string>
-<key>MEMPAL_RECALL_KEY</key>
-<string>your-litellm-key</string>
+**Hermes** — add to `~/.hermes/.env`:
+```dotenv
+MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview
+MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000
+MEMPAL_EMBEDDING_KEY=your-litellm-key
+MEMPAL_RECALL_LLM=1
+MEMPAL_RECALL_ENDPOINT=http://127.0.0.1:4000/v1
+MEMPAL_RECALL_MODEL=gemini-3.1-flash-lite-preview
+MEMPAL_RECALL_KEY=your-litellm-key
 ```
-Then reload: `launchctl unload ~/Library/LaunchAgents/ai.hermes.gateway.plist && launchctl load ~/Library/LaunchAgents/ai.hermes.gateway.plist`
+Then restart Hermes: `hermes gateway start` (or unload/load the service without editing its plist).
 
 > Without the `MEMPAL_RECALL_*` quartet, `_haiku_save_recent_turns` short-circuits on `is_enabled()` and **drops all buffered turns without writing to the palace** — no error, just silent data loss. `scripts/sync-plugins.sh` validates all seven vars in `[6/6]`.
 
@@ -392,7 +385,7 @@ Total LLM cost per user turn (when recall is triggered, Gemini 3.1 Flash-Lite Pr
 **Search returns no hits but data exists** — Check `~/.mempalace/hook_state/hook.log` for:
 - `SSL: CERTIFICATE_VERIFY_FAILED` → Set `SSL_CERT_FILE` env var in all agent configs
 - `User location is not supported` → Set `HTTPS_PROXY` to a US/EU proxy
-- `Embedding dimension 384 does not match 3072` → The hook subprocess is missing one of `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` and fell back to ChromaDB's built-in MiniLM. Since the 2026-04-24 breaking change, all three are required. Make sure they are set in **both** `~/.zshenv` (for shell-launched agents like Codex) and the per-agent config (`~/.claude/settings.json` env block, `~/.codex/config.toml` `[shell_environment_policy.set]`, Hermes plist). If the palace itself was built with the wrong dim, run `mempalace repair --yes` after fixing the env.
+- `Embedding dimension 384 does not match 3072` → The hook subprocess is missing one of `MEMPAL_EMBEDDING_{MODEL,ENDPOINT,KEY}` and fell back to ChromaDB's built-in MiniLM. Since the 2026-04-24 breaking change, all three are required. Make sure they are set in **both** `~/.zshenv` (for shell-launched agents like Codex) and the per-agent config (`~/.claude/settings.json` env block, `~/.codex/config.toml` `[shell_environment_policy.set]`, Hermes `~/.hermes/.env`). If the palace itself was built with the wrong dim, run `mempalace repair --yes` after fixing the env.
 - `embed_query` errors → Run `pip install -e .` to update entry points
 
 **Hook times out (Codex)** — The LLM recall pipeline takes 8-12s. Set hook timeout to at least 20s in `~/.codex/hooks.json` and `.codex-plugin/hooks.json`.

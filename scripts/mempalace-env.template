@@ -5,8 +5,7 @@
 #   - Claude Code:  ~/.claude/settings.json          → env block
 #   - Codex:        ~/.codex/config.toml             → [mcp_servers.mempalace].env
 #                                                    + [shell_environment_policy.set]
-#   - Hermes:       ~/Library/LaunchAgents/ai.hermes.gateway.plist
-#                                                    → <key>EnvironmentVariables</key>
+#   - Hermes:       ~/.hermes/.env
 #   - Cursor:       launchctl setenv + ai.mempalace.env.plist (for macOS GUI)
 #   - Shell:        ~/.zshenv sources this file (for any terminal-launched agent)
 #
