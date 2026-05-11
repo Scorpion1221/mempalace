@@ -24,9 +24,10 @@ def _patch_mcp_server(monkeypatch, config, kg):
     from mempalace import mcp_server
 
     monkeypatch.setattr(mcp_server, "_config", config)
-    monkeypatch.setattr(mcp_server, "_kg", kg)
+    monkeypatch.setattr(mcp_server, "_get_kg", lambda: kg)
     monkeypatch.setattr(mcp_server, "_client_cache", None)
     monkeypatch.setattr(mcp_server, "_collection_cache", None)
+    monkeypatch.setattr(mcp_server, "_collection_has_ef", False)
     monkeypatch.setattr(mcp_server, "_palace_db_inode", 0)
     monkeypatch.setattr(mcp_server, "_palace_db_mtime", 0.0)
 

@@ -18,7 +18,6 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Iterable
 
 
 REPO_DIR = Path(__file__).resolve().parent.parent

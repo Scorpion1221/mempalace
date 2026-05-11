@@ -2051,7 +2051,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
             value = default
         return max(1, min(value, 10))
 
-    def _render_recall(self, query: str, state: SessionState, limit: int) -> str:
+    def _render_recall(self, query: str, state: SessionState, limit: int) -> str:  # noqa: C901
         if not query.strip() or self._paths is None:
             return ""
 
@@ -2348,7 +2348,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         enriched.update(wing_hint)
         return enriched
 
-    def _async_llm_save_recent_turns(self, state: SessionState, trigger: str) -> int:
+    def _async_llm_save_recent_turns(self, state: SessionState, trigger: str) -> int:  # noqa: C901
         """Extract key knowledge from buffered turns via the recall LLM and write it.
 
         Mirrors ``mempalace.hooks_cli._async_save_worker``:

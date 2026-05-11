@@ -45,10 +45,9 @@
 # stop_hook_active=true so we let it through. No infinite loop.
 #
 # === MEMPALACE CLI ===
-# This repo uses: mempalace mine <dir>
-# or:            mempalace mine <dir> --mode convos
-# Set MEMPAL_DIR below if you want the hook to auto-ingest after blocking.
-# Leave blank to rely on the AI's own save instructions.
+# The hook never auto-mines raw conversation transcripts. MEMPAL_DIR is an
+# optional project target for code / notes / docs only; valuable conversation
+# content is saved by the AI via diary/add_drawer tool calls.
 #
 # === CONFIGURATION ===
 
@@ -56,9 +55,9 @@ SAVE_INTERVAL=15  # Save every N human messages (adjust to taste)
 STATE_DIR="$HOME/.mempalace/hook_state"
 mkdir -p "$STATE_DIR"
 
-# Optional: set to the directory you want auto-ingested on each save trigger.
-# Example: MEMPAL_DIR="$HOME/conversations"
-# Leave empty to skip auto-ingest (AI handles saving via the block reason).
+# Optional: project directory (code / notes / docs) to mine each save
+# trigger. Raw conversation transcripts are intentionally not auto-mined.
+# Example: MEMPAL_DIR="$HOME/projects/my_app"
 MEMPAL_DIR=""
 
 # Resolve the Python interpreter the hook should use.
@@ -82,9 +81,11 @@ fi
 INPUT=$(cat)
 
 # Parse all fields in a single Python call (3x faster than separate invocations)
-# SECURITY: All values are sanitized before being interpolated into shell assignments.
-# stop_hook_active is coerced to a strict True/False to prevent command injection via eval.
-eval $(echo "$INPUT" | "$MEMPAL_PYTHON_BIN" -c "
+# without invoking ``eval`` on generated code: Python prints one sanitized
+# value per line, the shell reads them via ``mapfile`` and does plain
+# variable assignment — same data, smaller blast radius if the sanitizer
+# is ever bypassed (#1231 review).
+mapfile -t _mempal_parsed < <(echo "$INPUT" | "$MEMPAL_PYTHON_BIN" -c "
 import sys, json, re
 data = json.load(sys.stdin)
 sid = data.get('session_id', 'unknown')
@@ -94,13 +95,35 @@ tp = data.get('transcript_path', '')
 safe = lambda s: re.sub(r'[^a-zA-Z0-9_/.\-~]', '', str(s))
 # Coerce stop_hook_active to strict boolean string
 sha = 'True' if sha_raw is True or str(sha_raw).lower() in ('true', '1', 'yes') else 'False'
-print(f'SESSION_ID=\"{safe(sid)}\"')
-print(f'STOP_HOOK_ACTIVE=\"{sha}\"')
-print(f'TRANSCRIPT_PATH=\"{safe(tp)}\"')
+print(safe(sid))
+print(sha)
+print(safe(tp))
 " 2>/dev/null)
+SESSION_ID="${_mempal_parsed[0]:-unknown}"
+STOP_HOOK_ACTIVE="${_mempal_parsed[1]:-False}"
+TRANSCRIPT_PATH="${_mempal_parsed[2]:-}"
 
 # Expand ~ in path
 TRANSCRIPT_PATH="${TRANSCRIPT_PATH/#\~/$HOME}"
+
+# Validate that TRANSCRIPT_PATH looks like a transcript file:
+#   - non-empty
+#   - .jsonl or .json suffix
+#   - no traversal segments (.. components)
+# Mirrors mempalace.hooks_cli._validate_transcript_path so the shell hook
+# rejects the same shapes the Python hook rejects (#1231 review).
+is_valid_transcript_path() {
+    local path="$1"
+    [ -n "$path" ] || return 1
+    case "$path" in
+        *.json|*.jsonl) ;;
+        *) return 1 ;;
+    esac
+    case "/$path/" in
+        */../*) return 1 ;;
+    esac
+    return 0
+}
 
 # If we're already in a save cycle, let the AI stop normally
 # This is the infinite-loop prevention: block once → AI saves → tries to stop again → we let it through
@@ -157,11 +180,13 @@ if [ "$SINCE_LAST" -ge "$SAVE_INTERVAL" ] && [ "$EXCHANGE_COUNT" -gt 0 ]; then
 
     echo "[$(date '+%H:%M:%S')] TRIGGERING SAVE at exchange $EXCHANGE_COUNT" >> "$STATE_DIR/hook.log"
 
-    # NOTE: auto-mining of raw transcripts was removed. Valuable content
-    # is saved via the AI's diary_write/add_drawer MCP tool calls during
-    # the stop-hook block. Raw JSONL mining produced mostly noise (tool
-    # output, hook logs, framework JSON) that drowned out real memories.
-    # Use `mempalace mine <dir>` manually when needed.
+    # Auto-mine only the optional project target. Raw transcript auto-mine
+    # is intentionally disabled: hooks must not call `mempalace mine` on
+    # conversation transcript directories.
+    if [ -n "$MEMPAL_DIR" ] && [ -d "$MEMPAL_DIR" ]; then
+        mempalace mine "$MEMPAL_DIR" --mode projects \
+            >> "$STATE_DIR/hook.log" 2>&1 &
+    fi
 
     # MEMPAL_VERBOSE toggle:
     #   true  = developer mode — block and show diaries/code in chat

@@ -163,7 +163,7 @@ def test_recall_hook(col) -> bool:
         print("  skipped — MEMPAL_LLM_* / MEMPAL_RECALL_* not configured (decide_recall needs an LLM)")
         return True  # skip ≠ fail
 
-    from mempalace.palace_graph import create_tunnel, delete_tunnel, list_tunnels
+    from mempalace.palace_graph import create_tunnel, delete_tunnel
 
     src = _find_populated_room(col)
     if not src:
@@ -237,7 +237,7 @@ def test_recall_hook(col) -> bool:
                   "chose filters that don't match the test tunnel's src. "
                   "Coverage gap, not a code regression.")
             return True
-        _fail(f"unexpected hook behavior — no recall / skip / expansion in log")
+        _fail("unexpected hook behavior — no recall / skip / expansion in log")
         return False
     finally:
         delete_tunnel(tid)
