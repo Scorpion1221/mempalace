@@ -14,6 +14,8 @@ import re
 import subprocess
 import sys
 import traceback
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -27,6 +29,49 @@ SAVE_INTERVAL = int(os.environ.get("MEMPAL_SAVE_INTERVAL", "3"))
 SAVE_MIN_MESSAGES = int(os.environ.get("MEMPAL_SAVE_MIN_MESSAGES", "3"))
 STATE_DIR = Path.home() / ".mempalace" / "hook_state"
 PALACE_ROOT = Path.home() / ".mempalace"
+
+_CURRENT_HOOK_AGENT: ContextVar[str] = ContextVar("mempalace_hook_agent", default="")
+_HOOK_AGENT_ALIASES = {
+    "claude": "claude",
+    "claude-code": "claude",
+    "codex": "codex",
+    "cursor": "cursor",
+}
+
+
+def _sanitize_agent_name(agent: str) -> str:
+    """Return a filesystem-safe hook-state namespace for an agent/harness."""
+    raw = (agent or "").strip().lower().replace("_", "-")
+    aliased = _HOOK_AGENT_ALIASES.get(raw, raw)
+    sanitized = re.sub(r"[^a-z0-9_-]+", "_", aliased).strip("_-")
+    return sanitized or "unknown"
+
+
+def _current_hook_agent() -> str:
+    """Current hook-state namespace, if a hook handler set one."""
+    current = _CURRENT_HOOK_AGENT.get()
+    if current:
+        return current
+    env_agent = os.environ.get("MEMPAL_HOOK_AGENT") or os.environ.get("MEMPAL_HARNESS")
+    return _sanitize_agent_name(env_agent) if env_agent else ""
+
+
+@contextmanager
+def _agent_state_scope(agent: str):
+    """Temporarily route hook_state files/logs under this agent namespace."""
+    token = _CURRENT_HOOK_AGENT.set(_sanitize_agent_name(agent))
+    try:
+        yield
+    finally:
+        _CURRENT_HOOK_AGENT.reset(token)
+
+
+def _state_dir_for_current_agent() -> Path:
+    """Return the hook_state directory for the current agent namespace."""
+    agent = _current_hook_agent()
+    if not agent:
+        return STATE_DIR
+    return STATE_DIR / agent
 
 
 def _detached_popen_kwargs() -> dict:
@@ -281,6 +326,11 @@ def _validate_transcript_path(transcript_path: str) -> Path:
 
 def _get_session_state_path(session_id: str, key: str) -> Path:
     """Return the state file path for a session-scoped hook cache entry."""
+    return _state_dir_for_current_agent() / f"{session_id}_{key}"
+
+
+def _get_legacy_session_state_path(session_id: str, key: str) -> Path:
+    """Return the pre-agent-namespace flat session state path."""
     return STATE_DIR / f"{session_id}_{key}"
 
 
@@ -478,7 +528,7 @@ def _write_session_state_text(session_id: str, key: str, value: str):
     if value is None or session_id == "unknown":
         return
     try:
-        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        _state_dir_for_current_agent().mkdir(parents=True, exist_ok=True)
         path = _get_session_state_path(session_id, key)
         path.write_text(value, encoding="utf-8")
     except OSError:
@@ -491,7 +541,10 @@ def _read_session_state_text(session_id: str, key: str) -> str:
         return ""
     path = _get_session_state_path(session_id, key)
     if not path.is_file():
-        return ""
+        legacy_path = _get_legacy_session_state_path(session_id, key)
+        if legacy_path == path or not legacy_path.is_file():
+            return ""
+        path = legacy_path
     try:
         return path.read_text(encoding="utf-8")
     except OSError:
@@ -502,11 +555,14 @@ def _clear_session_state_text(session_id: str, key: str):
     """Remove plaintext session-scoped hook state."""
     if session_id == "unknown":
         return
-    path = _get_session_state_path(session_id, key)
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
+    for path in {
+        _get_session_state_path(session_id, key),
+        _get_legacy_session_state_path(session_id, key),
+    }:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def _tail_chars(text: str, limit: int) -> str:
@@ -527,14 +583,15 @@ def _log(message: str):
         return  # User removed the palace; do not recreate by logging
     global _state_dir_initialized
     try:
-        if not _state_dir_initialized:
-            STATE_DIR.mkdir(parents=True, exist_ok=True)
+        log_dir = _state_dir_for_current_agent()
+        if not _state_dir_initialized or not log_dir.exists():
+            log_dir.mkdir(parents=True, exist_ok=True)
             try:
-                STATE_DIR.chmod(0o700)
+                log_dir.chmod(0o700)
             except (OSError, NotImplementedError):
                 pass
             _state_dir_initialized = True
-        log_path = STATE_DIR / "hook.log"
+        log_path = log_dir / "hook.log"
         is_new = not log_path.exists()
         timestamp = datetime.now().strftime("%H:%M:%S")
         with open(log_path, "a") as f:
@@ -750,8 +807,9 @@ def _spawn_mine(cmd: list) -> None:
     ``MEMPALACE_MINE_PID_FILE`` env var so its cleanup hook can remove
     the slot on exit without scanning the directory.
     """
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = STATE_DIR / "hook.log"
+    log_dir = _state_dir_for_current_agent()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "hook.log"
     pid_file = _claim_mine_slot(cmd)
     if pid_file is None:
         _log(f"Skipping mine: target already running ({' '.join(cmd[-3:])})")
@@ -814,8 +872,9 @@ def _mine_sync():
     targets = _get_mine_targets()
     if not targets:
         return
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    log_path = STATE_DIR / "hook.log"
+    log_dir = _state_dir_for_current_agent()
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir / "hook.log"
     for mine_dir, mode in targets:
         try:
             with open(log_path, "a") as log_f:
@@ -1379,7 +1438,7 @@ def _async_save_worker(transcript_text, session_id, cwd):
                 raise ValueError("no balanced JSON object in LLM response")
             data = json.loads(candidate)
         except (ValueError, json.JSONDecodeError) as e:
-            dump_dir = STATE_DIR
+            dump_dir = _state_dir_for_current_agent()
             try:
                 dump_dir.mkdir(parents=True, exist_ok=True)
                 ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1953,13 +2012,23 @@ def hook_stop(data: dict, harness: str):
     # Count human messages
     exchange_count = _count_human_messages(transcript_path)
 
-    # Track last save point
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    last_save_file = STATE_DIR / f"{session_id}_last_save"
+    # Track last save point. New writes are namespaced by agent/harness, while
+    # reads fall back to the pre-v3.3.5 flat file so existing sessions continue
+    # from their previous checkpoint instead of double-saving.
+    _state_dir_for_current_agent().mkdir(parents=True, exist_ok=True)
+    last_save_file = _get_session_state_path(session_id, "last_save")
+    legacy_last_save_file = _get_legacy_session_state_path(session_id, "last_save")
+    last_save_read_file = (
+        last_save_file
+        if last_save_file.is_file()
+        else legacy_last_save_file
+        if legacy_last_save_file.is_file()
+        else None
+    )
     last_save = 0
-    if last_save_file.is_file():
+    if last_save_read_file is not None:
         try:
-            last_save = int(last_save_file.read_text().strip())
+            last_save = int(last_save_read_file.read_text().strip())
         except (ValueError, OSError):
             last_save = 0
 
@@ -2006,6 +2075,10 @@ def hook_stop(data: dict, harness: str):
                             "stderr": subprocess.DEVNULL,
                         }
                     )
+                    child_env = os.environ.copy()
+                    agent_name = _current_hook_agent()
+                    if agent_name:
+                        child_env["MEMPAL_HOOK_AGENT"] = agent_name
                     proc = subprocess.Popen(
                         [
                             sys.executable,
@@ -2015,6 +2088,7 @@ def hook_stop(data: dict, harness: str):
                             f"from mempalace.hooks_cli import {worker}; "
                             f"{worker}(d['text'], d['session'], d['cwd'])",
                         ],
+                        env=child_env,
                         **popen_kwargs,
                     )
                     payload = json.dumps(
@@ -2054,7 +2128,7 @@ def hook_session_start(data: dict, harness: str):
     _log(f"SESSION START for session {session_id} (harness={harness})")
 
     # Initialize session state directory
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    _state_dir_for_current_agent().mkdir(parents=True, exist_ok=True)
 
     if harness == "cursor":
         try:
@@ -2912,4 +2986,5 @@ def run_hook(hook_name: str, harness: str):
         print(f"Unknown hook: {hook_name}", file=sys.stderr)
         sys.exit(1)
 
-    handler(data, harness)
+    with _agent_state_scope(harness):
+        handler(data, harness)

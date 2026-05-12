@@ -178,6 +178,7 @@ def _capture_hook_output(hook_fn, data, harness="claude-code", state_dir=None):
     with contextlib.ExitStack() as stack:
         for p in patches:
             stack.enter_context(p)
+        stack.enter_context(hooks_cli_mod._agent_state_scope(harness))
         hook_fn(data, harness)
     return json.loads(buf.getvalue())
 
@@ -274,9 +275,54 @@ def test_stop_hook_caches_last_assistant_reply_by_session_id(tmp_path):
     )
 
     assert result == {}
-    assert (tmp_path / "test_last_assistant").read_text(encoding="utf-8") == (
+    assert (tmp_path / "claude" / "test_last_assistant").read_text(encoding="utf-8") == (
         "Use host db.internal.\nPort is 5432."
     )
+    assert not (tmp_path / "test_last_assistant").exists()
+
+
+def test_session_state_is_partitioned_by_agent_name(tmp_path):
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with hooks_cli_mod._agent_state_scope("claude-code"):
+            hooks_cli_mod._write_session_state_text(
+                "same-session", "last_assistant", "claude-value"
+            )
+    assert (tmp_path / "claude" / "same-session_last_assistant").exists()
+    assert not (tmp_path / "same-session_last_assistant").exists()
+
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with hooks_cli_mod._agent_state_scope("codex"):
+            hooks_cli_mod._write_session_state_text("same-session", "last_assistant", "codex-value")
+
+    assert (tmp_path / "codex" / "same-session_last_assistant").read_text(
+        encoding="utf-8"
+    ) == "codex-value"
+    assert (tmp_path / "claude" / "same-session_last_assistant").read_text(
+        encoding="utf-8"
+    ) == "claude-value"
+
+
+def test_session_state_read_falls_back_to_legacy_flat_file(tmp_path):
+    (tmp_path / "session-a_last_assistant").write_text("legacy value", encoding="utf-8")
+
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with hooks_cli_mod._agent_state_scope("claude-code"):
+            assert (
+                hooks_cli_mod._read_session_state_text("session-a", "last_assistant")
+                == "legacy value"
+            )
+
+
+def test_log_writes_to_agent_specific_hook_log(tmp_path):
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with hooks_cli_mod._agent_state_scope("codex"):
+            _log("codex message")
+        with hooks_cli_mod._agent_state_scope("claude-code"):
+            _log("claude message")
+
+    assert "codex message" in (tmp_path / "codex" / "hook.log").read_text()
+    assert "claude message" in (tmp_path / "claude" / "hook.log").read_text()
+    assert not (tmp_path / "hook.log").exists()
 
 
 def test_stop_hook_does_not_cache_last_assistant_when_active(tmp_path):
@@ -298,7 +344,7 @@ def test_stop_hook_does_not_cache_last_assistant_when_active(tmp_path):
     )
 
     assert result == {}
-    assert not (tmp_path / "test_last_assistant").exists()
+    assert not (tmp_path / "claude" / "test_last_assistant").exists()
 
 
 def test_stop_hook_unknown_session_id_does_not_cache_assistant(tmp_path):
@@ -320,7 +366,7 @@ def test_stop_hook_unknown_session_id_does_not_cache_assistant(tmp_path):
     )
 
     assert result == {}
-    assert not (tmp_path / "unknown_last_assistant").exists()
+    assert not (tmp_path / "claude" / "unknown_last_assistant").exists()
 
 
 # --- hook_session_start ---
