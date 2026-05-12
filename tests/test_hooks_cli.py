@@ -301,6 +301,19 @@ def test_session_state_is_partitioned_by_agent_name(tmp_path):
         encoding="utf-8"
     ) == "claude-value"
 
+    with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+        with hooks_cli_mod._agent_state_scope("hermes"):
+            hooks_cli_mod._write_session_state_text(
+                "same-session", "last_assistant", "hermes-value"
+            )
+
+    assert (tmp_path / "hermes" / "same-session_last_assistant").read_text(
+        encoding="utf-8"
+    ) == "hermes-value"
+    assert (tmp_path / "codex" / "same-session_last_assistant").read_text(
+        encoding="utf-8"
+    ) == "codex-value"
+
 
 def test_session_state_read_falls_back_to_legacy_flat_file(tmp_path):
     (tmp_path / "session-a_last_assistant").write_text("legacy value", encoding="utf-8")
@@ -633,6 +646,15 @@ def test_parse_harness_input_valid():
     )
     assert result["session_id"] == "abc-123"
     assert result["stop_hook_active"] is True
+
+
+def test_parse_harness_input_accepts_hermes():
+    result = _parse_harness_input(
+        {"session_id": "hermes-123", "cwd": "/tmp/hermes-agent"},
+        "hermes",
+    )
+    assert result["session_id"] == "hermes-123"
+    assert result["harness"] == "hermes"
 
 
 # --- hook_stop with OSError on write ---

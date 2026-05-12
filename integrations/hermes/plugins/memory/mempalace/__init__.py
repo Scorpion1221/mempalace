@@ -2441,8 +2441,8 @@ class MemPalaceMemoryProvider(MemoryProvider):
              ``_ASYNC_SAVE_PROMPT``, JSON mode on.
           3. Parse the response with ``_extract_first_json_object``. On
              failure dump prompt + response to
-             ``$HERMES_HOME/mempalace/hook_state/hermes_save_fail_<ts>.txt``
-             for post-mortem.
+             shared ``~/.mempalace/hook_state/hermes/`` when available,
+             with a profile-local fallback for post-mortem.
           4. Upsert each drawer, write the diary entry, add KG triples.
 
         Returns the number of drawers + diary entries written (KG facts
@@ -2745,13 +2745,28 @@ class MemPalaceMemoryProvider(MemoryProvider):
     def _dump_save_failure(self, prompt: str, response: str, exc: Exception) -> Optional[Path]:
         """Persist the prompt + LLM response when JSON parsing fails.
 
-        Dumps under ``<base_dir>/hook_state/hermes_save_fail_<ts>.txt`` so
-        the caller has a single stable file to inspect after a bad run.
-        Returns the written path, or ``None`` if the dump itself failed.
+        Dumps under the shared ``~/.mempalace/hook_state/hermes/``
+        namespace when the shared MemPalace root exists, matching Claude
+        Code/Codex hook-state classification. If the shared root is absent
+        or the core hook helpers are unavailable, falls back to the
+        profile-local ``<base_dir>/hook_state/hermes/`` directory. Returns
+        the written path, or ``None`` if the dump itself failed.
         """
         if self._paths is None:
             return None
-        dump_dir = self._paths.base_dir / "hook_state"
+        dump_dir = self._paths.base_dir / "hook_state" / "hermes"
+        try:
+            from mempalace.hooks_cli import (
+                _agent_state_scope,
+                _palace_root_exists,
+                _state_dir_for_current_agent,
+            )
+
+            if _palace_root_exists():
+                with _agent_state_scope("hermes"):
+                    dump_dir = _state_dir_for_current_agent()
+        except Exception:
+            dump_dir = self._paths.base_dir / "hook_state" / "hermes"
         try:
             dump_dir.mkdir(parents=True, exist_ok=True)
             ts = datetime.now().strftime("%Y%m%d-%H%M%S%f")

@@ -36,6 +36,7 @@ _HOOK_AGENT_ALIASES = {
     "claude-code": "claude",
     "codex": "codex",
     "cursor": "cursor",
+    "hermes": "hermes",
 }
 
 
@@ -1071,7 +1072,7 @@ def _ingest_transcript(transcript_path: str):
         pass
 
 
-SUPPORTED_HARNESSES = {"claude-code", "codex", "cursor"}
+SUPPORTED_HARNESSES = {"claude-code", "codex", "cursor", "hermes"}
 
 
 def _parse_harness_input(data: dict, harness: str) -> dict:

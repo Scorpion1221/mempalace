@@ -1244,6 +1244,11 @@ def test_haiku_save_malformed_json_dumps_failure_file(
     """When the LLM returns invalid JSON, a hermes_save_fail_*.txt is created."""
     monkeypatch.setenv("MEMPAL_HERMES_SAVE_INTERVAL", "1")
     monkeypatch.setenv("MEMPAL_RECALL_LLM", "1")
+    shared_hook_state_root = tmp_path / "shared-hook-state"
+    shared_mempalace_root = tmp_path / "shared-mempalace-root"
+    shared_mempalace_root.mkdir()
+    monkeypatch.setattr("mempalace.hooks_cli.STATE_DIR", shared_hook_state_root)
+    monkeypatch.setattr("mempalace.hooks_cli.PALACE_ROOT", shared_mempalace_root)
 
     provider = _provider(tmp_path / "profile")
 
@@ -1266,12 +1271,15 @@ def test_haiku_save_malformed_json_dumps_failure_file(
 
     provider.shutdown()
 
-    # Verify the dump file was written
-    hook_state_dir = provider.resolved_paths.base_dir / "hook_state"
+    # Verify the dump file was written under the shared hook_state/hermes
+    # namespace rather than the legacy flat Hermes profile hook_state dir.
+    hook_state_dir = shared_hook_state_root / "hermes"
     dump_files = list(hook_state_dir.glob("hermes_save_fail_*.txt"))
     assert len(dump_files) >= 1, (
         f"Expected failure dump file, found: {list(hook_state_dir.iterdir()) if hook_state_dir.exists() else '(dir missing)'}"
     )
+    legacy_hook_state_dir = provider.resolved_paths.base_dir / "hook_state"
+    assert not list(legacy_hook_state_dir.glob("hermes_save_fail_*.txt"))
     content = dump_files[0].read_text(encoding="utf-8")
     assert "ERROR:" in content
     assert "PROMPT" in content
