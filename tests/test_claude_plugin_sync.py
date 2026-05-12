@@ -58,7 +58,9 @@ def test_sync_claude_cache_metadata_copies_installed_cache_and_updates_registry(
     assert entry["lastUpdated"] != "2026-04-25T18:08:47Z"
 
 
-def test_sync_claude_cache_metadata_falls_back_to_highest_cache_when_registry_path_missing(tmp_path):
+def test_sync_claude_cache_metadata_falls_back_to_highest_cache_when_registry_path_missing(
+    tmp_path,
+):
     cache_root = tmp_path / ".claude" / "plugins" / "cache" / "mempalace" / "mempalace"
     _write_plugin_json(cache_root / "3.3.3" / "plugin.json", "3.3.310")
     _write_plugin_json(cache_root / "3.3.310" / "plugin.json", "3.3.310")

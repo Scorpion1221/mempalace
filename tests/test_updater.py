@@ -80,8 +80,10 @@ def test_update_tag_fetches_only_requested_tag(tmp_path):
         calls.append(cmd)
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
-    with patch("subprocess.run", side_effect=fake_run), \
-         patch.object(updater, "_runtime_package_version", return_value="3.3.401"):
+    with (
+        patch("subprocess.run", side_effect=fake_run),
+        patch.object(updater, "_runtime_package_version", return_value="3.3.401"),
+    ):
         updater.update(repo=repo, pull=True, tag="3.3.401")
 
     git_calls = [c for c in calls if c[0] == "git"]
@@ -147,11 +149,13 @@ def test_check_flags_drift_when_cli_resolves_elsewhere(tmp_path, capsys):
     stale_cli.write_text("#!/bin/sh\necho stale\n")
     stale_cli.chmod(0o755)
 
-    with patch.object(updater, "_find_repo", return_value=repo), \
-         patch.object(updater, "_commits_behind_ahead", return_value=(0, 0)), \
-         patch.object(updater, "_resolved_cli_path", return_value=str(stale_cli)), \
-         patch.object(updater, "_runtime_package_version", return_value="3.3.311"), \
-         patch.object(updater, "DEFAULT_RUNTIME_DIR", tmp_path / "runtime"):
+    with (
+        patch.object(updater, "_find_repo", return_value=repo),
+        patch.object(updater, "_commits_behind_ahead", return_value=(0, 0)),
+        patch.object(updater, "_resolved_cli_path", return_value=str(stale_cli)),
+        patch.object(updater, "_runtime_package_version", return_value="3.3.311"),
+        patch.object(updater, "DEFAULT_RUNTIME_DIR", tmp_path / "runtime"),
+    ):
         updater.check(repo=repo)
     out = capsys.readouterr().out
     assert "drift: resolves to" in out
@@ -171,11 +175,13 @@ def test_check_treats_system_bin_symlink_as_non_drift(tmp_path, capsys):
     system_bin.parent.mkdir(parents=True)
     system_bin.symlink_to(runtime_cli)
 
-    with patch.object(updater, "_find_repo", return_value=repo), \
-         patch.object(updater, "_commits_behind_ahead", return_value=(0, 0)), \
-         patch.object(updater, "_resolved_cli_path", return_value=str(system_bin)), \
-         patch.object(updater, "_runtime_package_version", return_value="3.3.311"), \
-         patch.object(updater, "DEFAULT_RUNTIME_DIR", tmp_path / "runtime"):
+    with (
+        patch.object(updater, "_find_repo", return_value=repo),
+        patch.object(updater, "_commits_behind_ahead", return_value=(0, 0)),
+        patch.object(updater, "_resolved_cli_path", return_value=str(system_bin)),
+        patch.object(updater, "_runtime_package_version", return_value="3.3.311"),
+        patch.object(updater, "DEFAULT_RUNTIME_DIR", tmp_path / "runtime"),
+    ):
         updater.check(repo=repo)
     out = capsys.readouterr().out
     assert "drift" not in out

@@ -8,14 +8,14 @@ from unittest.mock import patch
 
 import pytest
 
+import mempalace.hooks_cli as hooks_cli_mod
 from mempalace.hooks_cli import (
     SAVE_INTERVAL,
-    STOP_BLOCK_REASON,
     USERPROMPT_PREVIOUS_ASSISTANT_TAIL_CHARS,
     _count_human_messages,
     _extract_first_json_object,
-    _get_mine_dir,
     _get_last_assistant_message,
+    _get_mine_targets,
     _log,
     _maybe_auto_ingest,
     _mine_already_running,
@@ -29,6 +29,15 @@ from mempalace.hooks_cli import (
     run_hook,
     hook_userprompt,
 )
+
+
+@pytest.fixture(autouse=True)
+def _present_palace_root(monkeypatch, tmp_path):
+    """Most hook tests exercise normal operation; absent-root tests override this."""
+    fake_root = tmp_path / "__mempalace-root"
+    fake_root.mkdir(exist_ok=True)
+    monkeypatch.setattr(hooks_cli_mod, "PALACE_ROOT", fake_root)
+    monkeypatch.setattr(hooks_cli_mod, "_state_dir_initialized", False)
 
 
 # --- _sanitize_session_id ---
@@ -420,15 +429,15 @@ def test_maybe_auto_ingest_with_env(tmp_path):
 
 
 def test_maybe_auto_ingest_with_transcript(tmp_path):
-    """Falls back to transcript directory when MEMPAL_DIR is not set."""
+    """Transcript directories are not auto-mined by _maybe_auto_ingest."""
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("")
     with patch.dict("os.environ", {}, clear=True):
         with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
             with patch("mempalace.hooks_cli._MINE_PID_FILE", tmp_path / "mine.pid"):
                 with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
-                    _maybe_auto_ingest(str(transcript))
-                    mock_popen.assert_called_once()
+                    _maybe_auto_ingest()
+                    mock_popen.assert_not_called()
 
 
 def test_maybe_auto_ingest_oserror(tmp_path):
@@ -448,7 +457,7 @@ def test_maybe_auto_ingest_skips_when_mine_running(tmp_path):
     mempal_dir.mkdir()
     with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
         with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
-            with patch("mempalace.hooks_cli._mine_already_running", return_value=True):
+            with patch("mempalace.hooks_cli._claim_mine_slot", return_value=None):
                 with patch("mempalace.hooks_cli.subprocess.Popen") as mock_popen:
                     _maybe_auto_ingest()
                     mock_popen.assert_not_called()
@@ -487,31 +496,78 @@ def test_mine_already_running_corrupt_file(tmp_path):
         assert _mine_already_running() is False
 
 
-# --- _get_mine_dir ---
+# --- _get_mine_targets ---
 
 
-def test_get_mine_dir_mempal_dir(tmp_path):
-    """MEMPAL_DIR takes priority over transcript_path."""
+def test_get_mine_targets_mempal_dir_only(tmp_path):
+    """MEMPAL_DIR alone yields a single projects target, expanded/resolved."""
     mempal_dir = tmp_path / "project"
     mempal_dir.mkdir()
-    transcript = tmp_path / "t.jsonl"
-    transcript.write_text("")
     with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
-        assert _get_mine_dir(str(transcript)) == str(mempal_dir)
+        targets = _get_mine_targets()
+    assert len(targets) == 1
+    assert Path(targets[0][0]).resolve() == mempal_dir.resolve()
+    assert targets[0][1] == "projects"
 
 
-def test_get_mine_dir_transcript_fallback(tmp_path):
-    """Falls back to transcript parent dir when MEMPAL_DIR is not set."""
+def test_get_mine_targets_mempal_dir_tilde(tmp_path):
+    """MEMPAL_DIR with a tilde prefix is expanded correctly."""
+    mempal_dir = tmp_path / "project"
+    mempal_dir.mkdir()
+    home = Path.home()
+    try:
+        rel = mempal_dir.relative_to(home)
+    except ValueError:
+        pytest.skip("tmp_path is not under home, cannot build ~-relative path")
+    tilde_path = "~/" + str(rel)
+    with patch.dict("os.environ", {"MEMPAL_DIR": tilde_path}):
+        targets = _get_mine_targets()
+    assert len(targets) == 1
+    assert Path(targets[0][0]).resolve() == mempal_dir.resolve()
+    assert targets[0][1] == "projects"
+
+
+def test_get_mine_targets_no_transcript_target(tmp_path):
+    """_get_mine_targets does not emit a convos target for the transcript path.
+
+    Transcript ingestion is owned by _ingest_transcript; emitting it
+    here too would double-mine the same JSONL into a different wing on
+    every hook fire (#1231 review).
+    """
     transcript = tmp_path / "t.jsonl"
     transcript.write_text("")
     with patch.dict("os.environ", {}, clear=True):
-        assert _get_mine_dir(str(transcript)) == str(tmp_path)
+        targets = _get_mine_targets()
+    assert targets == []
 
 
-def test_get_mine_dir_empty():
-    """Returns empty string when nothing is available."""
+def test_get_mine_targets_only_returns_mempal_dir(tmp_path):
+    """When MEMPAL_DIR is set, exactly one projects target — never a convos target."""
+    mempal_dir = tmp_path / "project"
+    mempal_dir.mkdir()
+    with patch.dict("os.environ", {"MEMPAL_DIR": str(mempal_dir)}):
+        targets = _get_mine_targets()
+    assert len(targets) == 1
+    assert targets[0][1] == "projects"
+
+
+def test_validate_transcript_path_traversal_rejected_jsonl(tmp_path):
+    """Path traversal is rejected even when the path has a .jsonl suffix.
+
+    The pre-fix test used "../../etc/passwd" which lacks an extension and
+    so was rejected by the suffix gate before the traversal check ever
+    fired (Copilot review on #1231). Use a .jsonl path with `..`
+    segments to exercise the traversal guard specifically.
+    """
+    assert _validate_transcript_path("../t.jsonl") is None
+    assert _validate_transcript_path("a/../b.jsonl") is None
+    assert _validate_transcript_path("/tmp/../etc/t.jsonl") is None
+
+
+def test_get_mine_targets_empty():
+    """Returns empty list when MEMPAL_DIR is unset or invalid."""
     with patch.dict("os.environ", {}, clear=True):
-        assert _get_mine_dir("") == ""
+        assert _get_mine_targets() == []
 
 
 # --- _parse_harness_input ---
@@ -1940,3 +1996,107 @@ def test_stop_hook_offline_save_disabled_via_env(tmp_path, monkeypatch):
                 )
 
     assert not spawn_calls, "Popen should NOT have been called when MEMPAL_OFFLINE_SAVE=0"
+
+
+# --- Absent palace root: hooks must not recreate ~/.mempalace ---
+# When the user removes ~/.mempalace (e.g. `rm -rf`), that is the strongest
+# possible "do not auto-capture" signal. Hooks must short-circuit BEFORE
+# touching disk — including before the log-line that previously triggered
+# STATE_DIR.mkdir() on its own.
+
+
+def _redirect_palace_root(monkeypatch, tmp_path):
+    """Point PALACE_ROOT and STATE_DIR at a tmp location that does NOT exist."""
+    fake_root = tmp_path / "absent-mempalace"
+    monkeypatch.setattr(hooks_cli_mod, "PALACE_ROOT", fake_root)
+    monkeypatch.setattr(hooks_cli_mod, "STATE_DIR", fake_root / "hook_state")
+    monkeypatch.setattr(hooks_cli_mod, "_state_dir_initialized", False)
+    return fake_root
+
+
+def test_hook_stop_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch):
+    fake_root = _redirect_palace_root(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hook_stop(
+            {"session_id": "absent", "transcript_path": str(transcript), "stop_hook_active": False},
+            "claude-code",
+        )
+    assert json.loads(buf.getvalue() or "{}") == {}
+    assert not fake_root.exists()
+
+
+def test_hook_precompact_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch):
+    fake_root = _redirect_palace_root(monkeypatch, tmp_path)
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("")
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hook_precompact(
+            {"session_id": "absent", "transcript_path": str(transcript)},
+            "claude-code",
+        )
+    assert json.loads(buf.getvalue() or "{}") == {}
+    assert not fake_root.exists()
+
+
+def test_hook_session_start_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch):
+    fake_root = _redirect_palace_root(monkeypatch, tmp_path)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hook_session_start({"session_id": "absent"}, "claude-code")
+    assert json.loads(buf.getvalue() or "{}") == {}
+    assert not fake_root.exists()
+
+
+def test_log_does_not_create_palace_dir_when_absent(tmp_path, monkeypatch):
+    fake_root = _redirect_palace_root(monkeypatch, tmp_path)
+    _log("test message")
+    assert not fake_root.exists()
+
+
+def test_existing_dir_proceeds_normally(tmp_path, monkeypatch):
+    """Regression: when PALACE_ROOT exists, hooks must proceed (no short-circuit)."""
+    fake_root = tmp_path / "present-mempalace"
+    fake_root.mkdir()
+    monkeypatch.setattr(hooks_cli_mod, "PALACE_ROOT", fake_root)
+    monkeypatch.setattr(hooks_cli_mod, "STATE_DIR", fake_root / "hook_state")
+    monkeypatch.setattr(hooks_cli_mod, "_state_dir_initialized", False)
+    _log("test message")
+    # _log should have created the state dir under the existing palace root
+    assert (fake_root / "hook_state").exists()
+    assert (fake_root / "hook_state" / "hook.log").is_file()
+
+
+def test_regular_file_at_palace_root_treated_as_absent(tmp_path, monkeypatch):
+    """A regular file at ~/.mempalace must be treated the same as absent.
+
+    ``Path.exists()`` returns True for a regular file, which would let the
+    kill-switch be bypassed and crash later when ``STATE_DIR.mkdir()`` runs
+    on ``NotADirectoryError``. ``_palace_root_exists()`` must use
+    ``is_dir()`` so a stray file (or broken symlink) short-circuits cleanly.
+    """
+    fake_root = tmp_path / "file-not-dir"
+    fake_root.write_text("oops, this is a file not a directory")
+    monkeypatch.setattr(hooks_cli_mod, "PALACE_ROOT", fake_root)
+    monkeypatch.setattr(hooks_cli_mod, "STATE_DIR", fake_root / "hook_state")
+    monkeypatch.setattr(hooks_cli_mod, "_state_dir_initialized", False)
+
+    # _palace_root_exists() is the source of truth — it must return False.
+    assert hooks_cli_mod._palace_root_exists() is False
+
+    # Hooks must short-circuit (return {} on stdout) and not touch disk.
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        hook_session_start({"session_id": "file-at-root"}, "claude-code")
+    assert json.loads(buf.getvalue() or "{}") == {}
+
+    # _log must also short-circuit — it must NOT try to mkdir a path under a
+    # regular file (which would raise NotADirectoryError).
+    _log("test message")  # would raise if not short-circuited
+
+    # The stray file is left untouched; we never try to convert it.
+    assert fake_root.is_file()
+    assert fake_root.read_text() == "oops, this is a file not a directory"

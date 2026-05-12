@@ -1,35 +1,32 @@
-"""Verify save hook does NOT auto-mine conversations.
-
-Auto-mining raw transcripts was removed because it produced noise (68% of
-drawers were tool output). Memory saving now happens via:
-1. Async Haiku-powered background save (hooks_cli.py _async_save_worker)
-2. Explicit AI diary_write/add_drawer MCP tool calls
-
-This test ensures auto-mine stays removed.
-"""
+"""Verify shell hooks do not auto-mine raw conversation transcripts."""
 
 import os
 
 
-class TestSaveHookNoAutoMine:
-    """The save hook must NOT auto-mine transcripts."""
+class TestSaveHookNoRawTranscriptMine:
+    """Shell hooks may mine explicit MEMPAL_DIR projects, never transcript convos."""
 
-    def test_hook_does_not_mine(self):
-        """The hook should not execute mempalace mine commands (comments OK)."""
-        hook_path = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            "hooks",
-            "mempal_save_hook.sh",
+    @staticmethod
+    def _hook_src(name: str) -> str:
+        path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "hooks", name)
+        return open(path, encoding="utf-8").read()
+
+    @staticmethod
+    def _active_code(src: str) -> str:
+        return "\n".join(
+            line for line in src.splitlines() if line.strip() and not line.strip().startswith("#")
         )
-        src = open(hook_path).read()
 
-        non_comment_lines = [
-            line for line in src.splitlines()
-            if line.strip() and not line.strip().startswith("#")
-        ]
-        active_code = "\n".join(non_comment_lines)
+    def test_save_hook_does_not_mine_transcript_convos(self):
+        active_code = self._active_code(self._hook_src("mempal_save_hook.sh"))
 
-        assert "mempalace mine" not in active_code, (
-            "Save hook should not auto-mine. Mining was removed because it "
-            "produced noise. Use hooks_cli.py async save or explicit MCP calls."
-        )
+        assert "--mode convos" not in active_code
+        assert 'dirname "$TRANSCRIPT_PATH"' not in active_code
+        assert 'is_valid_transcript_path "$TRANSCRIPT_PATH"' not in active_code
+
+    def test_precompact_hook_does_not_mine_transcript_convos(self):
+        active_code = self._active_code(self._hook_src("mempal_precompact_hook.sh"))
+
+        assert "--mode convos" not in active_code
+        assert 'dirname "$TRANSCRIPT_PATH"' not in active_code
+        assert 'is_valid_transcript_path "$TRANSCRIPT_PATH"' not in active_code

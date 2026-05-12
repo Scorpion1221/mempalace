@@ -30,18 +30,15 @@ def _highest_cache_dir(cache_root: Path) -> Path | None:
     return dirs[0] if dirs else None
 
 
-
 def _load_registry(installed_plugins_path: Path) -> dict:
     if not installed_plugins_path.exists():
         return {"plugins": {}}
     return json.loads(installed_plugins_path.read_text())
 
 
-
 def _save_registry(installed_plugins_path: Path, data: dict) -> None:
     installed_plugins_path.parent.mkdir(parents=True, exist_ok=True)
     installed_plugins_path.write_text(json.dumps(data, indent=2) + "\n")
-
 
 
 def sync_claude_cache_metadata(

@@ -18,9 +18,11 @@ from mempalace import singleton_manager
 def short_sockdir(tmp_path):
     """macOS caps AF_UNIX paths at 104 bytes; pytest's tmp_path is too long.
 
-    Use /tmp/<uuid> so binds succeed on Darwin too.
+    Use /private/tmp/<uuid> so binds succeed on Darwin too. In the sandboxed
+    test runner, /tmp may reject AF_UNIX bind() even though /private/tmp is
+    writable.
     """
-    base = Path("/tmp") / f"mp-singleton-{uuid.uuid4().hex[:12]}"
+    base = Path("/private/tmp") / f"mp-singleton-{uuid.uuid4().hex[:12]}"
     base.mkdir(parents=True, exist_ok=True)
     yield base
     for p in base.glob("*"):
@@ -39,7 +41,11 @@ def _bind_uds_server(path: Path) -> socket.socket:
     if path.exists():
         path.unlink()
     server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    server.bind(str(path))
+    try:
+        server.bind(str(path))
+    except PermissionError as exc:
+        server.close()
+        pytest.skip(f"AF_UNIX bind is not permitted in this sandbox: {exc}")
     server.listen(4)
     return server
 
@@ -95,6 +101,11 @@ def test_wait_for_socket_returns_promptly_on_ready(short_sockdir):
 def test_wait_for_socket_succeeds_after_delayed_bind(short_sockdir):
     """Simulates the cold-start race: socket binds ~0.5s after we start probing."""
     sock_path = short_sockdir / "delayed.sock"
+    probe_path = short_sockdir / "probe.sock"
+    probe = _bind_uds_server(probe_path)
+    probe.close()
+    if probe_path.exists():
+        probe_path.unlink()
     server_holder: dict = {}
 
     def _bind_after_delay():

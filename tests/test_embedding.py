@@ -1,4 +1,4 @@
-"""Tests for mempalace.embedding — pluggable embedding function support."""
+"""Tests for mempalace.embedding — local ONNX + proxy embedding support."""
 
 import json
 import logging
@@ -6,102 +6,173 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from mempalace import embedding
+import mempalace.embedding as embedding
 
 
-class TestGetEmbeddingFunction:
-    def setup_method(self):
-        embedding.reset_cache()
+@pytest.fixture(autouse=True)
+def isolate_embedding_state(monkeypatch):
+    monkeypatch.setattr(embedding, "_EF_CACHE", {})
+    monkeypatch.setattr(embedding, "_PROXY_EF_CACHE", "UNSET")
+    monkeypatch.setattr(embedding, "_WARNED", set())
+    for key in (
+        "MEMPAL_EMBEDDING_MODEL",
+        "MEMPAL_EMBEDDING_ENDPOINT",
+        "MEMPAL_EMBEDDING_KEY",
+        "MEMPAL_EMBEDDING_DIMS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    yield
+    embedding.reset_cache()
 
-    def teardown_method(self):
-        embedding.reset_cache()
-        from mempalace.palace import _reset_embedding_cache
 
-        _reset_embedding_cache()
+class DummyEF:
+    def __init__(self, preferred_providers=None):
+        self.preferred_providers = preferred_providers or []
 
-    def test_returns_none_when_unset(self, monkeypatch):
-        monkeypatch.delenv("MEMPAL_EMBEDDING_MODEL", raising=False)
-        assert embedding.get_embedding_function() is None
 
-    def test_returns_none_for_default(self, monkeypatch):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "default")
-        assert embedding.get_embedding_function() is None
+# --- upstream local ONNX provider selection ---
 
-    def test_returns_none_for_empty(self, monkeypatch):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "")
-        assert embedding.get_embedding_function() is None
 
-    def test_returns_proxy_when_configured(self, monkeypatch):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
-        result = embedding.get_embedding_function()
-        assert isinstance(result, embedding.ProxyEmbeddingFunction)
-        assert result._model == "gemini-embedding-2"
-        assert result._dimensions == 3072
-        assert result._url == "http://localhost:4000/v1/embeddings"
+def test_auto_picks_cuda(monkeypatch):
+    monkeypatch.setattr(
+        "onnxruntime.get_available_providers",
+        lambda: ["CUDAExecutionProvider", "CPUExecutionProvider"],
+    )
 
-    def test_custom_dimensions(self, monkeypatch):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_DIMS", "768")
-        result = embedding.get_embedding_function()
-        assert result._dimensions == 768
+    assert embedding._resolve_providers("auto") == (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"],
+        "cuda",
+    )
 
-    def test_falls_back_when_endpoint_missing(self, monkeypatch, caplog):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.delenv("MEMPAL_EMBEDDING_ENDPOINT", raising=False)
-        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
-        with caplog.at_level(logging.WARNING, logger="mempalace.embedding"):
-            assert embedding.get_embedding_function() is None
-        assert any("MEMPAL_EMBEDDING_ENDPOINT" in r.message for r in caplog.records)
 
-    def test_falls_back_when_key_missing(self, monkeypatch, caplog):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
-        monkeypatch.delenv("MEMPAL_EMBEDDING_KEY", raising=False)
-        with caplog.at_level(logging.WARNING, logger="mempalace.embedding"):
-            assert embedding.get_embedding_function() is None
-        assert any("MEMPAL_EMBEDDING_KEY" in r.message for r in caplog.records)
+def test_auto_falls_to_cpu(monkeypatch):
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: ["CPUExecutionProvider"])
 
-    def test_caches_result(self, monkeypatch):
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
-        a = embedding.get_embedding_function()
-        b = embedding.get_embedding_function()
-        assert a is b
+    assert embedding._resolve_providers("auto") == (["CPUExecutionProvider"], "cpu")
 
-    def test_none_result_does_not_pollute_cache(self, monkeypatch):
-        # Bug: previously, calling get_embedding_function() while env was
-        # incomplete (e.g. launchd race during pip install -e) cached None
-        # forever — every later call served stale None even after env
-        # stabilised, silently falling back to ChromaDB's MiniLM (384-dim)
-        # against a Gemini (3072-dim) palace.
-        monkeypatch.delenv("MEMPAL_EMBEDDING_MODEL", raising=False)
-        assert embedding.get_embedding_function() is None
 
-        # Env appears (e.g. user fixed config and we re-call without restart).
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
-        result = embedding.get_embedding_function()
-        assert isinstance(result, embedding.ProxyEmbeddingFunction)
+def test_cuda_missing_warns_with_gpu_extra(monkeypatch, caplog):
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: ["CPUExecutionProvider"])
 
-    def test_palace_layer_also_self_heals(self, monkeypatch):
-        # Same bug at the second cache layer in mempalace.palace.
-        from mempalace import palace
+    assert embedding._resolve_providers("cuda") == (["CPUExecutionProvider"], "cpu")
+    assert "mempalace[gpu]" in caplog.text
 
-        palace._reset_embedding_cache()
-        monkeypatch.delenv("MEMPAL_EMBEDDING_MODEL", raising=False)
-        assert palace._get_embedding_fn() is None
 
-        monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
-        monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
-        result = palace._get_embedding_fn()
-        assert isinstance(result, embedding.ProxyEmbeddingFunction)
+def test_coreml_missing_warns_with_coreml_extra(monkeypatch, caplog):
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: ["CPUExecutionProvider"])
+
+    assert embedding._resolve_providers("coreml") == (["CPUExecutionProvider"], "cpu")
+    assert "mempalace[coreml]" in caplog.text
+
+
+def test_dml_missing_warns_with_dml_extra(monkeypatch, caplog):
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: ["CPUExecutionProvider"])
+
+    assert embedding._resolve_providers("dml") == (["CPUExecutionProvider"], "cpu")
+    assert "mempalace[dml]" in caplog.text
+
+
+def test_unknown_device_warns_once(monkeypatch, caplog):
+    monkeypatch.setattr("onnxruntime.get_available_providers", lambda: ["CPUExecutionProvider"])
+
+    assert embedding._resolve_providers("bogus") == (["CPUExecutionProvider"], "cpu")
+    assert embedding._resolve_providers("bogus") == (["CPUExecutionProvider"], "cpu")
+    assert caplog.text.count("Unknown embedding_device") == 1
+
+
+def test_onnxruntime_import_error_falls_back_to_cpu(monkeypatch):
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "onnxruntime":
+            raise ImportError("missing")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    assert embedding._resolve_providers("cuda") == (["CPUExecutionProvider"], "cpu")
+
+
+def test_get_embedding_function_caches_by_resolved_provider_tuple(monkeypatch):
+    monkeypatch.setattr(embedding, "_build_ef_class", lambda: DummyEF)
+    monkeypatch.setattr(
+        embedding,
+        "_resolve_providers",
+        lambda device: (["CPUExecutionProvider"], "cpu"),
+    )
+
+    first = embedding.get_embedding_function("cpu")
+    second = embedding.get_embedding_function("auto")
+
+    assert first is second
+    assert first.preferred_providers == ["CPUExecutionProvider"]
+
+
+def test_describe_device_uses_resolved_effective_device(monkeypatch):
+    monkeypatch.setattr(
+        embedding,
+        "_resolve_providers",
+        lambda device: (["CUDAExecutionProvider", "CPUExecutionProvider"], "cuda"),
+    )
+
+    assert embedding.describe_device("auto") == "cuda"
+
+
+# --- fork proxy embedding path ---
+
+
+def test_returns_proxy_when_configured(monkeypatch):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    result = embedding.get_embedding_function()
+    assert isinstance(result, embedding.ProxyEmbeddingFunction)
+    assert result._model == "gemini-embedding-2"
+    assert result._dimensions == 3072
+    assert result._url == "http://localhost:4000/v1/embeddings"
+
+
+def test_custom_dimensions(monkeypatch):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_DIMS", "768")
+    result = embedding.get_embedding_function()
+    assert result._dimensions == 768
+
+
+def test_missing_proxy_endpoint_or_key_falls_back_to_local(monkeypatch, caplog):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    monkeypatch.setattr(embedding, "_build_ef_class", lambda: DummyEF)
+    monkeypatch.setattr(
+        embedding, "_resolve_providers", lambda device: (["CPUExecutionProvider"], "cpu")
+    )
+    with caplog.at_level(logging.WARNING, logger="mempalace.embedding"):
+        result = embedding.get_embedding_function("cpu")
+    assert isinstance(result, DummyEF)
+    assert "MEMPAL_EMBEDDING_ENDPOINT" in caplog.text
+
+
+def test_proxy_cache_does_not_block_later_valid_config(monkeypatch):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setattr(embedding, "_build_ef_class", lambda: DummyEF)
+    monkeypatch.setattr(
+        embedding, "_resolve_providers", lambda device: (["CPUExecutionProvider"], "cpu")
+    )
+    assert isinstance(embedding.get_embedding_function("cpu"), DummyEF)
+
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    result = embedding.get_embedding_function("cpu")
+    assert isinstance(result, embedding.ProxyEmbeddingFunction)
+
+
+def test_describe_device_reports_proxy(monkeypatch):
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    assert embedding.describe_device("auto") == "proxy"
 
 
 class TestBackwardCompatAlias:
@@ -152,7 +223,6 @@ class TestProxyEmbeddingFunction:
         assert captured["body"]["model"] == "m"
         assert captured["body"]["input"] == ["hello", "world"]
         assert captured["body"]["dimensions"] == 4
-        # Header keys are lowercased by urllib
         auth_header = {k.lower(): v for k, v in captured["headers"].items()}
         assert auth_header["authorization"] == "Bearer k"
 

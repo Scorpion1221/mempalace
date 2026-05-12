@@ -6,12 +6,18 @@ Consolidates collection access patterns used by both miners and the MCP server.
 
 import contextlib
 import hashlib
+import logging
 import os
 import re
+import sys
+import threading
 import time
 from pathlib import Path
+from typing import Optional
 
 from .backends.chroma import ChromaBackend
+
+logger = logging.getLogger("mempalace_mcp")
 
 SKIP_DIRS = {
     ".git",
@@ -37,38 +43,9 @@ SKIP_DIRS = {
     ".eggs",
     "htmlcov",
     "target",
-    "tool-results",
 }
 
 _DEFAULT_BACKEND = ChromaBackend()
-
-_embedding_fn_cache: object = "UNSET"
-
-
-def _get_embedding_fn():
-    """Lazily resolve and cache the configured embedding function.
-
-    Only successful EFs are cached. A ``None`` return (no MEMPAL_EMBEDDING_*
-    set, or transient lookup failure) does NOT pollute the cache, so the
-    next call after env stabilises can still resolve a real EF instead of
-    serving stale ``None`` for the whole process lifetime.
-    """
-    global _embedding_fn_cache
-    if _embedding_fn_cache != "UNSET":
-        return _embedding_fn_cache
-    from .embedding import get_embedding_function
-
-    ef = get_embedding_function()
-    if ef is not None:
-        _embedding_fn_cache = ef
-    return ef
-
-
-def _reset_embedding_cache():
-    """Reset the embedding function cache. Used in tests."""
-    global _embedding_fn_cache
-    _embedding_fn_cache = "UNSET"
-
 
 # Schema version for drawer normalization. Bump when the normalization
 # pipeline changes in a way that existing drawers should be rebuilt to pick up
@@ -78,21 +55,23 @@ def _reset_embedding_cache():
 #
 # v2 (2026-04): introduced strip_noise() for Claude Code JSONL; previous
 #               drawers stored system tags / hook chrome verbatim.
-# v3 (2026-04): added is_noise_content() chunk filter + strip_noise in miner.
-NORMALIZE_VERSION = 3
+NORMALIZE_VERSION = 2
 
 
 def get_collection(
     palace_path: str,
-    collection_name: str = "mempalace_drawers",
+    collection_name: Optional[str] = None,
     create: bool = True,
 ):
     """Get the palace collection through the backend layer."""
+    if collection_name is None:
+        from .config import get_configured_collection_name
+
+        collection_name = get_configured_collection_name()
     return _DEFAULT_BACKEND.get_collection(
         palace_path,
         collection_name=collection_name,
         create=create,
-        embedding_function=_get_embedding_fn(),
     )
 
 
@@ -261,7 +240,7 @@ def purge_file_closets(closets_col, source_file: str) -> None:
     try:
         closets_col.delete(where={"source_file": source_file})
     except Exception:
-        pass
+        logger.debug("Closet purge failed for %s", source_file, exc_info=True)
 
 
 def upsert_closet_lines(closets_col, closet_id_base, lines, metadata):
@@ -339,188 +318,257 @@ def mine_lock(source_file: str):
 
                 fcntl.flock(lf, fcntl.LOCK_UN)
         except Exception:
-            pass
+            logger.debug("Mine-lock release failed", exc_info=True)
         lf.close()
 
 
 class PalaceWriteLockTimeout(TimeoutError):
-    """Raised when palace_write_lock cannot be acquired within timeout."""
+    """Raised when palace_write_lock cannot acquire the palace lock before timeout."""
 
 
-# Polling interval for non-blocking lock acquisition. Kept tight (50ms) so
-# legitimate writers aren't penalised for waiting on a contended palace.
-_PALACE_LOCK_POLL_INTERVAL_S = 0.05
+class MineAlreadyRunning(RuntimeError):
+    """Raised when another `mempalace mine` already holds the per-palace lock."""
+
+
+# Per-thread record of palaces this thread already holds the lock for. Used by
+# `mine_palace_lock` to short-circuit re-entrant acquisition from the same
+# thread (e.g. miner.mine() acquires the outer lock then calls
+# ChromaCollection.upsert which now also tries to acquire). Without this guard
+# the inner call would block on its own outer flock (Linux fcntl locks are per
+# open file description, so a same-thread second open of the lock file is a
+# distinct lock and self-deadlocks).
+#
+# The holder set is tagged with ``pid`` so that a forked child does NOT
+# inherit re-entrant credit from its parent: the OS-level flock IS NOT
+# inherited as a "we hold it" semantically — the child must reacquire — but
+# Python's ``threading.local`` IS inherited across fork. The pid check
+# clears stale state so a forked child correctly hits the fcntl path.
+_palace_lock_holders = threading.local()
+
+
+def _holder_state():
+    """Return the per-thread (pid, keys) record, refreshing after fork."""
+    keys = getattr(_palace_lock_holders, "keys", None)
+    pid = getattr(_palace_lock_holders, "pid", None)
+    current_pid = os.getpid()
+    if keys is None or pid != current_pid:
+        keys = set()
+        _palace_lock_holders.keys = keys
+        _palace_lock_holders.pid = current_pid
+    return keys
+
+
+def _held_by_this_thread(lock_key: str) -> bool:
+    """Return True if this thread already holds ``mine_palace_lock`` for ``lock_key``."""
+    return lock_key in _holder_state()
+
+
+def _mark_held(lock_key: str) -> None:
+    _holder_state().add(lock_key)
+
+
+def _mark_released(lock_key: str) -> None:
+    _holder_state().discard(lock_key)
+
+
+def _format_lock_holder(content: str) -> str:
+    """Render a lock-file body as 'PID N (cmdline)' for diagnostic messages."""
+    parts = content.split(maxsplit=1)
+    if not parts or not parts[0].isdigit():
+        return "another writer (identity not recorded)"
+    pid = parts[0]
+    if len(parts) > 1 and parts[1].strip():
+        return f"PID {pid} ({parts[1].strip()})"
+    return f"PID {pid}"
+
+
+# Byte 0 of the lock file is reserved as the OS lock sentinel.
+# Holder identity is written from byte 1 onward so contenders can read
+# the identity without colliding with byte 0 (Windows msvcrt.locking
+# blocks both reads and writes on the locked byte).
+_LOCK_SENTINEL_BYTES = 1
+
+
+def _read_lock_holder(lock_file) -> str:
+    """Read the prior holder's identity from the lock-file body, best-effort."""
+    try:
+        lock_file.seek(_LOCK_SENTINEL_BYTES)
+        content = lock_file.read().strip()
+    except OSError:
+        return "another writer (identity not recorded)"
+    if not content:
+        return "another writer (identity not recorded)"
+    return _format_lock_holder(content)
+
+
+def _write_lock_holder(lock_file) -> None:
+    """Record this process's identity in the lock-file body. Best-effort.
+
+    Writes from byte 1 onward; byte 0 is the lock sentinel and must not
+    be touched after acquire (truncating it on Windows can interact
+    badly with the active byte-range lock).
+    """
+    try:
+        ident = f"{os.getpid()} {' '.join(sys.argv[:3])}".strip()
+        lock_file.seek(_LOCK_SENTINEL_BYTES)
+        lock_file.truncate(_LOCK_SENTINEL_BYTES + len(ident.encode("utf-8")))
+        lock_file.write(ident)
+        lock_file.flush()
+    except OSError:
+        pass
 
 
 @contextlib.contextmanager
-def palace_write_lock(palace_path: str | Path, timeout: float = 30.0):
-    """Palace-wide exclusive write lock. All ChromaDB write paths MUST hold this.
+def mine_palace_lock(palace_path: str | Path, timeout: float | None = None):
+    """Per-palace exclusive write lock for ChromaDB/HNSW mutations.
 
-    Why: ChromaDB's HNSW writer is not multi-process safe. Concurrent writes
-    from different MCP servers / mine subprocesses / async_save_worker
-    processes can corrupt segment files (the palace then fails to load).
-    ``mine_lock`` only serialises writes to the SAME source file — it does
-    not stop two unrelated mines from hitting the same ChromaDB at once.
-    This lock closes that gap by providing a single palace-wide gate.
+    This is the canonical palace-wide lock. It serializes full mine pipelines
+    and direct ChromaDB writers (MCP tools, repair, async save workers) that
+    touch the same on-disk palace while allowing different palaces to proceed
+    independently.
 
-    Crash-safe: ``fcntl.flock`` (Unix) and ``msvcrt.locking`` (Windows) are
-    advisory kernel-level locks. They are released automatically when the
-    holding process exits, even on SIGKILL — so a crashed writer cannot
-    permanently wedge the palace.
+    Re-entrant: if this thread already holds the lock for the same palace, the
+    context manager passes through without re-acquiring. This lets an outer
+    miner pipeline lock compose with lower-level collection write methods.
 
-    Per-palace: the lock file name is derived from ``Path.resolve()`` of
-    ``palace_path``, so two different palaces NEVER block each other, while
-    symlinks and relative paths to the SAME palace map to the same lock.
+    Timeout policy: callers that pass ``timeout`` wait up to that many seconds
+    and receive ``PalaceWriteLockTimeout`` on contention. Callers that leave
+    ``timeout`` as ``None`` get upstream's non-blocking mine behavior and
+    receive ``MineAlreadyRunning`` immediately when another process holds the
+    palace.
 
     Scope — what this lock does NOT cover:
-        This lock guards ChromaDB HNSW segment writes only. Other palace
-        state has its own locking and does NOT participate in
-        ``palace_write_lock``:
+        - Tunnel JSON (``~/.mempalace/tunnels.json``): protected by
+          ``mine_lock(_TUNNEL_FILE)`` in ``palace_graph``.
+        - Knowledge graph SQLite: protected by ``KnowledgeGraph``'s internal
+          ``threading.Lock`` plus SQLite WAL/timeout semantics.
+        - Verbatim/source drawer files: protected by per-source ``mine_lock``.
 
-          - Tunnel JSON (``~/.mempalace/tunnels.json``): protected by
-            ``mine_lock(_TUNNEL_FILE)`` — see ``palace_graph.create_tunnel``
-            and ``palace_graph.delete_tunnel``.
-          - Knowledge graph SQLite (``~/.mempalace/knowledge_graph.sqlite3``):
-            protected by ``KnowledgeGraph``'s internal ``threading.Lock``
-            plus ``PRAGMA journal_mode=WAL`` for cross-process readers —
-            see ``knowledge_graph.py``. Note: the threading.Lock only
-            protects in-process concurrent threads; cross-process safety
-            relies on SQLite's WAL + ``timeout=10`` retry, not on this lock.
-          - Verbatim source files held by the miner: protected by
-            ``mine_lock(source_file)`` — see ``miner.process_file``.
-
-        Callers writing to those stores do NOT need to acquire
-        ``palace_write_lock``. Callers writing to ChromaDB MUST acquire it.
-
-    Args:
-        palace_path: Path to the palace directory (any form — absolute,
-            relative, or symlink — is normalised via ``Path.resolve()``).
-        timeout: Maximum seconds to wait for the lock. Acquisition uses
-            non-blocking probes with a 50ms backoff; a real timeout raises
-            ``PalaceWriteLockTimeout`` instead of blocking the caller.
-
-    Raises:
-        PalaceWriteLockTimeout: If the lock could not be acquired within
-            ``timeout`` seconds.
+    Callers writing to ChromaDB MUST acquire this lock; callers writing only
+    to those excluded stores should use their store-specific lock.
     """
-    resolved = str(Path(palace_path).resolve())
-    palace_hash = hashlib.sha256(resolved.encode()).hexdigest()[:16]
-
     lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
     os.makedirs(lock_dir, exist_ok=True)
-    lock_path = os.path.join(lock_dir, f"palace_write_{palace_hash}.lock")
+    resolved = os.path.realpath(os.path.expanduser(str(palace_path)))
+    lock_key_source = os.path.normcase(resolved)
+    palace_key = hashlib.sha256(lock_key_source.encode()).hexdigest()[:16]
+    # Keep the historical palace_write_* filename while making this the
+    # canonical lock behind both mine_palace_lock and palace_write_lock.
+    lock_path = os.path.join(lock_dir, f"palace_write_{palace_key}.lock")
 
-    lf = open(lock_path, "w")
+    if _held_by_this_thread(palace_key):
+        yield
+        return
+
+    if not os.path.exists(lock_path):
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_WRONLY, 0o600)
+            os.close(fd)
+        except FileExistsError:
+            pass
+    lf = open(lock_path, "r+")
     acquired = False
-    deadline = time.monotonic() + timeout
+    deadline = None if timeout is None else time.monotonic() + timeout
+    last_holder = "another writer (identity not recorded)"
     try:
-        if os.name == "nt":
-            import msvcrt
+        while True:
+            lf.seek(0)
+            if os.name == "nt":
+                import msvcrt
 
-            while True:
                 try:
                     msvcrt.locking(lf.fileno(), msvcrt.LK_NBLCK, 1)
                     acquired = True
-                    break
                 except OSError:
-                    if time.monotonic() >= deadline:
-                        raise PalaceWriteLockTimeout(
-                            f"Could not acquire palace write lock for {resolved} within {timeout}s"
-                        ) from None
-                    time.sleep(_PALACE_LOCK_POLL_INTERVAL_S)
-        else:
-            import fcntl
+                    acquired = False
+            else:
+                import fcntl
 
-            while True:
                 try:
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(lf, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     acquired = True
-                    break
                 except BlockingIOError:
-                    if time.monotonic() >= deadline:
-                        raise PalaceWriteLockTimeout(
-                            f"Could not acquire palace write lock for {resolved} within {timeout}s"
-                        ) from None
-                    time.sleep(_PALACE_LOCK_POLL_INTERVAL_S)
-        yield
+                    acquired = False
+
+            if acquired:
+                break
+
+            last_holder = _read_lock_holder(lf)
+            message = (
+                f"palace {resolved} is held by {last_holder}; "
+                "wait for it to finish or stop the holder before retrying"
+            )
+            if timeout is None:
+                raise MineAlreadyRunning(message)
+            if time.monotonic() >= deadline:
+                raise PalaceWriteLockTimeout(message)
+            time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+
+        _write_lock_holder(lf)
+        _mark_held(palace_key)
+        try:
+            yield
+        finally:
+            _mark_released(palace_key)
     finally:
         if acquired:
             try:
                 if os.name == "nt":
                     import msvcrt
 
+                    lf.seek(0)
                     msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
                 else:
                     import fcntl
 
-                    fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+                    fcntl.flock(lf, fcntl.LOCK_UN)
             except Exception:
                 pass
-        try:
-            lf.close()
-        except Exception:
-            pass
+        lf.close()
+
+
+# Backward-compatible alias (previous patch iteration used a single global
+# lock). Kept so third-party callers that imported it continue to work; new
+# code should use `mine_palace_lock(palace_path)` for per-palace scoping.
+mine_global_lock = mine_palace_lock
+
+# Backward-compatible name from Sir's portable-runtime branch. The canonical
+# implementation is upstream's per-palace `mine_palace_lock` with holder
+# diagnostics; callers importing `palace_write_lock` get the same primitive.
+palace_write_lock = mine_palace_lock
 
 
 def ensure_palace_initialized(palace_path: str | Path, timeout: float = 30.0) -> None:
-    """Idempotently ensure the ChromaDB palace schema exists. Safe for concurrent callers.
+    """Idempotently ensure the ChromaDB palace schema exists.
 
-    Why: ChromaDB's ``PersistentClient.__init__`` runs internal ``CREATE TABLE``
-    statements that race when N processes initialize a brand-new palace
-    simultaneously (the loser raises
-    ``InternalError: table collections already exists``). This helper
-    serializes the first-open via ``palace_write_lock`` — after the first
-    successful call, subsequent calls are cheap no-ops because
-    ``chroma.sqlite3`` already exists and ChromaDB's idempotency suffices.
-
-    MUST be called at writer entry points (MCP server startup, miner
-    ``main()``, ``async_save_worker`` startup) BEFORE any other code attempts
-    to open the palace.
-
-    Idempotent: safe to call multiple times, by multiple processes, in any
-    order.
-
-    Args:
-        palace_path: Directory that holds (or will hold) ``chroma.sqlite3``.
-        timeout: Maximum seconds to wait for ``palace_write_lock`` on the
-            slow path. The fast path (sqlite already present and non-empty)
-            never takes the lock, so contention is bounded to the very
-            first race per palace.
-
-    Raises:
-        PalaceWriteLockTimeout: If the slow-path lock could not be
-            acquired within ``timeout`` seconds. Callers SHOULD log and
-            continue rather than crash — the next invocation will retry.
+    ChromaDB's first ``PersistentClient`` open runs internal schema creation.
+    Serializing that first open through the canonical palace lock prevents
+    concurrent first-start races. Once ``chroma.sqlite3`` exists and is
+    non-empty, the fast path is lock-free.
     """
-    palace_path = Path(palace_path).resolve()
-
-    # Fast path: a non-empty chroma.sqlite3 means the schema is initialized.
-    # Skip the lock entirely so this helper is essentially free after the
-    # first successful run on any given palace.
+    palace_path = Path(palace_path).expanduser().resolve()
     sqlite_path = palace_path / "chroma.sqlite3"
-    if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
-        return
-
-    # Slow path: take the cross-process lock and bootstrap exactly once.
-    palace_path.mkdir(parents=True, exist_ok=True)
-    with palace_write_lock(palace_path, timeout=timeout):
-        # Re-check inside the lock — another process may have just
-        # bootstrapped while we were waiting on the lock.
+    try:
         if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
             return
-        # Force ChromaDB to create the schema. ``list_collections`` is the
-        # cheapest call that triggers full schema initialization without
-        # creating any user-visible collections.
+    except OSError:
+        pass
+
+    palace_path.mkdir(parents=True, exist_ok=True)
+    with palace_write_lock(str(palace_path), timeout=timeout):
+        try:
+            if sqlite_path.exists() and sqlite_path.stat().st_size > 0:
+                return
+        except OSError:
+            pass
+
         import chromadb
 
         client = chromadb.PersistentClient(path=str(palace_path))
         client.list_collections()
-        # Drop the strong reference so ChromaDB releases its memory map
-        # before this function returns. Python's refcount-based GC reclaims
-        # the client immediately on the ``del`` (no cycles, see the
-        # ``_client_for_write`` docstring on why ``gc.collect()`` is
-        # unnecessary here).
-        del client
+        close = getattr(client, "close", None)
+        if callable(close):
+            close()
 
 
 def file_already_mined(collection, source_file: str, check_mtime: bool = False) -> bool:

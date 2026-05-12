@@ -69,6 +69,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
 
     try:
         from mempalace.palace import _DEFAULT_BACKEND
+
         _DEFAULT_BACKEND._clients.clear()
         if hasattr(_DEFAULT_BACKEND, "_freshness"):
             _DEFAULT_BACKEND._freshness.clear()
@@ -77,6 +78,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
         pass
     try:
         from chromadb.api.shared_system_client import SharedSystemClient
+
         SharedSystemClient.clear_system_cache()
     except Exception:
         pass
@@ -85,6 +87,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
 
     try:
         from mempalace.palace import _DEFAULT_BACKEND
+
         _DEFAULT_BACKEND._clients.clear()
         if hasattr(_DEFAULT_BACKEND, "_freshness"):
             _DEFAULT_BACKEND._freshness.clear()
@@ -93,6 +96,7 @@ def _isolated_shared_defaults(tmp_path, monkeypatch):
         pass
     try:
         from chromadb.api.shared_system_client import SharedSystemClient
+
         SharedSystemClient.clear_system_cache()
     except Exception:
         pass

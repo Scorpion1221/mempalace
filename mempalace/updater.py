@@ -34,7 +34,10 @@ def _find_repo() -> Path:
         p = Path(env).expanduser().resolve()
         if (p / SYNC_SCRIPT).is_file() and (p / INSTALL_SCRIPT).is_file():
             return p
-        print(f"MEMPAL_REPO={env} does not contain {SYNC_SCRIPT} and {INSTALL_SCRIPT}", file=sys.stderr)
+        print(
+            f"MEMPAL_REPO={env} does not contain {SYNC_SCRIPT} and {INSTALL_SCRIPT}",
+            file=sys.stderr,
+        )
         sys.exit(1)
     if (DEFAULT_REPO / SYNC_SCRIPT).is_file() and (DEFAULT_REPO / INSTALL_SCRIPT).is_file():
         return DEFAULT_REPO
@@ -127,7 +130,9 @@ def check(repo: Path | None = None):
     print(f"Commits: {behind} behind, {ahead} ahead of origin/{branch}")
     print(f"Runtime python: {runtime_python}  {'exists' if runtime_python.exists() else 'MISSING'}")
     print(f"Runtime version: {runtime_version or 'UNKNOWN'}")
-    print(f"Runtime manifest: {RUNTIME_MANIFEST}  {'exists' if RUNTIME_MANIFEST.exists() else 'MISSING'}")
+    print(
+        f"Runtime manifest: {RUNTIME_MANIFEST}  {'exists' if RUNTIME_MANIFEST.exists() else 'MISSING'}"
+    )
 
     # Resolved CLI path — surface drift when `mempalace` on PATH does not
     # ultimately resolve to the dedicated runtime's CLI. System bin symlinks
@@ -182,7 +187,10 @@ def update(
             print(f"Fetching and checking out tag {tag}...")
             requested = tag.strip()
             candidates = []
-            for candidate in (requested, f"v{requested}" if not requested.startswith("v") else requested.removeprefix("v")):
+            for candidate in (
+                requested,
+                f"v{requested}" if not requested.startswith("v") else requested.removeprefix("v"),
+            ):
                 if candidate and candidate not in candidates:
                     candidates.append(candidate)
 

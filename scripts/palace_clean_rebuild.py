@@ -7,6 +7,7 @@ Usage:
 
 Takes ~40 minutes for 40K+ drawers (Gemini embedding via LiteLLM proxy).
 """
+
 import sqlite3
 import os
 import time
@@ -52,9 +53,7 @@ def main():
 
     best_seg, best_count = None, 0
     for seg in all_segs:
-        cur.execute(
-            "SELECT COUNT(*) FROM embeddings WHERE segment_id=?", (seg,)
-        )
+        cur.execute("SELECT COUNT(*) FROM embeddings WHERE segment_id=?", (seg,))
         cnt = cur.fetchone()[0]
         if cnt > best_count:
             best_count = cnt
@@ -78,8 +77,7 @@ def main():
     id_map = {row[0]: row[1] for row in cur.fetchall()}
 
     cur.execute(
-        "SELECT id, key, string_value, int_value, float_value, bool_value "
-        "FROM embedding_metadata"
+        "SELECT id, key, string_value, int_value, float_value, bool_value FROM embedding_metadata"
     )
     meta_by_id = {}
     for row in cur.fetchall():

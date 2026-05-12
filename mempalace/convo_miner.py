@@ -29,7 +29,7 @@ from .palace import (
     palace_write_lock,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("mempalace_mcp")
 
 # Cross-process palace write lock timeout. Mirrors miner.py and mcp_server.py.
 _PALACE_WRITE_LOCK_TIMEOUT_S = 30.0
@@ -37,13 +37,7 @@ _PALACE_WRITE_LOCK_TIMEOUT_S = 30.0
 
 @contextlib.contextmanager
 def _maybe_palace_write_lock(palace_path):
-    """Acquire palace_write_lock, or yield a no-op if palace_path is None.
-
-    Lets ``_file_chunks_locked`` and ``_register_file`` be safely invoked
-    by legacy callers (or unit tests) that pass a bare collection without
-    a palace path. Production paths always pass one — this fallback only
-    preserves the pre-Wave-2 behaviour (per-file ``mine_lock`` only).
-    """
+    """Acquire palace_write_lock, or yield a no-op if palace_path is None."""
     if palace_path is None:
         yield
         return
@@ -81,6 +75,7 @@ CONVO_EXTENSIONS = {
 
 MIN_CHUNK_SIZE = 30
 CHUNK_SIZE = 800  # chars per drawer — align with miner.py
+DRAWER_UPSERT_BATCH_SIZE = 1000
 MAX_FILE_SIZE = 500 * 1024 * 1024  # 500 MB — skip files larger than this.
 # Matches miner.py at 500 MB. Long Claude Code sessions, multi-year
 # ChatGPT exports, and lifetime Slack dumps routinely exceed 10 MB; the
@@ -369,80 +364,63 @@ def _file_chunks_locked(
 ):
     """Lock the source file, purge stale drawers, and upsert fresh chunks.
 
-    Two-tier locking — see miner.process_file for the full contract:
-        mine_lock(source_file)              # outer — per-file dedup
-            palace_write_lock(palace_path)  # inner — palace-wide HNSW gate
-
-    The mine_lock prevents two miners from racing the SAME file (would
-    duplicate drawers if both passed file_already_mined() then both
-    upserted). The palace_write_lock prevents two miners working on
-    DIFFERENT files from racing ChromaDB's HNSW writer (would corrupt
-    segment files). Both are required.
-
-    Returns (drawers_added, room_counts_delta, skipped). On
-    ``PalaceWriteLockTimeout`` returns ``(0, {}, True)`` so the caller
-    treats the file the same way as "already filed" — we skip cleanly
-    and the next mine run will retry without losing progress on
-    sibling files.
+    Uses the same nested order as project mining: ``mine_lock`` outer,
+    ``palace_write_lock`` inner. Refresh, purge, and batched upserts all happen
+    inside the palace lock; CPU normalization/chunking happens before this.
     """
     room_counts_delta: dict = defaultdict(int)
     drawers_added = 0
     with mine_lock(source_file):
-        # Re-check after lock — another agent may have just finished this file
-        # at the current schema. A stale-version hit here returns False, so we
-        # still fall through to the purge+rebuild path below.
         if file_already_mined(collection, source_file):
             return 0, room_counts_delta, True
 
-        # ── Critical section: refresh + purge + upsert under the per-palace
-        # lock. Order is mine_lock (outer) → palace_write_lock (inner).
         try:
             with _maybe_palace_write_lock(palace_path):
-                # Discard any stale chromadb client state before this batch.
-                # MUST be inside the palace_write_lock to be effective.
                 try:
                     collection.refresh_for_write()
                 except AttributeError:
-                    # Older backend or test fake without refresh_for_write —
-                    # safe to skip (lock still serialises writers, the only
-                    # missing piece is in-memory cache invalidation).
                     pass
 
-                # Purge stale drawers first. When the normalize schema bumps,
-                # file_already_mined() returned False for pre-v2 drawers — clean
-                # them out so the source doesn't end up with mixed old/new drawers.
                 try:
                     collection.delete(where={"source_file": source_file})
                 except Exception:
-                    pass
+                    logger.debug("Stale-drawer purge failed for %s", source_file, exc_info=True)
 
-                for chunk in chunks:
-                    chunk_room = (
-                        chunk.get("memory_type", room) if extract_mode == "general" else room
-                    )
-                    if extract_mode == "general":
-                        room_counts_delta[chunk_room] += 1
-                    drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+                filed_at = datetime.now().isoformat()
+                for batch_start in range(0, len(chunks), DRAWER_UPSERT_BATCH_SIZE):
+                    batch_docs: list = []
+                    batch_ids: list = []
+                    batch_metas: list = []
+                    for chunk in chunks[batch_start : batch_start + DRAWER_UPSERT_BATCH_SIZE]:
+                        chunk_room = (
+                            chunk.get("memory_type", room) if extract_mode == "general" else room
+                        )
+                        if extract_mode == "general":
+                            room_counts_delta[chunk_room] += 1
+                        drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+                        batch_docs.append(chunk["content"])
+                        batch_ids.append(drawer_id)
+                        batch_metas.append(
+                            {
+                                "wing": wing,
+                                "room": chunk_room,
+                                "hall": _detect_hall_cached(chunk["content"]),
+                                "source_file": source_file,
+                                "chunk_index": chunk["chunk_index"],
+                                "added_by": agent,
+                                "filed_at": filed_at,
+                                "ingest_mode": "convos",
+                                "extract_mode": extract_mode,
+                                "normalize_version": NORMALIZE_VERSION,
+                            }
+                        )
                     try:
                         collection.upsert(
-                            documents=[chunk["content"]],
-                            ids=[drawer_id],
-                            metadatas=[
-                                {
-                                    "wing": wing,
-                                    "room": chunk_room,
-                                    "hall": _detect_hall_cached(chunk["content"]),
-                                    "source_file": source_file,
-                                    "chunk_index": chunk["chunk_index"],
-                                    "added_by": agent,
-                                    "filed_at": datetime.now().isoformat(),
-                                    "ingest_mode": "convos",
-                                    "extract_mode": extract_mode,
-                                    "normalize_version": NORMALIZE_VERSION,
-                                }
-                            ],
+                            documents=batch_docs,
+                            ids=batch_ids,
+                            metadatas=batch_metas,
                         )
-                        drawers_added += 1
+                        drawers_added += len(batch_docs)
                     except Exception as e:
                         if "already exists" not in str(e).lower():
                             raise
@@ -453,8 +431,6 @@ def _file_chunks_locked(
                 source_file,
                 exc,
             )
-            # Treat as "skipped" so the caller continues with the next file
-            # instead of crashing the whole mine run.
             return 0, defaultdict(int), True
     return drawers_added, room_counts_delta, False
 
@@ -491,7 +467,9 @@ def mine_convos(
 
     convo_path = Path(convo_dir).expanduser().resolve()
     if not wing:
-        wing = convo_path.name.lower().replace(" ", "_").replace("-", "_")
+        from .config import normalize_wing_name
+
+        wing = normalize_wing_name(convo_path.name)
 
     files = scan_convos(convo_dir)
     if limit > 0:

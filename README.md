@@ -6,6 +6,10 @@
 > domain — including `mempalace.tech` — is an impostor and may distribute
 > malware. Details and timeline: [docs/HISTORY.md](docs/HISTORY.md).
 
+> [!IMPORTANT]
+> **🚨 Claude Code sessions expire in 30 days w/out auto-save hooks wired!** **[Read this →](https://github.com/MemPalace/mempalace/discussions/1388)**
+
+
 <div align="center">
 
 <img src="assets/mempalace_logo.png" alt="MemPalace" width="240">
@@ -91,6 +95,19 @@ or Vertex AI? install path?), run the commands, and verify the install. For
 Vertex AI, point each `vertex_ai/*` entry in `litellm/config.yaml` at your own
 service-account JSON via `vertex_credentials`. Full
 workflow: [docs/INSTALL-FOR-AGENTS.md](docs/INSTALL-FOR-AGENTS.md).
+
+### PyPI / uv install (upstream package)
+
+We recommend [`uv`](https://docs.astral.sh/uv/) — `uv tool install` puts
+the `mempalace` CLI in an isolated environment on your PATH:
+
+```bash
+uv tool install mempalace
+mempalace init ~/projects/myapp
+```
+
+If you prefer pip, `pip install mempalace` still works.
+
 
 ## Quickstart
 
@@ -188,9 +205,9 @@ own research page for their published numbers.
 ```bash
 git clone https://github.com/MemPalace/mempalace.git
 cd mempalace
-pip install -e ".[dev]"
+uv sync --extra dev   # or: pip install -e ".[dev]"
 # see benchmarks/README.md for dataset download commands
-python benchmarks/longmemeval_bench.py /path/to/longmemeval_s_cleaned.json
+uv run python benchmarks/longmemeval_bench.py /path/to/longmemeval_s_cleaned.json
 ```
 
 ---
@@ -230,6 +247,11 @@ query rewrite and reranking. Short follow-ups like “why?” or “continue”
 can therefore recall the right memories without pulling in unrelated
 older sessions.
 
+For per-message recall on top of the file-level chunks the hooks produce,
+run `mempalace sweep <transcript-dir>` periodically — it stores one
+verbatim drawer per user/assistant message, idempotent and resume-safe.
+
+
 ---
 
 ## Requirements
@@ -258,7 +280,8 @@ PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 MIT — see [LICENSE](LICENSE).
 
 <!-- Link Definitions -->
-[version-shield]: https://img.shields.io/badge/version-3.3.405-4dc9f6?style=flat-square&labelColor=0a0e14
+[version-shield]: https://img.shields.io/badge/version-3.3.501-4dc9f6?style=flat-square&labelColor=0a0e14
+
 [release-link]: https://github.com/MemPalace/mempalace/releases
 [python-shield]: https://img.shields.io/badge/python-3.9+-7dd8f8?style=flat-square&labelColor=0a0e14&logo=python&logoColor=7dd8f8
 [python-link]: https://www.python.org/

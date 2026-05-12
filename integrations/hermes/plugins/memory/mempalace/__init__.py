@@ -59,6 +59,7 @@ except ImportError:  # pragma: no cover
 try:  # Hermes runtime import.
     from agent.memory_provider import MemoryProvider
 except ImportError:  # pragma: no cover - local workspace fallback.
+
     class MemoryProvider:  # type: ignore[no-redef]
         """Fallback base class for local development outside Hermes."""
 
@@ -74,25 +75,63 @@ RECALL_POOL = 10  # over-fetch for LLM reranking
 MAX_RECALL_SNIPPET_CHARS = 400
 PREVIOUS_ASSISTANT_TAIL_CHARS = 500
 MAX_SYSTEM_PROMPT_PATH_CHARS = 120
-TRIVIAL_USER_MESSAGES = frozenset({
-    # Greetings
-    "hi", "hello", "hey", "嗨", "你好",
-    # Acknowledgement
-    "ok", "okay", "好", "好的", "行", "嗯", "对",
-    "cool", "nice", "great", "sounds good",
-    # Affirmation / negation
-    "yes", "no", "是", "是的", "不", "不是",
-    # Continuation
-    "continue", "go", "go on", "next", "继续",
-    # Gratitude
-    "thanks", "thank you", "thx", "谢谢",
-    # Completion / exit
-    "done", "完成", "搞定", "stop", "quit", "exit",
-})
+TRIVIAL_USER_MESSAGES = frozenset(
+    {
+        # Greetings
+        "hi",
+        "hello",
+        "hey",
+        "嗨",
+        "你好",
+        # Acknowledgement
+        "ok",
+        "okay",
+        "好",
+        "好的",
+        "行",
+        "嗯",
+        "对",
+        "cool",
+        "nice",
+        "great",
+        "sounds good",
+        # Affirmation / negation
+        "yes",
+        "no",
+        "是",
+        "是的",
+        "不",
+        "不是",
+        # Continuation
+        "continue",
+        "go",
+        "go on",
+        "next",
+        "继续",
+        # Gratitude
+        "thanks",
+        "thank you",
+        "thx",
+        "谢谢",
+        # Completion / exit
+        "done",
+        "完成",
+        "搞定",
+        "stop",
+        "quit",
+        "exit",
+    }
+)
 MIN_RECALL_QUERY_LEN = 6  # skip very short prompts from recall
-CONTEXTUAL_FOLLOWUP_MESSAGES = frozenset({
-    "continue", "go", "go on", "next", "继续",
-})
+CONTEXTUAL_FOLLOWUP_MESSAGES = frozenset(
+    {
+        "continue",
+        "go",
+        "go on",
+        "next",
+        "继续",
+    }
+)
 HARD_SKIP_USER_MESSAGES = TRIVIAL_USER_MESSAGES - CONTEXTUAL_FOLLOWUP_MESSAGES
 
 # --- LLM periodic save -------------------------------------------------
@@ -278,7 +317,10 @@ KG_TIMELINE_TOOL_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "entity": {"type": "string", "description": "Optional entity name. If omitted, returns full timeline."},
+            "entity": {
+                "type": "string",
+                "description": "Optional entity name. If omitted, returns full timeline.",
+            },
         },
         "required": [],
     },
@@ -682,13 +724,16 @@ def resolve_paths(hermes_home: str | Path) -> ResolvedPaths:
     try:
         from mempalace.config import DEFAULT_PALACE_PATH as _SHARED_PALACE_PATH
         from mempalace.knowledge_graph import DEFAULT_KG_PATH as _SHARED_KG_PATH
+
         _shared_palace_default = Path(_SHARED_PALACE_PATH)
         _shared_kg_default = Path(_SHARED_KG_PATH)
     except ImportError:
         _shared_palace_default = base_dir / "palace"
         _shared_kg_default = base_dir / "knowledge_graph.sqlite3"
 
-    palace_path = _resolve_optional_path(config_values.get("palace_path"), _shared_palace_default, hermes_home_path)
+    palace_path = _resolve_optional_path(
+        config_values.get("palace_path"), _shared_palace_default, hermes_home_path
+    )
     identity_path = _resolve_optional_path(
         config_values.get("identity_path"),
         base_dir / "identity.txt",
@@ -1181,9 +1226,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         if isinstance(content, str):
             return content.strip()
         if isinstance(content, list):
-            return " ".join(
-                b.get("text", "") for b in content if isinstance(b, dict)
-            ).strip()
+            return " ".join(b.get("text", "") for b in content if isinstance(b, dict)).strip()
         return ""
 
     @staticmethod
@@ -1209,19 +1252,19 @@ class MemPalaceMemoryProvider(MemoryProvider):
         seen = set()
         for text in texts:
             # File paths (e.g. src/foo/bar.py, ~/.hermes/config.json)
-            for m in _re.finditer(r'[~/.]?[\w._-]+/[\w._/-]+', text):
+            for m in _re.finditer(r"[~/.]?[\w._-]+/[\w._/-]+", text):
                 token = m.group().rstrip("/")
                 if token not in seen and len(token) > 4:
                     keywords.append(token)
                     seen.add(token)
             # Backtick-quoted identifiers (e.g. `feishu.py`, `hook_stop`)
-            for m in _re.finditer(r'`([^`]{2,60})`', text):
+            for m in _re.finditer(r"`([^`]{2,60})`", text):
                 token = m.group(1)
                 if token not in seen:
                     keywords.append(token)
                     seen.add(token)
             # CJK key phrases (2-8 chars surrounded by punctuation/space)
-            for m in _re.finditer(r'[\u4e00-\u9fff]{2,8}', text):
+            for m in _re.finditer(r"[\u4e00-\u9fff]{2,8}", text):
                 token = m.group()
                 if token not in seen:
                     keywords.append(token)
@@ -1309,10 +1352,13 @@ class MemPalaceMemoryProvider(MemoryProvider):
         keywords = self._extract_keywords(user_texts)
 
         import re as _re
+
         actions: list = []
         action_patterns = [
-            _re.compile(r'(?:已|完成|修复|修好|创建|添加|删除|更新|部署|重启|提交|推送)了?\s*[`\u4e00-\u9fff\w._/-]{2,40}'),
-            _re.compile(r'(?:✅|✓|☑)\s*.{5,60}'),
+            _re.compile(
+                r"(?:已|完成|修复|修好|创建|添加|删除|更新|部署|重启|提交|推送)了?\s*[`\u4e00-\u9fff\w._/-]{2,40}"
+            ),
+            _re.compile(r"(?:✅|✓|☑)\s*.{5,60}"),
         ]
         for text in assistant_texts[-6:]:
             for pat in action_patterns:
@@ -1392,15 +1438,27 @@ class MemPalaceMemoryProvider(MemoryProvider):
 
         # Try LLM-based diary first
         entry = self._llm_diary_entry(
-            user_texts, assistant_texts, tool_names, user_turns,
-            today, now_ts, state,
+            user_texts,
+            assistant_texts,
+            tool_names,
+            user_turns,
+            today,
+            now_ts,
+            state,
         )
 
         # Fallback to regex extraction
         if not entry:
             entry = self._regex_diary_entry(
-                user_texts, assistant_texts, tool_names, user_turns,
-                first_user_msg, last_user_msg, today, now_ts, state,
+                user_texts,
+                assistant_texts,
+                tool_names,
+                user_turns,
+                first_user_msg,
+                last_user_msg,
+                today,
+                now_ts,
+                state,
             )
 
         if not entry:
@@ -1459,10 +1517,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
             cleaned_user = _strip_injected_memory(user_text)
             cleaned_assistant = _strip_injected_memory(assistant_text)
             document = (
-                "[role: user]\n"
-                f"{cleaned_user}\n\n"
-                "[role: assistant]\n"
-                f"{cleaned_assistant}"
+                f"[role: user]\n{cleaned_user}\n\n[role: assistant]\n{cleaned_assistant}"
             ).strip()
             drawer_id = self._content_drawer_id(state.wing, room, document)
             try:
@@ -1499,6 +1554,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         # create + tear down providers).
         try:
             from mempalace.palace import _DEFAULT_BACKEND as _palace_backend
+
             _palace_backend._clients.clear()
             if hasattr(_palace_backend, "_freshness"):
                 _palace_backend._freshness.clear()
@@ -1570,13 +1626,17 @@ class MemPalaceMemoryProvider(MemoryProvider):
         predicate = str(args.get("predicate", "")).strip()
         obj = str(args.get("object", "")).strip()
         if not all([subject, predicate, obj]):
-            return self._json_result({"success": False, "error": "subject, predicate, object required"})
+            return self._json_result(
+                {"success": False, "error": "subject, predicate, object required"}
+            )
         kg = KnowledgeGraph(db_path=str(self._paths.kg_path))
         try:
             kg.add_triple(subject, predicate, obj, valid_from=args.get("valid_from"))
         finally:
             kg.close()
-        return self._json_result({"success": True, "subject": subject, "predicate": predicate, "object": obj})
+        return self._json_result(
+            {"success": True, "subject": subject, "predicate": predicate, "object": obj}
+        )
 
     def _tool_kg_invalidate(self, state: SessionState, args: Dict) -> str:
         if not state.allow_writes:
@@ -1585,13 +1645,17 @@ class MemPalaceMemoryProvider(MemoryProvider):
         predicate = str(args.get("predicate", "")).strip()
         obj = str(args.get("object", "")).strip()
         if not all([subject, predicate, obj]):
-            return self._json_result({"success": False, "error": "subject, predicate, object required"})
+            return self._json_result(
+                {"success": False, "error": "subject, predicate, object required"}
+            )
         kg = KnowledgeGraph(db_path=str(self._paths.kg_path))
         try:
             kg.invalidate(subject, predicate, obj, ended=args.get("ended"))
         finally:
             kg.close()
-        return self._json_result({"success": True, "subject": subject, "predicate": predicate, "object": obj})
+        return self._json_result(
+            {"success": True, "subject": subject, "predicate": predicate, "object": obj}
+        )
 
     def _tool_kg_timeline(self, state: SessionState, args: Dict) -> str:
         entity = args.get("entity")
@@ -1614,15 +1678,17 @@ class MemPalaceMemoryProvider(MemoryProvider):
     def _tool_status(self, state: SessionState, args: Dict) -> str:
         collection = self._get_collection(create=False)
         count = collection.count() if collection else 0
-        return self._json_result({
-            "provider": "mempalace",
-            "version": "2.0.0",
-            "wing": state.wing,
-            "palace_path": str(self._paths.palace_path),
-            "kg_path": str(self._paths.kg_path),
-            "drawer_count": count,
-            "session_id": state.session_id,
-        })
+        return self._json_result(
+            {
+                "provider": "mempalace",
+                "version": "2.0.0",
+                "wing": state.wing,
+                "palace_path": str(self._paths.palace_path),
+                "kg_path": str(self._paths.kg_path),
+                "drawer_count": count,
+                "session_id": state.session_id,
+            }
+        )
 
     def _tool_list_wings(self, state: SessionState, args: Dict) -> str:
         wings = self._scan_metadata_field("wing")
@@ -1648,7 +1714,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
                 limit=batch_size,
                 include=["metadatas"],
             )
-            for meta in (batch.get("metadatas") or []):
+            for meta in batch.get("metadatas") or []:
                 wing = (meta or {}).get("wing", "unknown")
                 room = (meta or {}).get("room", "unknown")
                 if wing not in taxonomy:
@@ -1738,20 +1804,18 @@ class MemPalaceMemoryProvider(MemoryProvider):
         wing_override = args.get("wing")
         drawer_id = args.get("drawer_id")
         if not drawer_id:
-            drawer_id = self._content_drawer_id(
-                wing_override or state.wing, room, content
-            )
-        self._upsert_drawer(
-            drawer_id, content, room, state, wing_override=wing_override
-        )
+            drawer_id = self._content_drawer_id(wing_override or state.wing, room, content)
+        self._upsert_drawer(drawer_id, content, room, state, wing_override=wing_override)
         with state.lock:
             state.memories_filed += 1
-        return self._json_result({
-            "success": True,
-            "drawer_id": drawer_id,
-            "wing": wing_override or state.wing,
-            "room": room,
-        })
+        return self._json_result(
+            {
+                "success": True,
+                "drawer_id": drawer_id,
+                "wing": wing_override or state.wing,
+                "room": room,
+            }
+        )
 
     def _tool_delete_drawer(self, state: SessionState, args: Dict) -> str:
         if not state.allow_writes:
@@ -1775,11 +1839,13 @@ class MemPalaceMemoryProvider(MemoryProvider):
         result = collection.get(ids=[drawer_id], include=["documents", "metadatas"])
         if not result["ids"]:
             return self._json_result({"error": "drawer not found", "drawer_id": drawer_id})
-        return self._json_result({
-            "drawer_id": result["ids"][0],
-            "content": result["documents"][0],
-            "metadata": result["metadatas"][0],
-        })
+        return self._json_result(
+            {
+                "drawer_id": result["ids"][0],
+                "content": result["documents"][0],
+                "metadata": result["metadatas"][0],
+            }
+        )
 
     def _tool_list_drawers(self, state: SessionState, args: Dict) -> str:
         collection = self._get_collection(create=False)
@@ -1804,11 +1870,17 @@ class MemPalaceMemoryProvider(MemoryProvider):
         result = collection.get(**kwargs)
         drawers = []
         for i, did in enumerate(result.get("ids", [])):
-            drawers.append({
-                "drawer_id": did,
-                "content": (result.get("documents") or [])[i] if i < len(result.get("documents") or []) else "",
-                "metadata": (result.get("metadatas") or [])[i] if i < len(result.get("metadatas") or []) else {},
-            })
+            drawers.append(
+                {
+                    "drawer_id": did,
+                    "content": (result.get("documents") or [])[i]
+                    if i < len(result.get("documents") or [])
+                    else "",
+                    "metadata": (result.get("metadatas") or [])[i]
+                    if i < len(result.get("metadatas") or [])
+                    else {},
+                }
+            )
         return self._json_result({"drawers": drawers})
 
     def _tool_update_drawer(self, state: SessionState, args: Dict) -> str:
@@ -1858,12 +1930,14 @@ class MemPalaceMemoryProvider(MemoryProvider):
 
         with state.lock:
             state.memories_filed += 1
-        return self._json_result({
-            "success": True,
-            "drawer_id": drawer_id,
-            "room": room,
-            "date": today,
-        })
+        return self._json_result(
+            {
+                "success": True,
+                "drawer_id": drawer_id,
+                "room": room,
+                "date": today,
+            }
+        )
 
     def _tool_diary_read(self, state: SessionState, args: Dict) -> str:
         collection = self._get_collection(create=False)
@@ -1880,11 +1954,17 @@ class MemPalaceMemoryProvider(MemoryProvider):
         )
         entries = []
         for i, did in enumerate(result.get("ids", [])):
-            entries.append({
-                "drawer_id": did,
-                "content": (result.get("documents") or [])[i] if i < len(result.get("documents") or []) else "",
-                "metadata": (result.get("metadatas") or [])[i] if i < len(result.get("metadatas") or []) else {},
-            })
+            entries.append(
+                {
+                    "drawer_id": did,
+                    "content": (result.get("documents") or [])[i]
+                    if i < len(result.get("documents") or [])
+                    else "",
+                    "metadata": (result.get("metadatas") or [])[i]
+                    if i < len(result.get("metadatas") or [])
+                    else {},
+                }
+            )
         # Sort by drawer_id descending (dates sort lexicographically)
         entries.sort(key=lambda e: e["drawer_id"], reverse=True)
         return self._json_result({"entries": entries[:limit]})
@@ -1907,11 +1987,13 @@ class MemPalaceMemoryProvider(MemoryProvider):
         )
         hits = result.get("results", []) if isinstance(result, dict) else []
         exact_matches = [h for h in hits if h.get("text", "").strip() == content]
-        return self._json_result({
-            "is_duplicate": len(exact_matches) > 0,
-            "matches": len(exact_matches),
-            "similar": len(hits),
-        })
+        return self._json_result(
+            {
+                "is_duplicate": len(exact_matches) > 0,
+                "matches": len(exact_matches),
+                "similar": len(hits),
+            }
+        )
 
     def _tool_check_facts(self, state: SessionState, args: Dict) -> str:
         text = str(args.get("text", "")).strip()
@@ -1934,10 +2016,12 @@ class MemPalaceMemoryProvider(MemoryProvider):
             config.set_hook_setting(key, value)
             return self._json_result({"success": True, "key": key, "value": value})
         # List current settings
-        return self._json_result({
-            "hook_silent_save": config.hook_silent_save,
-            "hook_desktop_toast": config.hook_desktop_toast,
-        })
+        return self._json_result(
+            {
+                "hook_silent_save": config.hook_silent_save,
+                "hook_desktop_toast": config.hook_desktop_toast,
+            }
+        )
 
     def _tool_reconnect(self, state: SessionState, args: Dict) -> str:
         with self._chroma_lock:
@@ -1948,6 +2032,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
             # very next tool invocation.
             try:
                 from mempalace.palace import _DEFAULT_BACKEND as _palace_backend
+
                 _palace_backend._clients.clear()
                 if hasattr(_palace_backend, "_freshness"):
                     _palace_backend._freshness.clear()
@@ -1957,6 +2042,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
             # can be re-created with fresh settings (avoids "different settings" error).
             try:
                 from chromadb.api.shared_system_client import SharedSystemClient
+
                 SharedSystemClient.clear_system_cache()
             except Exception:
                 pass
@@ -1969,12 +2055,14 @@ class MemPalaceMemoryProvider(MemoryProvider):
         return self._json_result({"success": True, "drawer_count": count})
 
     def _tool_get_aaak_spec(self, state: SessionState, args: Dict) -> str:
-        return self._json_result({
-            "spec": "AAAK/1.0",
-            "provider": "mempalace",
-            "version": "2.0.0",
-            "capabilities": ALL_TOOL_NAMES,
-        })
+        return self._json_result(
+            {
+                "spec": "AAAK/1.0",
+                "provider": "mempalace",
+                "version": "2.0.0",
+                "capabilities": ALL_TOOL_NAMES,
+            }
+        )
 
     def _tool_memories_filed_away(self, state: SessionState, args: Dict) -> str:
         with state.lock:
@@ -2004,7 +2092,9 @@ class MemPalaceMemoryProvider(MemoryProvider):
             or self._agent_identity
             or self._paths.hermes_home.name
         )
-        agent_context = str(kwargs.get("agent_context") or state.agent_context or self._agent_context)
+        agent_context = str(
+            kwargs.get("agent_context") or state.agent_context or self._agent_context
+        )
         platform = str(kwargs.get("platform") or state.platform or self._platform)
 
         # Allow wing override from mempalace.json config (e.g. "default_wing": "solvely_web")
@@ -2051,7 +2141,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
             value = default
         return max(1, min(value, 10))
 
-    def _render_recall(self, query: str, state: SessionState, limit: int) -> str:
+    def _render_recall(self, query: str, state: SessionState, limit: int) -> str:  # noqa: C901
         if not query.strip() or self._paths is None:
             return ""
 
@@ -2102,6 +2192,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         rewrite_filters: Dict[str, str] = {}
         try:
             from mempalace.recall_llm import is_enabled, _get_llm_config, decide_recall, rerank
+
             if is_enabled():
                 llm_config = _get_llm_config()
             if llm_config:
@@ -2110,11 +2201,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
                 # canonical entity names and (b) propose valid filter values.
                 # Merge our Hermes-specific hints (wing, platform) on top.
                 active_ctx = self._build_recall_active_context(state)
-                taxonomy = (
-                    active_ctx.get("palace")
-                    if isinstance(active_ctx, dict)
-                    else {}
-                ) or {}
+                taxonomy = (active_ctx.get("palace") if isinstance(active_ctx, dict) else {}) or {}
                 recall_decision = decide_recall(
                     query,
                     config=llm_config,
@@ -2134,12 +2221,8 @@ class MemPalaceMemoryProvider(MemoryProvider):
                     # palace taxonomy so we never filter to an empty
                     # result set with a hallucinated room/hall name.
                     raw_filters = recall_decision.get("filters") or {}
-                    valid_rooms = (
-                        set(taxonomy.get("rooms", [])) if taxonomy else set()
-                    )
-                    valid_halls = (
-                        set(taxonomy.get("halls", [])) if taxonomy else set()
-                    )
+                    valid_rooms = set(taxonomy.get("rooms", [])) if taxonomy else set()
+                    valid_halls = set(taxonomy.get("halls", [])) if taxonomy else set()
                     raw_room = raw_filters.get("room")
                     if raw_room and (not valid_rooms or raw_room in valid_rooms):
                         rewrite_filters["room"] = raw_room
@@ -2153,17 +2236,12 @@ class MemPalaceMemoryProvider(MemoryProvider):
                         # or is present in the palace's known wings. This
                         # blocks hallucinated wing names that would filter
                         # every result away.
-                        valid_wings = (
-                            set(taxonomy.get("wings", [])) if taxonomy else set()
-                        )
-                        if raw_wing == state.wing or (
-                            valid_wings and raw_wing in valid_wings
-                        ):
+                        valid_wings = set(taxonomy.get("wings", [])) if taxonomy else set()
+                        if raw_wing == state.wing or (valid_wings and raw_wing in valid_wings):
                             rewrite_filters["wing"] = raw_wing
                         else:
                             logger.info(
-                                "Recall: dropping unknown wing %r "
-                                "(preferred=%r, known=%s)",
+                                "Recall: dropping unknown wing %r (preferred=%r, known=%s)",
                                 raw_wing,
                                 state.wing,
                                 sorted(valid_wings),
@@ -2180,7 +2258,9 @@ class MemPalaceMemoryProvider(MemoryProvider):
 
                     has_history_ref = any(h in query.lower() for h in _HISTORY_REFERENCE_HINTS)
                     if has_history_ref:
-                        logger.info("Recall: LLM decide returned None, but history ref detected — fallback to search")
+                        logger.info(
+                            "Recall: LLM decide returned None, but history ref detected — fallback to search"
+                        )
                     else:
                         logger.info("Recall: LLM decide returned None, fail closed")
                         return ""
@@ -2192,7 +2272,10 @@ class MemPalaceMemoryProvider(MemoryProvider):
             except Exception:
                 has_history_ref = False
             if has_history_ref:
-                logger.info("Recall: decide+rewrite failed (%s), but history ref detected — fallback to search", e)
+                logger.info(
+                    "Recall: decide+rewrite failed (%s), but history ref detected — fallback to search",
+                    e,
+                )
             else:
                 logger.info("Recall: decide+rewrite failed (%s), fail closed", e)
                 return ""
@@ -2348,7 +2431,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         enriched.update(wing_hint)
         return enriched
 
-    def _async_llm_save_recent_turns(self, state: SessionState, trigger: str) -> int:
+    def _async_llm_save_recent_turns(self, state: SessionState, trigger: str) -> int:  # noqa: C901
         """Extract key knowledge from buffered turns via the recall LLM and write it.
 
         Mirrors ``mempalace.hooks_cli._async_save_worker``:
@@ -2387,9 +2470,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
         # Skip trivial batches — LLM call is expensive and there's
         # nothing worth extracting from a pile of greetings.
         meaningful = [
-            t
-            for t in turns
-            if not _is_trivial_turn(t.get("user", ""), t.get("assistant", ""))
+            t for t in turns if not _is_trivial_turn(t.get("user", ""), t.get("assistant", ""))
         ]
         if not meaningful:
             logger.info(
@@ -2764,6 +2845,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
             # ChromaDB singleton conflict — clear global cache and retry.
             try:
                 from chromadb.api.shared_system_client import SharedSystemClient
+
                 SharedSystemClient.clear_system_cache()
             except Exception:
                 pass
@@ -2864,7 +2946,9 @@ class MemPalaceMemoryProvider(MemoryProvider):
     def _json_result(self, payload: Dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=True, sort_keys=True, default=str)
 
-    def _scan_metadata_field(self, field_name: str, *, wing_filter: Optional[str] = None) -> Dict[str, int]:
+    def _scan_metadata_field(
+        self, field_name: str, *, wing_filter: Optional[str] = None
+    ) -> Dict[str, int]:
         """Scan ChromaDB metadata in batches, counting distinct values of a field."""
         collection = self._get_collection(create=False)
         if collection is None:
@@ -2880,7 +2964,7 @@ class MemPalaceMemoryProvider(MemoryProvider):
                 limit=batch_size,
                 include=["metadatas"],
             )
-            for meta in (batch.get("metadatas") or []):
+            for meta in batch.get("metadatas") or []:
                 if meta is None:
                     continue
                 if wing_filter and meta.get("wing") != wing_filter:

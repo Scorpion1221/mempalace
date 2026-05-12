@@ -148,7 +148,10 @@ def test_session_start_cursor_emits_palace_summary_when_available(tmp_path):
         )
         stack.enter_context(patch("mempalace.hooks_cli.STATE_DIR", tmp_path))
         stack.enter_context(
-            patch("mempalace.hooks_cli._build_palace_context", return_value="Wings: mempalace (bugs, decisions)")
+            patch(
+                "mempalace.hooks_cli._build_palace_context",
+                return_value="Wings: mempalace (bugs, decisions)",
+            )
         )
         hook_session_start(
             {"workspace_roots": [str(tmp_path)], "conversation_id": "c1"},
@@ -169,9 +172,7 @@ def test_session_start_cursor_empty_palace_emits_empty_context(tmp_path):
             patch("mempalace.hooks_cli._output", side_effect=lambda d: buf.write(json.dumps(d)))
         )
         stack.enter_context(patch("mempalace.hooks_cli.STATE_DIR", tmp_path))
-        stack.enter_context(
-            patch("mempalace.hooks_cli._build_palace_context", return_value="")
-        )
+        stack.enter_context(patch("mempalace.hooks_cli._build_palace_context", return_value=""))
         hook_session_start(
             {"workspace_roots": [str(tmp_path)], "conversation_id": "c2"},
             harness="cursor",
@@ -191,7 +192,10 @@ def test_session_start_claude_code_still_passthrough(tmp_path):
         stack.enter_context(patch("mempalace.hooks_cli.STATE_DIR", tmp_path))
         # Should NOT be called for claude-code — regression check.
         stack.enter_context(
-            patch("mempalace.hooks_cli._build_palace_context", side_effect=AssertionError("should not be called"))
+            patch(
+                "mempalace.hooks_cli._build_palace_context",
+                side_effect=AssertionError("should not be called"),
+            )
         )
         hook_session_start(
             {"cwd": str(tmp_path), "session_id": "s1"},
@@ -208,7 +212,10 @@ def test_session_start_codex_still_passthrough(tmp_path):
         )
         stack.enter_context(patch("mempalace.hooks_cli.STATE_DIR", tmp_path))
         stack.enter_context(
-            patch("mempalace.hooks_cli._build_palace_context", side_effect=AssertionError("should not be called"))
+            patch(
+                "mempalace.hooks_cli._build_palace_context",
+                side_effect=AssertionError("should not be called"),
+            )
         )
         hook_session_start({"cwd": str(tmp_path)}, harness="codex")
     assert json.loads(buf.getvalue()) == {}

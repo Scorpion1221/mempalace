@@ -28,6 +28,9 @@ for _var in ("HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"):
 # does not accidentally trigger LLM calls in tests.
 for _embed_var in (
     "MEMPAL_EMBEDDING_MODEL",
+    "MEMPAL_EMBEDDING_ENDPOINT",
+    "MEMPAL_EMBEDDING_KEY",
+    "MEMPAL_EMBEDDING_DIMS",
     "MEMPAL_LLM",
     "MEMPAL_LLM_ENDPOINT",
     "MEMPAL_LLM_MODEL",
@@ -39,6 +42,9 @@ for _embed_var in (
 ):
     _original_env[_embed_var] = os.environ.pop(_embed_var, None)
 
+os.environ["MEMPAL_EMBEDDING_MODEL"] = "hash"
+os.environ["MEMPAL_LLM"] = "0"
+
 os.environ["HOME"] = _session_tmp
 os.environ["USERPROFILE"] = _session_tmp
 os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
@@ -47,13 +53,66 @@ os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
 import pytest  # noqa: E402
+import chromadb.api.types as _chroma_types  # noqa: E402
+import chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 as _chroma_onnx  # noqa: E402
 
 # Reset embedding caches so they pick up the cleaned env vars above.
-from mempalace.embedding import reset_cache as _reset_embedding_cache  # noqa: E402
-from mempalace.palace import _reset_embedding_cache as _reset_palace_cache  # noqa: E402
+import mempalace.embedding as _embedding_mod  # noqa: E402
+
+
+class _DeterministicTestEmbeddingFunction:
+    def __init__(self, preferred_providers=None, dimensions=384):
+        self.preferred_providers = preferred_providers or []
+        self.dimensions = dimensions
+
+    def name(self):
+        return "default"
+
+    def __call__(self, input):
+        return self.embed_documents(input)
+
+    def embed_query(self, input):
+        return self.embed_documents([input])
+
+    def embed_documents(self, input):
+        vectors = []
+        for text in input:
+            vec = [0.0] * self.dimensions
+            tokens = str(text).lower().replace(".", " ").replace(",", " ").split()
+            for token in tokens or [str(text)]:
+                bucket = sum(ord(ch) for ch in token) % len(vec)
+                vec[bucket] += 1.0
+            vectors.append(vec)
+        return vectors
+
+
+_embedding_mod._build_ef_class = lambda: _DeterministicTestEmbeddingFunction
+_reset_embedding_cache = _embedding_mod.reset_cache
 
 _reset_embedding_cache()
-_reset_palace_cache()
+
+
+def _deterministic_chroma_default_call(self, input):
+    """Replace Chroma's network-backed default EF in tests.
+
+    Several tests intentionally instantiate raw Chroma collections rather
+    than going through mempalace.embedding. Chroma's default embedding
+    function downloads ONNX model assets on first use, which is both slow and
+    unavailable in the sandboxed test environment. Keep those tests local by
+    making Chroma's own default EF deterministic too.
+    """
+
+    return _DeterministicTestEmbeddingFunction()(input)
+
+
+_chroma_types.DefaultEmbeddingFunction.__call__ = _deterministic_chroma_default_call
+_chroma_onnx.ONNXMiniLM_L6_V2.__call__ = _deterministic_chroma_default_call
+try:
+    from mempalace.palace import _reset_embedding_cache as _reset_palace_cache  # noqa: E402
+
+    _reset_palace_cache()
+except ImportError:
+    pass
 
 from mempalace.config import MempalaceConfig  # noqa: E402
 from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
@@ -61,15 +120,42 @@ from mempalace.knowledge_graph import KnowledgeGraph  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def _reset_mcp_cache():
-    """Reset the MCP server's cached ChromaDB client/collection between tests."""
+    """Reset cached MCP state between tests without importing mcp_server.
+
+    If mempalace.mcp_server is already imported, close/clear its KG cache and
+    Chroma client cache. If it has not been imported, leave it unloaded so
+    fork/spawn-based tests do not inherit extra Chroma/SQLite state.
+    """
 
     def _clear_cache():
         try:
-            from mempalace import mcp_server
+            import sys
 
-            mcp_server._client_cache = None
-            mcp_server._collection_cache = None
-            mcp_server._collection_has_ef = False
+            mcp_server = sys.modules.get("mempalace.mcp_server")
+            if mcp_server is not None:
+                for kg in list(getattr(mcp_server, "_kg_by_path", {}).values()):
+                    close = getattr(kg, "close", None)
+                    if close is not None:
+                        try:
+                            close()
+                        except Exception:
+                            pass
+
+                if hasattr(mcp_server, "_kg_by_path"):
+                    mcp_server._kg_by_path.clear()
+
+                mcp_server._client_cache = None
+                mcp_server._collection_cache = None
+                mcp_server._collection_has_ef = False
+        except AttributeError:
+            pass
+
+        try:
+            # Reset the per-process quarantine gate so tests don't leak
+            # state through ChromaBackend._quarantined_paths.
+            from mempalace.backends.chroma import ChromaBackend
+
+            ChromaBackend._quarantined_paths.clear()
         except (ImportError, AttributeError):
             pass
 
@@ -127,7 +213,11 @@ def config(tmp_dir, palace_path):
 def collection(palace_path):
     """A ChromaDB collection pre-seeded in the temp palace."""
     client = chromadb.PersistentClient(path=palace_path)
-    col = client.get_or_create_collection("mempalace_drawers", metadata={"hnsw:space": "cosine"})
+    col = client.get_or_create_collection(
+        "mempalace_drawers",
+        metadata={"hnsw:space": "cosine"},
+        embedding_function=_embedding_mod.get_embedding_function("cpu"),
+    )
     yield col
     client.delete_collection("mempalace_drawers")
     del client
