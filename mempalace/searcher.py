@@ -29,6 +29,12 @@ class SearchError(Exception):
     """Raised when search cannot proceed (e.g. no palace found)."""
 
 
+def _is_vector_index_runtime_error(exc: Exception) -> bool:
+    """Return True for Chroma vector-index lookup failures that can use sqlite fallback."""
+    msg = str(exc)
+    return "Error finding id" in msg or ("Error executing plan" in msg and "Internal error" in msg)
+
+
 # Split on non-word boundaries.  Latin/Cyrillic/digits stay word-level;
 # CJK ideographs are split into overlapping bigrams below.
 _TOKEN_RE = re.compile(r"\w{2,}", re.UNICODE)
@@ -408,6 +414,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
 
     where = build_where_filter(wing, room)
 
+    fallback_mode = False
     try:
         kwargs = {
             "query_texts": [query],
@@ -420,30 +427,55 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         results = col.query(**kwargs)
 
     except Exception as e:
-        print(f"\n  Search error: {e}")
-        raise SearchError(f"Search error: {e}") from e
+        if _is_vector_index_runtime_error(e):
+            import sys as _sys
 
-    docs = _first_or_empty(results, "documents")
-    metas = _first_or_empty(results, "metadatas")
-    dists = _first_or_empty(results, "distances")
+            print(
+                f"\n  NOTICE: vector index query failed; using BM25-only fallback ({e})",
+                file=_sys.stderr,
+            )
+            fallback = _bm25_only_via_sqlite(
+                query,
+                palace_path,
+                wing=wing,
+                room=room,
+                n_results=n_results,
+            )
+            if "error" in fallback:
+                print(f"\n  Search error: {fallback['error']}")
+                raise SearchError(f"Search error: {fallback['error']}") from e
+            hits = fallback.get("results", [])
+            fallback_mode = True
+        else:
+            print(f"\n  Search error: {e}")
+            raise SearchError(f"Search error: {e}") from e
 
-    if not docs:
-        print(f'\n  No results found for: "{query}"')
-        return
+    if fallback_mode:
+        if not hits:
+            print(f'\n  No results found for: "{query}"')
+            return
+    else:
+        docs = _first_or_empty(results, "documents")
+        metas = _first_or_empty(results, "metadatas")
+        dists = _first_or_empty(results, "distances")
 
-    # Pure-cosine retrieval on the CLI path was missing lexical matches:
-    # a drawer whose text contains every query term can still score distance
-    # >= 1.0 against the natural-language query when the drawer is a
-    # mechanical artifact (directory listing, diff, log fragment) that
-    # embeds as file-tree noise rather than as prose about its subject.
-    # The MCP tool path already hybridizes BM25 with vector sim via
-    # `_hybrid_rank`; do the same here so CLI results match what agents
-    # see via `mempalace_search`.
-    hits = [
-        {"text": doc or "", "distance": float(dist), "metadata": meta or {}}
-        for doc, meta, dist in zip(docs, metas, dists)
-    ]
-    hits = _hybrid_rank(hits, query)
+        if not docs:
+            print(f'\n  No results found for: "{query}"')
+            return
+
+        # Pure-cosine retrieval on the CLI path was missing lexical matches:
+        # a drawer whose text contains every query term can still score distance
+        # >= 1.0 against the natural-language query when the drawer is a
+        # mechanical artifact (directory listing, diff, log fragment) that
+        # embeds as file-tree noise rather than as prose about its subject.
+        # The MCP tool path already hybridizes BM25 with vector sim via
+        # `_hybrid_rank`; do the same here so CLI results match what agents
+        # see via `mempalace_search`.
+        hits = [
+            {"text": doc or "", "distance": float(dist), "metadata": meta or {}}
+            for doc, meta, dist in zip(docs, metas, dists)
+        ]
+        hits = _hybrid_rank(hits, query)
 
     print(f"\n{'=' * 60}")
     print(f'  Results for: "{query}"')
@@ -454,16 +486,24 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
     print(f"{'=' * 60}\n")
 
     for i, hit in enumerate(hits, 1):
-        vec_sim = round(max(0.0, 1 - hit["distance"]), 3)
-        bm25 = hit.get("bm25_score", 0.0)
-        meta = hit["metadata"]
-        source = Path(meta.get("source_file", "?")).name
-        wing_name = meta.get("wing", "?")
-        room_name = meta.get("room", "?")
+        if fallback_mode:
+            bm25 = hit.get("bm25_score", 0.0)
+            source = hit.get("source_file", "?")
+            wing_name = hit.get("wing", "?")
+            room_name = hit.get("room", "?")
+            match_line = f"bm25={bm25}  vector=unavailable  via={hit.get('matched_via', 'bm25')}"
+        else:
+            vec_sim = round(max(0.0, 1 - hit["distance"]), 3)
+            bm25 = hit.get("bm25_score", 0.0)
+            meta = hit["metadata"]
+            source = Path(meta.get("source_file", "?")).name
+            wing_name = meta.get("wing", "?")
+            room_name = meta.get("room", "?")
+            match_line = f"cosine={vec_sim}  bm25={bm25}"
 
         print(f"  [{i}] {wing_name} / {room_name}")
         print(f"      Source: {source}")
-        print(f"      Match:  cosine={vec_sim}  bm25={bm25}")
+        print(f"      Match:  {match_line}")
         print()
         # Print the verbatim text, indented
         for line in hit["text"].strip().split("\n"):
@@ -472,6 +512,7 @@ def search(query: str, palace_path: str, wing: str = None, room: str = None, n_r
         print(f"  {'─' * 56}")
 
     print()
+    return
 
 
 def _enrich_closet_hits(hits, drawers_col, query):
@@ -1059,6 +1100,19 @@ def search_memories(  # noqa: C901
             if "embed" in err_str.lower() or "SSL" in err_str or "CERTIFICATE" in err_str:
                 return {"error": f"Embedding error (check MEMPAL_EMBEDDING_MODEL config): {e}"}
             if not merged:
+                if _is_vector_index_runtime_error(e):
+                    fallback = _bm25_only_via_sqlite(
+                        query,
+                        palace_path,
+                        wing=wing,
+                        room=room,
+                        hall=hall,
+                        after=after,
+                        n_results=n_results,
+                        collection_name=collection_name,
+                    )
+                    fallback["fallback_reason"] = f"vector_query_error: {e}"
+                    return fallback
                 return {"error": f"Search error: {e}"}
 
     keyword_ids = set(merged.keys())
