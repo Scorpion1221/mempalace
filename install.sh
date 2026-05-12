@@ -60,14 +60,17 @@ ensure_runtime() {
 }
 
 write_runtime_manifest() {
+  (
+  cd /
   "$RUNTIME_PYTHON" - <<PY
+import importlib.metadata as md
 import json, sysconfig
 from pathlib import Path
 import mempalace
 scripts = Path(sysconfig.get_path('scripts')).resolve()
 manifest = {
-    "version": mempalace.__version__,
-    "python": str(Path("$RUNTIME_PYTHON").resolve()),
+    "version": md.version("mempalace"),
+    "python": str(Path("$RUNTIME_PYTHON").expanduser()),
     "scripts_dir": str(scripts),
     "mcp": str((scripts / "mempalace-mcp").resolve()),
     "bridge": str((scripts / "mempalace-mcp-bridge").resolve()),
@@ -77,6 +80,7 @@ path.parent.mkdir(parents=True, exist_ok=True)
 path.write_text(json.dumps(manifest, indent=2) + "\n")
 print(path)
 PY
+  )
 }
 
 # ─── Parse args ───
@@ -161,7 +165,7 @@ else
   info "Installing Python package from local checkout snapshot into $RUNTIME_DIR..."
   "${RUNTIME_PIP[@]}" install -q --force-reinstall --no-deps "$REPO_DIR"
 fi
-ok "Python package installed: $($RUNTIME_PYTHON -c 'import mempalace, mempalace.version; print(f"v{mempalace.version.__version__} ({mempalace.__file__})")')"
+ok "Python package installed: $(cd / && $RUNTIME_PYTHON -c 'import importlib.metadata as md, mempalace; print("v%s (%s)" % (md.version("mempalace"), mempalace.__file__))')"
 MANIFEST_PATH="$(write_runtime_manifest)"
 ok "Runtime manifest written: $MANIFEST_PATH"
 
@@ -273,7 +277,7 @@ echo "════════════════════════�
 echo ""
 echo "  Palace:    ~/.mempalace/"
 echo "  Runtime:   $RUNTIME_DIR"
-echo "  Package:   $($RUNTIME_PYTHON -c 'import mempalace; print(mempalace.__file__)')"
+echo "  Package:   $(cd / && $RUNTIME_PYTHON -c 'import mempalace; print(mempalace.__file__)')"
 echo "  CLI:       $(command -v mempalace 2>/dev/null || echo 'not on PATH')"
 echo "  MCP:       $(command -v mempalace-mcp 2>/dev/null || echo 'not on PATH')"
 echo "  Bridge:    $(command -v mempalace-mcp-bridge 2>/dev/null || echo 'not on PATH')"

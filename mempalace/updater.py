@@ -87,8 +87,8 @@ def _commits_behind_ahead(repo: Path) -> tuple:
 def _runtime_python() -> Path:
     env = os.environ.get("MEMPAL_RUNTIME_PYTHON", "")
     if env:
-        return Path(env).expanduser().resolve()
-    return (DEFAULT_RUNTIME_DIR / "bin" / "python3").resolve()
+        return Path(env).expanduser()
+    return DEFAULT_RUNTIME_DIR / "bin" / "python3"
 
 
 def _runtime_package_version(runtime_python: Path) -> str | None:
@@ -96,10 +96,22 @@ def _runtime_package_version(runtime_python: Path) -> str | None:
         return None
     try:
         result = subprocess.run(
-            [str(runtime_python), "-c", "import mempalace; print(mempalace.__version__)"],
+            [
+                str(runtime_python),
+                "-c",
+                (
+                    "import importlib.metadata as md\n"
+                    "try:\n"
+                    "    print(md.version('mempalace'))\n"
+                    "except md.PackageNotFoundError:\n"
+                    "    import mempalace\n"
+                    "    print(mempalace.__version__)\n"
+                ),
+            ],
             capture_output=True,
             text=True,
             check=False,
+            cwd="/",
         )
     except OSError:
         return None
@@ -156,7 +168,16 @@ def check(repo: Path | None = None):
         markers = {n: _AGENT_MARKERS[n][0] for n in will_skip}
         print("Will skip: " + ", ".join(f"{n} (no {markers[n]})" for n in will_skip))
 
-    if behind == 0:
+    runtime_stale = runtime_version != __version__
+    if behind == 0 and runtime_stale:
+        if runtime_version:
+            print(
+                f"\nRuntime package is stale: source is {__version__}, runtime is {runtime_version}."
+            )
+        else:
+            print(f"\nRuntime package is missing or unreadable; source is {__version__}.")
+        print("Run `mempalace update --no-pull` to reinstall from this checkout and sync plugins.")
+    elif behind == 0:
         print("\nAlready up to date.")
     elif not clean:
         print("\nWorking tree is dirty — commit or stash before running `mempalace update`.")

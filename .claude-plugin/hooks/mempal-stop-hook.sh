@@ -15,23 +15,60 @@ export MEMPAL_LLM_MODEL="${MEMPAL_LLM_MODEL:-${MEMPAL_RECALL_MODEL:-gemini-3.1-f
 export MEMPAL_LLM_KEY="${MEMPAL_LLM_KEY:-${MEMPAL_RECALL_KEY:-sk-litellm-local}}"
 # All logic lives in mempalace.hooks_cli for cross-harness extensibility
 run_mempalace_hook() {
-  if command -v mempalace >/dev/null 2>&1; then
-    mempalace hook run "$@"
-    return $?
-  fi
+  _try_mempalace_cli() {
+    local cli="$1"
+    shift
+    if [ -z "$cli" ]; then
+      return 1
+    fi
+    if [[ "$cli" == */* ]]; then
+      [ -x "$cli" ] || return 1
+    else
+      command -v "$cli" >/dev/null 2>&1 || return 1
+    fi
 
-  if command -v python3 >/dev/null 2>&1 && python3 -c "import mempalace" >/dev/null 2>&1; then
-    python3 -m mempalace hook run "$@"
-    return $?
-  fi
+    local output status
+    if output="$($cli hook run "$@" 2>&1)"; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+    status=$?
+    # argparse exits 2 for stale CLIs that do not know a newly added hook.
+    # Continue to the Python/runtime fallback instead of blocking the host app.
+    if [ "$status" -eq 2 ]; then
+      return 1
+    fi
+    printf '%s\n' "$output" >&2
+    return "$status"
+  }
 
-  if command -v python >/dev/null 2>&1 && python -c "import mempalace" >/dev/null 2>&1; then
-    python -m mempalace hook run "$@"
-    return $?
-  fi
+  _try_python_runner() {
+    local py="$1"
+    shift
+    if [ -z "$py" ]; then
+      return 1
+    fi
+    if [[ "$py" == */* ]]; then
+      [ -x "$py" ] || return 1
+    else
+      command -v "$py" >/dev/null 2>&1 || return 1
+    fi
+    if "$py" -c "import mempalace" >/dev/null 2>&1; then
+      "$py" -m mempalace hook run "$@"
+      return $?
+    fi
+    return 1
+  }
+
+  # GUI-launched agents often have a minimal PATH. Prefer the dedicated
+  # MemPalace runtime installed by install.sh/update before any PATH shim.
+  _try_mempalace_cli "${MEMPAL_RUNTIME_CLI:-$HOME/.mempalace/venv/bin/mempalace}" "$@" && return 0
+  _try_mempalace_cli mempalace "$@" && return 0
+  _try_python_runner "${MEMPAL_RUNTIME_PYTHON:-$HOME/.mempalace/venv/bin/python3}" "$@" && return 0
+  _try_python_runner python3 "$@" && return 0
+  _try_python_runner python "$@" && return 0
 
   echo "MemPalace hook error: could not find a runnable mempalace command or module" >&2
   return 1
 }
-
 run_mempalace_hook --hook stop --harness claude-code

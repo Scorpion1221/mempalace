@@ -17,6 +17,11 @@ pytestmark = pytest.mark.skipif(
 )
 
 SCRIPT_CASES = [
+    ("mempal-userprompt-hook.sh", "userprompt"),
+    ("mempal-stop-hook.sh", "stop"),
+    ("mempal-precompact-hook.sh", "precompact"),
+]
+BLOCKING_SCRIPT_CASES = [
     ("mempal-stop-hook.sh", "stop"),
     ("mempal-precompact-hook.sh", "precompact"),
 ]
@@ -57,6 +62,7 @@ def _run_hook(
     assert BASH is not None
 
     env = os.environ.copy()
+    env["HOME"] = str(bin_dir.parent)
     env["PATH"] = str(bin_dir)
 
     return subprocess.run(
@@ -67,6 +73,53 @@ def _run_hook(
         cwd=REPO_ROOT,
         env=env,
     )
+
+
+@pytest.mark.parametrize(("script_name", "hook_name"), SCRIPT_CASES)
+def test_plugin_hook_wrapper_prefers_dedicated_runtime_before_stale_path_cli(
+    tmp_path: Path, script_name: str, hook_name: str
+) -> None:
+    runtime_args_file = tmp_path / "runtime_args.txt"
+    runtime_stdin_file = tmp_path / "runtime_stdin.json"
+    stale_used_file = tmp_path / "stale_used.txt"
+
+    runtime_bin = tmp_path / ".mempalace" / "venv" / "bin"
+    runtime_bin.mkdir(parents=True)
+    _write_executable(
+        runtime_bin / "mempalace",
+        (
+            "#!/bin/sh\n"
+            f'printf \'%s\' "$*" > "{_shell_path(runtime_args_file)}"\n'
+            f"{_capture_stdin_to(runtime_stdin_file)}"
+            "printf '{}\\n'\n"
+        ),
+    )
+
+    bin_dir = _make_bin_dir(
+        tmp_path,
+        {
+            "mempalace": (
+                "#!/bin/sh\n"
+                f"printf 'used' > \"{_shell_path(stale_used_file)}\"\n"
+                'echo "stale mempalace should not be used" >&2\n'
+                "exit 42\n"
+            ),
+            "python": "#!/bin/sh\nexit 99\n",
+            "python3": "#!/bin/sh\nexit 99\n",
+        },
+    )
+
+    payload = '{"session_id":"runtime-first"}'
+    result = _run_hook(script_name, payload, bin_dir)
+
+    assert result.returncode == 0
+    assert result.stdout == "{}\n"
+    assert (
+        runtime_args_file.read_text(encoding="utf-8")
+        == f"hook run --hook {hook_name} --harness claude-code"
+    )
+    assert runtime_stdin_file.read_text(encoding="utf-8") == payload
+    assert not stale_used_file.exists()
 
 
 @pytest.mark.parametrize(("script_name", "hook_name"), SCRIPT_CASES)
@@ -133,7 +186,7 @@ def test_plugin_hook_wrapper_falls_back_to_importable_python(
     assert stdin_file.read_text(encoding="utf-8") == payload
 
 
-@pytest.mark.parametrize(("script_name", "hook_name"), SCRIPT_CASES)
+@pytest.mark.parametrize(("script_name", "hook_name"), BLOCKING_SCRIPT_CASES)
 def test_plugin_hook_wrapper_errors_cleanly_when_no_runner_exists(
     tmp_path: Path, script_name: str, hook_name: str
 ) -> None:
@@ -145,6 +198,19 @@ def test_plugin_hook_wrapper_errors_cleanly_when_no_runner_exists(
     assert result.returncode != 0
     assert result.stdout == ""
     assert "could not find a runnable mempalace command or module" in result.stderr
+
+
+def test_userprompt_hook_wrapper_returns_empty_context_when_no_runner_exists(
+    tmp_path: Path,
+) -> None:
+    bin_dir = _make_bin_dir(tmp_path, {})
+
+    payload = '{"session_id":"no-runner"}'
+    result = _run_hook("mempal-userprompt-hook.sh", payload, bin_dir)
+
+    assert result.returncode == 0
+    assert result.stdout == "{}\n"
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize(("script_name", "hook_name"), SCRIPT_CASES)

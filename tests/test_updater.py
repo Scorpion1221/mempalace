@@ -1,12 +1,14 @@
 """Tests for mempalace.updater — self-update command."""
 
 import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from mempalace import updater
+from mempalace.version import __version__
 
 
 def _make_fake_repo(tmp_path: Path) -> Path:
@@ -112,13 +114,13 @@ def test_check_does_not_modify(tmp_path, capsys):
     with patch.object(updater, "_find_repo", return_value=repo):
         with patch.object(updater, "_commits_behind_ahead", return_value=(0, 0)):
             with patch.object(updater, "_resolved_cli_path", return_value="/tmp/fake-mempalace"):
-                with patch.object(updater, "_runtime_package_version", return_value="3.3.311"):
+                with patch.object(updater, "_runtime_package_version", return_value=__version__):
                     updater.check(repo=repo)
     out = capsys.readouterr().out
     assert "Already up to date" in out
     assert "CLI on PATH:" in out
     assert "/tmp/fake-mempalace" in out
-    assert "Runtime version: 3.3.311" in out
+    assert f"Runtime version: {__version__}" in out
     assert updater._is_clean(repo) is True
 
 
@@ -133,6 +135,43 @@ def test_detect_agents_returns_dict():
 def test_runtime_package_version_none_when_missing():
     missing = Path("/tmp/definitely-not-a-real-mempal-runtime-python")
     assert updater._runtime_package_version(missing) is None
+
+
+def test_runtime_python_preserves_venv_symlink_path(tmp_path, monkeypatch):
+    runtime = tmp_path / "runtime"
+    bin_dir = runtime / "bin"
+    bin_dir.mkdir(parents=True)
+    logical_python = bin_dir / "python3"
+    logical_python.symlink_to(Path(sys.executable))
+
+    monkeypatch.delenv("MEMPAL_RUNTIME_PYTHON", raising=False)
+    with patch.object(updater, "DEFAULT_RUNTIME_DIR", runtime):
+        assert updater._runtime_python() == logical_python
+
+
+def test_runtime_package_version_ignores_current_working_tree_shadow(tmp_path, monkeypatch):
+    fake_source = tmp_path / "mempalace"
+    fake_source.mkdir()
+    (fake_source / "__init__.py").write_text('__version__ = "9.9.9-shadow"\n')
+
+    monkeypatch.chdir(tmp_path)
+
+    assert updater._runtime_package_version(Path(sys.executable)) == __version__
+
+
+def test_check_warns_when_repo_current_but_runtime_stale(tmp_path, capsys):
+    repo = _make_fake_repo(tmp_path)
+    with (
+        patch.object(updater, "_find_repo", return_value=repo),
+        patch.object(updater, "_commits_behind_ahead", return_value=(0, 0)),
+        patch.object(updater, "_resolved_cli_path", return_value="/tmp/fake-mempalace"),
+        patch.object(updater, "_runtime_package_version", return_value="3.3.405"),
+    ):
+        updater.check(repo=repo)
+    out = capsys.readouterr().out
+    assert "Runtime package is stale" in out
+    assert f"source is {__version__}, runtime is 3.3.405" in out
+    assert "mempalace update --no-pull" in out
 
 
 def test_check_flags_drift_when_cli_resolves_elsewhere(tmp_path, capsys):
