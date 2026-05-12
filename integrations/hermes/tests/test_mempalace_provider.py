@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 import json
 import warnings
 from pathlib import Path
@@ -691,6 +692,50 @@ def test_sync_turn_caches_previous_assistant_reply_for_session(tmp_path: Path) -
     cache_files = list(cache_dir.glob("*_last_assistant.txt"))
     assert len(cache_files) == 1
     assert cache_files[0].read_text(encoding="utf-8") == "Real assistant reply"
+    provider.shutdown()
+
+
+def test_on_session_end_suppresses_auto_diary_keyboard_interrupt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Ctrl-C during best-effort shutdown diary write must not print a traceback."""
+    provider = _provider(tmp_path / "profile")
+    provider.on_turn_start(0, "first topic", session_id="session-1")
+
+    class InterruptingCollection:
+        def upsert(self, **kwargs):
+            raise KeyboardInterrupt()
+
+    monkeypatch.setattr(
+        provider,
+        "_get_collection",
+        lambda *, create: InterruptingCollection(),
+    )
+
+    messages = [
+        {"role": "user", "content": "first topic with enough text"},
+        {"role": "assistant", "content": "assistant reply with enough text to count"},
+        {"role": "user", "content": "second topic with enough text"},
+        {"role": "assistant", "content": "another assistant reply with enough text"},
+        {"role": "user", "content": "third topic with enough text"},
+    ]
+
+    provider.on_session_end(messages)
+
+    assert "session-1" not in provider._sessions
+
+
+def test_flush_session_suppresses_keyboard_interrupt_from_pending_write(tmp_path: Path) -> None:
+    """A worker interrupted by Ctrl-C should not bubble through Hermes cleanup."""
+    provider = _provider(tmp_path / "profile")
+    provider.on_turn_start(0, "why?", session_id="session-1")
+    future: Future[int] = Future()
+    future.set_exception(KeyboardInterrupt())
+    provider._sessions["session-1"].pending_write_futures.append(future)
+
+    provider._flush_session("session-1")
+
+    assert provider._sessions["session-1"].pending_write_futures == []
     provider.shutdown()
 
 

@@ -1211,6 +1211,10 @@ class MemPalaceMemoryProvider(MemoryProvider):
             if has_pending:
                 try:
                     self._async_llm_save_recent_turns(state, "session_end")
+                except KeyboardInterrupt:  # pragma: no cover - exercised by shutdown path.
+                    logger.info(
+                        "hermes-llm-save: final flush interrupted during shutdown; skipping"
+                    )
                 except Exception as exc:  # pragma: no cover - best-effort
                     logger.warning("hermes-llm-save: final flush failed: %s", exc)
 
@@ -1218,10 +1222,15 @@ class MemPalaceMemoryProvider(MemoryProvider):
         if state and state.allow_writes and messages and len(messages) > 2:
             try:
                 self._auto_diary(state, messages)
+            except KeyboardInterrupt:
+                logger.info("auto-diary interrupted during shutdown; skipping")
             except Exception as exc:  # pragma: no cover - best-effort
                 logger.debug("auto-diary failed: %s", exc)
 
-        self._flush_session(session_id)
+        try:
+            self._flush_session(session_id)
+        except KeyboardInterrupt:  # pragma: no cover - defensive belt-and-suspenders.
+            logger.info("MemPalace shutdown interrupted while flushing pending writes")
         self._clear_assistant_cache(session_id)
         with self._sessions_lock:
             self._sessions.pop(session_id, None)
@@ -1498,6 +1507,8 @@ class MemPalaceMemoryProvider(MemoryProvider):
             )
             state.filed_count += 1
             logger.info("auto-diary: %s → %s", drawer_id, entry[:120])
+        except KeyboardInterrupt:
+            logger.info("auto-diary upsert interrupted; skipping diary write")
         except Exception as exc:  # pragma: no cover
             logger.warning("auto-diary upsert failed: %s", exc)
 
@@ -1556,8 +1567,16 @@ class MemPalaceMemoryProvider(MemoryProvider):
 
     def shutdown(self) -> None:
         for session_id in list(self._sessions):
-            self._flush_session(session_id)
-        self._executor.shutdown(wait=True, cancel_futures=False)
+            try:
+                self._flush_session(session_id)
+            except KeyboardInterrupt:
+                logger.info("MemPalace shutdown interrupted while flushing %s", session_id)
+                break
+        try:
+            self._executor.shutdown(wait=True, cancel_futures=False)
+        except KeyboardInterrupt:
+            logger.info("MemPalace executor shutdown interrupted; canceling queued writes")
+            self._executor.shutdown(wait=False, cancel_futures=True)
         # Drop our cached reference to the shared backend's clients — but do
         # NOT call _palace_backend.close(). close() permanently disables the
         # backend, which is wrong when the host process may have other
@@ -2984,11 +3003,22 @@ class MemPalaceMemoryProvider(MemoryProvider):
         if prefetch_future is not None:
             try:
                 prefetch_future.result(timeout=10)
+            except KeyboardInterrupt:
+                prefetch_future.cancel()
+                logger.info("Prefetch flush interrupted for %s", session_id)
+                return
             except Exception as exc:  # pragma: no cover - defensive logging.
                 logger.debug("Ignoring prefetch shutdown failure for %s: %s", session_id, exc)
         for future in futures:
             try:
                 future.result(timeout=10)
+            except KeyboardInterrupt:
+                future.cancel()
+                logger.info(
+                    "Write flush interrupted for %s; leaving remaining writes best-effort",
+                    session_id,
+                )
+                return
             except Exception as exc:  # pragma: no cover - defensive logging.
                 logger.warning("Write flush failed for %s: %s", session_id, exc)
 
