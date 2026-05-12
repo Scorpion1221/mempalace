@@ -23,6 +23,7 @@ import pytest
 from mempalace.health import (
     HealthIssue,
     HealthReport,
+    _check_filtered_vector_query,
     check_palace_health,
     quarantine_corrupt_segments,
 )
@@ -129,6 +130,35 @@ def test_health_detects_count_mismatch(tmp_path):
     assert report.status == "corrupt"
     codes = {i.code for i in report.issues}
     assert "drawer_verbatim_mismatch" in codes
+
+
+def test_health_detects_filtered_vector_query_id_lookup_failure(tmp_path, monkeypatch):
+    """A count-clean palace can still have a broken HNSW id map for filtered queries."""
+    palace = tmp_path / "filtered_query_broken"
+    _seed_palace(palace, drawers=2)
+
+    class BrokenCollection:
+        def query(self, **kwargs):
+            assert kwargs["query_embeddings"]
+            assert kwargs["where"] == {"wing": "test"}
+            raise RuntimeError("Error executing plan: Internal error: Error finding id")
+
+    class BrokenClient:
+        def __init__(self, path):
+            assert Path(path) == palace
+
+        def get_collection(self, name):
+            assert name == "mempalace_drawers"
+            return BrokenCollection()
+
+    monkeypatch.setattr(chromadb, "PersistentClient", BrokenClient)
+
+    issues = _check_filtered_vector_query(palace, sqlite_count=2)
+
+    assert len(issues) == 1
+    assert issues[0].severity == "corrupt"
+    assert issues[0].code == "hnsw_filtered_query_failed"
+    assert "Error finding id" in issues[0].message
 
 
 # ── 3. SQLite garbage -> integrity false ──────────────────────────────

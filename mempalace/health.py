@@ -485,6 +485,136 @@ def _drawer_count_from_hnsw(palace_path: Path) -> tuple[int | None, list[HealthI
         del client
 
 
+def _probe_filter_from_sqlite(db_path: Path) -> tuple[int, str, str] | None:
+    """Return ``(dimension, key, value)`` for a real filterable drawer row.
+
+    Chroma's filtered vector query path can be broken even when
+    ``collection.count()`` is fine: metadata prefiltering hands an allowed-id
+    set to HNSW, and a stale HNSW id map raises ``Error finding id`` only on
+    that path.  The probe must therefore use a metadata value that definitely
+    exists in SQLite.
+    """
+    if not db_path.is_file():
+        return None
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+            row = conn.execute(
+                """
+                SELECT c.dimension, m.key, m.string_value
+                  FROM embedding_metadata AS m
+                  JOIN embeddings AS e ON e.id = m.id
+                  JOIN segments AS s ON s.id = e.segment_id
+                  JOIN collections AS c ON c.id = s.collection
+                 WHERE c.name = ?
+                   AND m.string_value IS NOT NULL
+                   AND m.key IN ('wing', 'room', 'hall', 'agent', 'type')
+                 ORDER BY CASE m.key
+                            WHEN 'wing' THEN 0
+                            WHEN 'room' THEN 1
+                            WHEN 'hall' THEN 2
+                            WHEN 'agent' THEN 3
+                            ELSE 4
+                          END
+                 LIMIT 1
+                """,
+                (DRAWERS_COLLECTION,),
+            ).fetchone()
+    except (sqlite3.DatabaseError, OSError):
+        return None
+
+    if not row or row[0] is None or not row[1] or row[2] is None:
+        return None
+    try:
+        dimension = int(row[0])
+    except (TypeError, ValueError):
+        return None
+    if dimension <= 0:
+        return None
+    return dimension, str(row[1]), str(row[2])
+
+
+def _check_filtered_vector_query(
+    palace_path: Path,
+    *,
+    sqlite_count: int | None,
+) -> list[HealthIssue]:
+    """Probe Chroma's metadata-prefiltered vector query path.
+
+    ``collection.count()`` only proves Chroma can open the collection.  The
+    user-reported failure mode has a stale HNSW id map: unfiltered queries can
+    work, while filtered queries fail with ``Error finding id``.  Doctor must
+    catch that as corruption so operators rebuild the index instead of relying
+    on BM25 fallback forever.
+    """
+    issues: list[HealthIssue] = []
+    if sqlite_count is not None and sqlite_count <= 0:
+        return issues
+
+    probe = _probe_filter_from_sqlite(palace_path / "chroma.sqlite3")
+    if probe is None:
+        return issues
+    dimension, key, value = probe
+
+    try:
+        import chromadb
+    except ImportError as exc:
+        issues.append(
+            HealthIssue(
+                severity="warn",
+                code="chromadb_unavailable",
+                message=f"chromadb not importable for filtered vector probe: {exc}",
+                detail={"error": str(exc)},
+            )
+        )
+        return issues
+
+    client = None
+    try:
+        client = chromadb.PersistentClient(path=str(palace_path))
+        collection = client.get_collection(DRAWERS_COLLECTION)
+        # Use a caller-provided vector to avoid invoking any embedding model.
+        # Non-zero first coordinate avoids cosine zero-vector edge cases while
+        # still being deterministic and content-free.
+        vector = [1.0] + [0.0] * (dimension - 1)
+        result = collection.query(
+            query_embeddings=[vector],
+            n_results=1,
+            where={key: value},
+            include=["metadatas"],
+        )
+        ids = result.get("ids") or []
+        if not ids or not ids[0]:
+            issues.append(
+                HealthIssue(
+                    severity="corrupt",
+                    code="hnsw_filtered_query_empty",
+                    message=(
+                        "filtered vector query returned no ids for a metadata "
+                        f"value that exists in sqlite ({key}={value!r})"
+                    ),
+                    detail={"filter_key": key, "filter_value": value},
+                )
+            )
+    except Exception as exc:  # broad: chromadb raises many exception classes
+        issues.append(
+            HealthIssue(
+                severity="corrupt",
+                code="hnsw_filtered_query_failed",
+                message=f"filtered vector query raised: {exc}",
+                detail={
+                    "palace_path": str(palace_path),
+                    "filter_key": key,
+                    "filter_value": value,
+                    "error": str(exc),
+                },
+            )
+        )
+    finally:
+        if client is not None:
+            del client
+    return issues
+
+
 def _check_segment_files(palace_path: Path) -> list[HealthIssue]:
     """Verify each HNSW segment dir has its expected files non-empty.
 
@@ -628,6 +758,8 @@ def check_palace_health(palace_path: str | Path) -> HealthReport:
     if sqlite_count is None or sqlite_count > 0:
         hnsw_count, hnsw_issues = _drawer_count_from_hnsw(palace_path_p)
         issues.extend(hnsw_issues)
+        if hnsw_count is not None:
+            issues.extend(_check_filtered_vector_query(palace_path_p, sqlite_count=sqlite_count))
     else:
         hnsw_count = 0
 
