@@ -281,7 +281,7 @@ else
     # Merge mempalace's hook entries into ~/.codex/hooks.json (USER-LEVEL).
     # Codex reads user-level hooks from ~/.codex/hooks.json with absolute
     # paths; the plugin-local hooks.json is not enough on its own. Without
-    # this merge, codex_hooks=true and the plugin being registered still
+    # this merge, hooks=true and the plugin being registered still
     # leaves the UserPromptSubmit/SessionStart/Stop hooks unfired.
     #
     # Merge semantics:
@@ -425,23 +425,37 @@ if not re.search(r'^\[shell_environment_policy\.set\]', content, re.MULTILINE):
             content += f'{v} = "{val}"\n'
     print("  → bootstrapped [shell_environment_policy.set] block (populated)")
 
-# 0d. [features].codex_hooks = true — Codex's hooks are gated behind this
-#     feature flag. Without it, the hooks.json events (UserPromptSubmit,
-#     SessionStart, Stop) won't fire even though hooks.json is on disk.
-#     Idempotent: only adds if not already mentioned (preserves an explicit
-#     `codex_hooks = false` if a user has intentionally disabled it).
+# 0d. [features].hooks = true — Codex's hooks are gated behind this feature
+#     flag. Without it, the hooks.json events (UserPromptSubmit, SessionStart,
+#     Stop) won't fire even though hooks.json is on disk.
+#
+#     Older Codex versions used `[features].codex_hooks`; current Codex warns
+#     that this key is deprecated. Migrate old configs by preserving the old
+#     boolean value under `hooks` when `hooks` is absent, then remove
+#     `codex_hooks` so startup stays warning-free. If there is no hook flag at
+#     all, enable `hooks = true` for MemPalace.
 features_match = re.search(r'^\[features\]([^\[]*)', content, re.MULTILINE | re.DOTALL)
 if features_match:
-    if not re.search(r'^\s*codex_hooks\s*=', features_match.group(1), re.MULTILINE):
-        body = features_match.group(1).rstrip("\n")
-        new_body = body + "\ncodex_hooks = true\n\n"
-        content = content[:features_match.start(1)] + new_body + content[features_match.end(1):]
-        print("  → added codex_hooks = true to existing [features] block")
+    body = features_match.group(1)
+    old_match = re.search(r'^[ \t]*codex_hooks[ \t]*=[ \t]*(true|false)[ \t]*(?:#.*)?$', body, re.MULTILINE)
+    hooks_match = re.search(r'^[ \t]*hooks[ \t]*=', body, re.MULTILINE)
+    if old_match and not hooks_match:
+        body = body.rstrip("\n") + f"\nhooks = {old_match.group(1)}\n"
+        print(f"  → migrated deprecated codex_hooks to hooks = {old_match.group(1)}")
+    elif not hooks_match:
+        body = body.rstrip("\n") + "\nhooks = true\n"
+        print("  → added hooks = true to existing [features] block")
+
+    if old_match:
+        body = re.sub(r'^[ \t]*codex_hooks[ \t]*=[ \t]*(?:true|false)[ \t]*(?:#.*)?\n?', "", body, flags=re.MULTILINE)
+
+    new_body = body.rstrip("\n") + "\n\n"
+    content = content[:features_match.start(1)] + new_body + content[features_match.end(1):]
 else:
     if content and not content.endswith("\n"):
         content += "\n"
-    content += "\n[features]\ncodex_hooks = true\n"
-    print("  → bootstrapped [features] block with codex_hooks = true")
+    content += "\n[features]\nhooks = true\n"
+    print("  → bootstrapped [features] block with hooks = true")
 
 # 0e. [mcp_servers.mempalace].command — force bridge-first for existing blocks.
 #     Users that installed under the previous stdio-only model still have

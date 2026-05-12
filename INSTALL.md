@@ -130,7 +130,7 @@ bash install.sh --all --singleton --dev
 | Hooks | `~/.codex/hooks.json` |
 | Env sync target | `~/.codex/config.toml` → `[mcp_servers.mempalace].env` + `[shell_environment_policy.set]` |
 | Skills | `~/.codex/vendor_imports/skills/skills/.curated/mempalace-*` |
-| Feature flag | `[features] codex_hooks = true` |
+| Feature flag | `[features] hooks = true` |
 
 ### Cursor IDE
 
