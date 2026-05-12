@@ -18,6 +18,50 @@ export MEMPAL_LLM_MODEL="${MEMPAL_LLM_MODEL:-${MEMPAL_RECALL_MODEL:-gemini-3.1-f
 export MEMPAL_LLM_KEY="${MEMPAL_LLM_KEY:-${MEMPAL_RECALL_KEY:-sk-litellm-local}}"
 
 run_mempalace_hook() {
+  _cleanup_stderr_file() {
+    local file="${1:-}"
+    [ -n "$file" ] || return 0
+    /bin/rm -f "$file" 2>/dev/null || :
+  }
+
+  _emit_file_to_stderr() {
+    local file="${1:-}"
+    [ -n "$file" ] || return 0
+    [ -s "$file" ] || return 0
+    while IFS= read -r line || [ -n "$line" ]; do
+      printf '%s\n' "$line" >&2
+    done < "$file"
+  }
+
+  _run_with_clean_stdout() {
+    local suppress_status2="$1"
+    shift
+    local output status stderr_file
+    stderr_file="${TMPDIR:-/tmp}/mempalace-hook-stderr.$$.$RANDOM"
+    : > "$stderr_file" || return 1
+
+    if output="$("$@" 2>"$stderr_file")"; then
+      printf '%s\n' "$output"
+      _cleanup_stderr_file "$stderr_file"
+      return 0
+    fi
+
+    status=$?
+    # argparse exits 2 for stale CLIs that do not know a newly added hook.
+    # Continue to the Python/runtime fallback instead of blocking the host app.
+    if [ "$suppress_status2" = "yes" ] && [ "$status" -eq 2 ]; then
+      _cleanup_stderr_file "$stderr_file"
+      return 1
+    fi
+
+    _emit_file_to_stderr "$stderr_file"
+    if [ -n "$output" ]; then
+      printf '%s\n' "$output" >&2
+    fi
+    _cleanup_stderr_file "$stderr_file"
+    return "$status"
+  }
+
   _try_mempalace_cli() {
     local cli="$1"
     shift
@@ -30,19 +74,7 @@ run_mempalace_hook() {
       command -v "$cli" >/dev/null 2>&1 || return 1
     fi
 
-    local output status
-    if output="$($cli hook run "$@" 2>&1)"; then
-      printf '%s\n' "$output"
-      return 0
-    fi
-    status=$?
-    # argparse exits 2 for stale CLIs that do not know a newly added hook.
-    # Continue to the Python/runtime fallback instead of blocking the host app.
-    if [ "$status" -eq 2 ]; then
-      return 1
-    fi
-    printf '%s\n' "$output" >&2
-    return "$status"
+    _run_with_clean_stdout yes "$cli" hook run "$@"
   }
 
   _try_python_runner() {
@@ -57,7 +89,7 @@ run_mempalace_hook() {
       command -v "$py" >/dev/null 2>&1 || return 1
     fi
     if "$py" -c "import mempalace" >/dev/null 2>&1; then
-      "$py" -m mempalace hook run "$@"
+      _run_with_clean_stdout no "$py" -m mempalace hook run "$@"
       return $?
     fi
     return 1

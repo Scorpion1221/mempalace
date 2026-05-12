@@ -300,6 +300,13 @@ def _search_via_mcp_socket(query, wing=None, n_results=5, max_distance=0.0, pref
         return None
 
 
+def _is_degraded_search_result(result) -> bool:
+    """True when search degraded to a fallback path unsuitable for hook injection."""
+    return isinstance(result, dict) and (
+        bool(result.get("fallback")) or bool(result.get("vector_disabled"))
+    )
+
+
 def _sanitize_session_id(session_id: str) -> str:
     """Only allow alnum, dash, underscore to prevent path traversal."""
     sanitized = re.sub(r"[^a-zA-Z0-9_-]", "", session_id)
@@ -2747,6 +2754,15 @@ def hook_userprompt(data: dict, harness: str):  # noqa: C901
             _log(f"WARNING: search_memories failed: {e}")
             _output({})
             return
+
+    if _is_degraded_search_result(result):
+        _log(
+            "UserPrompt recall: search degraded "
+            f"(fallback={result.get('fallback')!r}, vector_disabled={result.get('vector_disabled')!r}); "
+            "returning empty recall"
+        )
+        _output({})
+        return
 
     # Distinguish "no results" from "search error" (e.g. embedding failure)
     if isinstance(result, dict) and "error" in result:

@@ -84,21 +84,15 @@ class TestSearchMemories:
         assert "error" in result
         assert "query failed" in result["error"]
 
-    def test_search_memories_falls_back_to_bm25_sqlite_on_vector_index_error(self):
-        """Chroma HNSW id lookup failures should degrade to sqlite BM25 search."""
+    def test_search_memories_reports_vector_index_error_without_bm25_fallback(self):
+        """Chroma HNSW id lookup failures should not inject sqlite fallback results."""
         mock_col = MagicMock()
         mock_col.query.side_effect = RuntimeError(
             "Error executing plan: Internal error: Error finding id"
         )
-        fallback = {
-            "query": "test",
-            "filters": {"wing": "project", "room": "ops", "hall": None, "after": None},
-            "results": [{"text": "fallback hit", "wing": "project", "room": "ops"}],
-            "fallback": "bm25_only_via_sqlite",
-        }
 
         with patch("mempalace.searcher.get_collection", return_value=mock_col):
-            with patch("mempalace.searcher._bm25_only_via_sqlite", return_value=fallback) as bm25:
+            with patch("mempalace.searcher._bm25_only_via_sqlite") as bm25:
                 result = search_memories(
                     "test",
                     "/fake/path",
@@ -107,19 +101,10 @@ class TestSearchMemories:
                     collection_name="custom_drawers",
                 )
 
-        assert result["fallback"] == "bm25_only_via_sqlite"
-        assert result["results"][0]["text"] == "fallback hit"
-        assert result["fallback_reason"].startswith("vector_query_error:")
-        bm25.assert_called_once_with(
-            "test",
-            "/fake/path",
-            wing="project",
-            room="ops",
-            hall=None,
-            after=None,
-            n_results=5,
-            collection_name="custom_drawers",
-        )
+        assert "error" in result
+        assert "Error finding id" in result["error"]
+        assert "results" not in result
+        bm25.assert_not_called()
 
     def test_search_memories_vector_path_uses_explicit_collection_name(self):
         mock_col = MagicMock()
@@ -318,38 +303,18 @@ class TestSearchCLI:
             with pytest.raises(SearchError, match="Search error"):
                 search("test", "/fake/path")
 
-    def test_search_cli_falls_back_to_bm25_sqlite_on_vector_index_error(self, capsys):
-        """CLI search should stay usable when Chroma vector query cannot resolve ids."""
+    def test_search_cli_raises_on_vector_index_error_without_bm25_fallback(self):
+        """CLI search should surface vector corruption instead of hiding it behind BM25."""
         mock_col = MagicMock()
         mock_col.query.side_effect = RuntimeError(
             "Error executing plan: Internal error: Error finding id"
         )
-        fallback = {
-            "query": "test",
-            "filters": {"wing": "project", "room": "ops", "hall": None, "after": None},
-            "results": [
-                {
-                    "text": "fallback hit",
-                    "wing": "project",
-                    "room": "ops",
-                    "source_file": "?",
-                    "created_at": "unknown",
-                    "similarity": None,
-                    "distance": None,
-                    "bm25_score": 1.23,
-                    "matched_via": "bm25_sqlite",
-                }
-            ],
-            "fallback": "bm25_only_via_sqlite",
-        }
 
         with patch("mempalace.searcher.get_collection", return_value=mock_col):
-            with patch("mempalace.searcher._bm25_only_via_sqlite", return_value=fallback):
-                search("test", "/fake/path", wing="project", room="ops")
-
-        captured = capsys.readouterr()
-        assert "fallback hit" in captured.out
-        assert "BM25-only fallback" in captured.err
+            with patch("mempalace.searcher._bm25_only_via_sqlite") as bm25:
+                with pytest.raises(SearchError, match="Error finding id"):
+                    search("test", "/fake/path", wing="project", room="ops")
+        bm25.assert_not_called()
 
     def test_search_n_results(self, palace_path, seeded_collection, capsys):
         search("code", palace_path, n_results=1)

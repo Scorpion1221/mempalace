@@ -137,6 +137,16 @@ def test_output_additional_context_codex_matches_claude_code():
     assert json.loads(buf1.getvalue()) == json.loads(buf2.getvalue())
 
 
+def test_output_additional_context_hermes_matches_claude_code():
+    cm1, buf1 = _capture_output()
+    cm2, buf2 = _capture_output()
+    with cm1:
+        _output_additional_context("x", harness="claude-code", event="UserPromptSubmit")
+    with cm2:
+        _output_additional_context("x", harness="hermes", event="UserPromptSubmit")
+    assert json.loads(buf1.getvalue()) == json.loads(buf2.getvalue())
+
+
 # --- hook_session_start cursor branch ---
 
 

@@ -9,6 +9,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PLUGIN_HOOKS_DIR = REPO_ROOT / ".claude-plugin" / "hooks"
+CODEX_HOOKS_DIR = REPO_ROOT / ".codex-plugin" / "hooks"
 BASH = shutil.which("bash")
 
 pytestmark = pytest.mark.skipif(
@@ -67,6 +68,25 @@ def _run_hook(
 
     return subprocess.run(
         [BASH, _shell_path(PLUGIN_HOOKS_DIR / script_name)],
+        input=payload,
+        text=True,
+        capture_output=True,
+        cwd=REPO_ROOT,
+        env=env,
+    )
+
+
+def _run_codex_hook(
+    payload: str, bin_dir: Path, hook_name: str = "userprompt"
+) -> subprocess.CompletedProcess[str]:
+    assert BASH is not None
+
+    env = os.environ.copy()
+    env["HOME"] = str(bin_dir.parent)
+    env["PATH"] = str(bin_dir)
+
+    return subprocess.run(
+        [BASH, _shell_path(CODEX_HOOKS_DIR / "mempal-hook.sh"), hook_name],
         input=payload,
         text=True,
         capture_output=True,
@@ -153,6 +173,54 @@ def test_plugin_hook_wrapper_prefers_mempalace_cli(
         == f"hook run --hook {hook_name} --harness claude-code"
     )
     assert stdin_file.read_text(encoding="utf-8") == payload
+
+
+@pytest.mark.parametrize(("script_name", "hook_name"), SCRIPT_CASES)
+def test_plugin_hook_wrapper_keeps_success_stderr_out_of_stdout(
+    tmp_path: Path, script_name: str, hook_name: str
+) -> None:
+    """Hook stdout must remain parseable JSON even if the CLI logs to stderr."""
+    bin_dir = _make_bin_dir(
+        tmp_path,
+        {
+            "mempalace": (
+                "#!/bin/sh\n"
+                "echo 'No explicit tunnels found for mempalace/operations' >&2\n"
+                "printf '{\"continue\":true}\n'\n"
+            ),
+            "python": "#!/bin/sh\nexit 99\n",
+            "python3": "#!/bin/sh\nexit 99\n",
+        },
+    )
+
+    result = _run_hook(script_name, '{"session_id":"stderr-noise"}', bin_dir)
+
+    assert result.returncode == 0
+    assert result.stdout == '{"continue":true}\n'
+    assert "No explicit tunnels found" not in result.stdout
+    assert result.stderr == ""
+
+
+def test_codex_hook_wrapper_keeps_success_stderr_out_of_stdout(tmp_path: Path) -> None:
+    bin_dir = _make_bin_dir(
+        tmp_path,
+        {
+            "mempalace": (
+                "#!/bin/sh\n"
+                "echo 'No explicit tunnels found for mempalace/operations' >&2\n"
+                "printf '{\"continue\":true}\n'\n"
+            ),
+            "python": "#!/bin/sh\nexit 99\n",
+            "python3": "#!/bin/sh\nexit 99\n",
+        },
+    )
+
+    result = _run_codex_hook('{"session_id":"stderr-noise"}', bin_dir)
+
+    assert result.returncode == 0
+    assert result.stdout == '{"continue":true}\n'
+    assert "No explicit tunnels found" not in result.stdout
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize(("script_name", "hook_name"), SCRIPT_CASES)

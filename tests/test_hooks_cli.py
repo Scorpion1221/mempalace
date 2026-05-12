@@ -1037,6 +1037,38 @@ def test_userprompt_history_continue_can_still_recall(tmp_path):
     mock_search.assert_called_once()
 
 
+def test_userprompt_does_not_inject_degraded_fallback_results(tmp_path):
+    """Hook recall should fail closed: vector failure/fallback means no context injection."""
+    palace_dir = tmp_path / "palace"
+    palace_dir.mkdir()
+    fake_config = type("FakeConfig", (), {"palace_path": str(palace_dir)})()
+
+    def fake_search_memories(**kwargs):
+        return {
+            "fallback": "bm25_only_via_sqlite",
+            "fallback_reason": "vector_query_error: Error finding id",
+            "results": [
+                {"wing": "mempalace", "room": "operations", "text": "stale fallback noise"}
+            ],
+        }
+
+    with patch.dict("os.environ", {"MEMPAL_RECALL_LLM": "0"}, clear=False):
+        with patch("mempalace.hooks_cli.STATE_DIR", tmp_path):
+            with patch("mempalace.config.MempalaceConfig", return_value=fake_config):
+                with patch("mempalace.searcher.search_memories", side_effect=fake_search_memories):
+                    result = _capture_hook_output(
+                        hook_userprompt,
+                        {
+                            "session_id": "session-a",
+                            "prompt": "之前 mempalace update 怎么做",
+                            "cwd": "/tmp/project",
+                        },
+                        state_dir=tmp_path,
+                    )
+
+    assert result == {}
+
+
 # --- run_hook ---
 
 

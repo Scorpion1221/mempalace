@@ -781,6 +781,17 @@ def _truncate(text: str, limit: int = MAX_RECALL_SNIPPET_CHARS) -> str:
     return compact[: limit - 3].rstrip() + "..."
 
 
+def _is_degraded_search_result(result: Any) -> bool:
+    """Return True for fallback/vector-disabled search payloads.
+
+    Recall injection must fail closed when the vector search path is degraded:
+    otherwise stale BM25-only results can be injected into the active prompt.
+    """
+    return isinstance(result, dict) and (
+        bool(result.get("fallback")) or bool(result.get("vector_disabled"))
+    )
+
+
 def _tail_chars(text: str, limit: int) -> str:
     if not text or limit <= 0:
         return ""
@@ -2302,6 +2313,13 @@ class MemPalaceMemoryProvider(MemoryProvider):
             search_kwargs["hall"] = rewrite_filters["hall"]
 
         result = search_memories(**search_kwargs)
+        if _is_degraded_search_result(result):
+            logger.info(
+                "Recall: search degraded (fallback=%r, vector_disabled=%r); returning empty recall",
+                result.get("fallback"),
+                result.get("vector_disabled"),
+            )
+            return ""
         hits = result.get("results", []) if isinstance(result, dict) else []
 
         # Two-stage fallback when the filtered search returns 0 hits.
@@ -2328,6 +2346,14 @@ class MemPalaceMemoryProvider(MemoryProvider):
                     "after": time_after,
                 }
                 result = search_memories(**stage2_kwargs)
+                if _is_degraded_search_result(result):
+                    logger.info(
+                        "Recall: widened search degraded "
+                        "(fallback=%r, vector_disabled=%r); returning empty recall",
+                        result.get("fallback"),
+                        result.get("vector_disabled"),
+                    )
+                    return ""
                 hits = result.get("results", []) if isinstance(result, dict) else []
                 if not hits:
                     logger.info(
@@ -2358,6 +2384,14 @@ class MemPalaceMemoryProvider(MemoryProvider):
                     "after": time_after,
                 }
                 result = search_memories(**fallback_kwargs)
+                if _is_degraded_search_result(result):
+                    logger.info(
+                        "Recall: unfiltered retry degraded "
+                        "(fallback=%r, vector_disabled=%r); returning empty recall",
+                        result.get("fallback"),
+                        result.get("vector_disabled"),
+                    )
+                    return ""
                 hits = result.get("results", []) if isinstance(result, dict) else []
 
         # Note: diary entries are NOT filtered out (parity with

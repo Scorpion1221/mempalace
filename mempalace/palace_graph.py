@@ -675,7 +675,10 @@ def follow_tunnels(wing: str, room: str, col=None, config=None):
             )
 
     if not connections:
-        logger.warning("No explicit tunnels found for %s/%s", wing, room)
+        # Normal recall path: most rooms have no explicit tunnels. Keep this
+        # below WARNING so hook stderr/stdout never gets polluted with
+        # diagnostic chatter before the JSON hook response.
+        logger.debug("No explicit tunnels found for %s/%s", wing, room)
 
     # If we have a collection, fetch drawer content for connected items
     if col and connections:

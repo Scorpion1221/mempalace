@@ -35,6 +35,13 @@ for _var in (
 ):
     os.environ.pop(_var, None)
 
+# Keep the kill-switch explicitly on after clearing test-specific LLM
+# variables.  Developer machines may still have global provider credentials
+# such as ANTHROPIC_API_KEY or GOOGLE_APPLICATION_CREDENTIALS; without the
+# kill-switch, recall tests can unexpectedly invoke the real LLM stack and
+# rewrite/filter fixtures.
+os.environ["MEMPAL_LLM"] = "0"
+
 try:
     from mempalace.embedding import reset_cache
     from mempalace.palace import _reset_embedding_cache

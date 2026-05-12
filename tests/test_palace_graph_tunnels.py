@@ -491,6 +491,16 @@ class TestHyphenatedWingNormalization:
         assert len(by_under) == 1
         assert by_hyphen[0]["connected_wing"] == "wing_people"
 
+    def test_follow_tunnels_is_quiet_when_no_explicit_tunnels(self, tmp_path, monkeypatch, caplog):
+        """No explicit tunnel is normal for hook recall and must not pollute hook output."""
+        _use_tmp_tunnel_file(monkeypatch, tmp_path)
+
+        with caplog.at_level("WARNING", logger="mempalace_graph"):
+            result = palace_graph.follow_tunnels("mempalace", "operations")
+
+        assert result == []
+        assert "No explicit tunnels found" not in caplog.text
+
     def test_create_tunnel_normalizes_wing_names(self, tmp_path, monkeypatch):
         _use_tmp_tunnel_file(monkeypatch, tmp_path)
 

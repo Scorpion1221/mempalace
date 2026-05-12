@@ -723,6 +723,28 @@ def test_render_recall_includes_previous_assistant_context_in_fallback_search(
     provider.shutdown()
 
 
+def test_render_recall_does_not_inject_degraded_fallback_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    provider = _provider(tmp_path / "profile")
+    provider.on_turn_start(0, "之前 mempalace update 怎么做", session_id="session-1")
+
+    def fake_search_memories(**kwargs):
+        return {
+            "fallback": "bm25_only_via_sqlite",
+            "fallback_reason": "vector_query_error: Error finding id",
+            "results": [{"wing": "mempalace", "room": "operations", "text": "fallback noise"}],
+        }
+
+    monkeypatch.setattr(mempalace_plugin, "search_memories", fake_search_memories)
+    monkeypatch.setenv("MEMPAL_RECALL_LLM", "0")
+
+    recall = provider.prefetch("之前 mempalace update 怎么做", session_id="session-1")
+
+    assert recall == ""
+    provider.shutdown()
+
+
 def test_render_recall_uses_file_fallback_when_memory_state_is_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
