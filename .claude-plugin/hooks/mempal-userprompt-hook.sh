@@ -1,5 +1,12 @@
 #!/bin/bash
 # MemPalace UserPromptSubmit Hook — search palace and inject relevant memories
+# Source the canonical env file so this hook sees MEMPAL_* even when the
+# parent (Claude Code) doesn't propagate them. Without this, hook subprocesses
+# fall through to bash defaults (127.0.0.1:4000) and recall fails silently.
+if [ -f "$HOME/.mempalace/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.mempalace/env"
+fi
 export SSL_CERT_FILE="${SSL_CERT_FILE:-/opt/homebrew/etc/openssl@3/cert.pem}"
 # MemPalace embedding via LiteLLM (or any OpenAI-compatible) proxy. All three
 # must be set together; a missing one falls back to ChromaDB's built-in

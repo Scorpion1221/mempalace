@@ -201,33 +201,16 @@ PY
 fi
 if ! $SYNC_CLAUDE; then
     echo "[2/8] Claude Code: skipped (not in sync list)"
-elif [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
+else
     echo "[2/8] Syncing Claude Code plugin + settings.json env..."
-    for f in "$REPO/.claude-plugin/hooks/"mempal-*.sh; do
-        [ -f "$f" ] && smart_copy_hook "$f" "$CLAUDE_CACHE/hooks/$(basename "$f")"
-    done
-    cp "$REPO/.claude-plugin/plugin.json" "$CLAUDE_CACHE/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
 
-    # Deploy canonical skill (skills/mempalace/SKILL.md) into plugin cache.
-    # The .claude-plugin/skills/mempalace/SKILL.md in the repo is a symlink
-    # back to the canonical file — agents need a real file in their runtime
-    # cache, so we resolve and copy here instead of preserving the symlink.
-    mkdir -p "$CLAUDE_CACHE/skills/mempalace"
-    cp "$REPO/skills/mempalace/SKILL.md" "$CLAUDE_CACHE/skills/mempalace/SKILL.md" \
-        && echo "  → skills/mempalace/SKILL.md synced from canonical" || true
-
-    # Also sync to the user-installed skills dir (~/.claude/skills/mempalace/).
-    # Claude Code reads from BOTH the plugin cache AND ~/.claude/skills/<name>/,
-    # and Paperclip-spawned subagents (claude_local adapter) often resolve the
-    # latter path first. If we only update plugin cache, those subagents see
-    # stale skill content — confirmed in the wild for SUP-94 (2026-04-26).
-    USER_SKILL_DIR="$HOME/.claude/skills/mempalace"
-    if [ -d "$USER_SKILL_DIR" ]; then
-        cp "$REPO/skills/mempalace/SKILL.md" "$USER_SKILL_DIR/SKILL.md" \
-            && echo "  → skills/mempalace/SKILL.md synced to $USER_SKILL_DIR" || true
-    fi
-
-    # Upsert env vars into ~/.claude/settings.json
+    # --- env-block write + plugin enablement (independent of plugin cache) ---
+    # Previously this was gated on $CLAUDE_CACHE existing, but the cache is
+    # only created by `/plugin install mempalace@mempalace` inside Claude
+    # Code. On a fresh install the user hasn't run that yet, so the entire
+    # block was skipped — leaving settings.json env stale (silently).
+    # Decoupling: env + enablement always run; cache-dependent sync runs only
+    # if the cache is present.
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     if [ -f "$CLAUDE_SETTINGS" ]; then
         "$_PYTHON" - <<PYEOF
@@ -235,25 +218,73 @@ import json, os
 path = "$CLAUDE_SETTINGS"
 with open(path) as f:
     cfg = json.load(f)
+
+# 1) Upsert MEMPAL_* env vars
 env = cfg.setdefault("env", {})
 vars_to_set = "$PROPAGATED_VARS".split()
-changed = []
+env_changed = []
 for v in vars_to_set:
     new_val = os.environ.get(v, "")
     if env.get(v) != new_val:
         env[v] = new_val
-        changed.append(v)
+        env_changed.append(v)
+
+# 2) Auto-enable mempalace plugin if marketplace is registered.
+# Idempotent: only sets the flag if it's currently missing or False.
+plugin_enabled_change = None
+markets = cfg.get("extraKnownMarketplaces", {})
+if "mempalace" in markets:
+    enabled = cfg.setdefault("enabledPlugins", {})
+    if not enabled.get("mempalace@mempalace"):
+        enabled["mempalace@mempalace"] = True
+        plugin_enabled_change = "enabled mempalace@mempalace in enabledPlugins"
+
 with open(path, "w") as f:
     json.dump(cfg, f, indent=2, ensure_ascii=False)
     f.write("\n")
-if changed:
-    print(f"  → updated {len(changed)} env vars in settings.json: {', '.join(changed)}")
+
+if env_changed:
+    print(f"  → updated {len(env_changed)} env vars in settings.json: {', '.join(env_changed)}")
 else:
     print("  → settings.json env already in sync")
+if plugin_enabled_change:
+    print(f"  → {plugin_enabled_change}")
 PYEOF
+    else
+        echo "  ℹ ~/.claude/settings.json not found; Claude Code may not be installed yet"
     fi
-else
-    echo "[2/8] Claude Code plugin cache not found, skipping"
+
+    # --- cache-dependent sync (only if /plugin install has been run) ---
+    if [ -n "$CLAUDE_CACHE" ] && [ -d "$CLAUDE_CACHE" ]; then
+        for f in "$REPO/.claude-plugin/hooks/"mempal-*.sh; do
+            [ -f "$f" ] && smart_copy_hook "$f" "$CLAUDE_CACHE/hooks/$(basename "$f")"
+        done
+        cp "$REPO/.claude-plugin/plugin.json" "$CLAUDE_CACHE/plugin.json" 2>/dev/null && echo "  → plugin.json synced" || true
+
+        # Deploy canonical skill (skills/mempalace/SKILL.md) into plugin cache.
+        # The .claude-plugin/skills/mempalace/SKILL.md in the repo is a symlink
+        # back to the canonical file — agents need a real file in their runtime
+        # cache, so we resolve and copy here instead of preserving the symlink.
+        mkdir -p "$CLAUDE_CACHE/skills/mempalace"
+        cp "$REPO/skills/mempalace/SKILL.md" "$CLAUDE_CACHE/skills/mempalace/SKILL.md" \
+            && echo "  → skills/mempalace/SKILL.md synced from canonical" || true
+
+        # Also sync to the user-installed skills dir (~/.claude/skills/mempalace/).
+        # Claude Code reads from BOTH the plugin cache AND ~/.claude/skills/<name>/,
+        # and Paperclip-spawned subagents (claude_local adapter) often resolve the
+        # latter path first. If we only update plugin cache, those subagents see
+        # stale skill content — confirmed in the wild for SUP-94 (2026-04-26).
+        USER_SKILL_DIR="$HOME/.claude/skills/mempalace"
+        if [ -d "$USER_SKILL_DIR" ]; then
+            cp "$REPO/skills/mempalace/SKILL.md" "$USER_SKILL_DIR/SKILL.md" \
+                && echo "  → skills/mempalace/SKILL.md synced to $USER_SKILL_DIR" || true
+        fi
+    else
+        echo "  ℹ plugin cache not found — hooks/skill not deployed yet"
+        echo "    Next step: in Claude Code, run /plugin marketplace add ~/git/mempalace"
+        echo "    then       /plugin install mempalace@mempalace"
+        echo "    then re-run this script to deploy hooks/skill."
+    fi
 fi
 
 # --- [3/8] Codex: install/sync plugin + upsert config.toml ------------------
@@ -562,9 +593,38 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
         echo "  → Hermes git exclude updated"
     fi
 
+    # Install mempalace into Hermes' venv. Without this, the memory plugin
+    # silently marks itself inactive (its is_available() check requires
+    # `import mempalace` to succeed inside the Hermes process).
+    #
+    # Hermes venvs created by `hermes setup` use uv and DO NOT have pip
+    # installed, so the previous `python -m pip install` silently failed
+    # under `2>/dev/null ... || true`. We try uv first (the supported path),
+    # fall back to pip, and surface the failure loudly if both miss.
     HERMES_VENV="$HOME/.hermes/hermes-agent/venv"
     if [ -f "$HERMES_VENV/bin/python" ]; then
-        "$HERMES_VENV/bin/python" -m pip install --force-reinstall --no-deps "$REPO" -q 2>/dev/null && echo "  → Hermes venv updated" || true
+        installed=false
+        if command -v uv >/dev/null 2>&1; then
+            if uv pip install --python "$HERMES_VENV/bin/python" --force-reinstall --no-deps "$REPO" --quiet; then
+                installed=true
+                echo "  → Hermes venv mempalace installed (via uv)"
+            fi
+        fi
+        if ! $installed && "$HERMES_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
+            if "$HERMES_VENV/bin/python" -m pip install --force-reinstall --no-deps "$REPO" -q; then
+                installed=true
+                echo "  → Hermes venv mempalace installed (via pip)"
+            fi
+        fi
+        if ! $installed; then
+            echo "  ✗ Hermes venv: failed to install mempalace package"
+            echo "    The memory plugin will be inactive until this is fixed."
+            echo "    Manual fix:"
+            echo "      uv pip install --python $HERMES_VENV/bin/python $REPO"
+        elif ! "$HERMES_VENV/bin/python" -c 'import mempalace' 2>/dev/null; then
+            echo "  ✗ Hermes venv: mempalace installed but 'import mempalace' fails"
+            echo "    Check $HERMES_VENV/bin/python -c 'import mempalace' for details."
+        fi
     fi
 
     # Upsert env vars into Hermes' canonical env file, not the launchd plist.
@@ -896,6 +956,27 @@ if [ -n "${CLAUDE_CACHE:-}" ] && [ -f "$CLAUDE_CACHE/skills/mempalace/SKILL.md" 
     fi
 fi
 [ $SKILL_DRIFT -eq 0 ] && echo "    ✓ canonical SKILL.md matches .claude-plugin and Claude Code runtime"
+
+# --- Restart shared MCP singleton so it picks up new env --------------------
+# The singleton (launchd / systemd --user) inherits its env at process start
+# from launchctl/systemd, not from a re-read of ~/.mempalace/env. After this
+# script updates env propagation everywhere else, the running singleton still
+# holds whatever values it was launched with. Bounce it so the next MCP call
+# from any agent sees the new MEMPAL_* values.
+#
+# Skip silently if no singleton is installed (offline-mode users, fresh
+# installs that opted out of --singleton, etc.).
+if command -v mempalace >/dev/null 2>&1 \
+    && mempalace singleton status 2>/dev/null | grep -q "state = running"; then
+    echo "  Restarting singleton to refresh env..."
+    if mempalace singleton stop >/dev/null 2>&1 \
+        && mempalace singleton start >/dev/null 2>&1; then
+        echo "  → singleton restarted to pick up new env"
+    else
+        echo "  ⚠ singleton restart failed — restart manually:"
+        echo "    mempalace singleton stop && mempalace singleton start"
+    fi
+fi
 
 # --- [8/8] Summary ----------------------------------------------------------
 echo "[8/8] Summary"

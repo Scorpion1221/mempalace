@@ -189,10 +189,46 @@ Warn the user that this mode is not managed across reboots.
 
 ### Path C — Bring your own endpoint
 
-Edit `~/.mempalace/env`, then propagate:
+Edit `~/.mempalace/env`. There are **6 keys** that matter (plus
+`SSL_CERT_FILE` on macOS):
+
+```bash
+# Embedding — endpoint is the BASE; mempalace appends /v1/embeddings itself
+export MEMPAL_EMBEDDING_MODEL="text-embedding-3-large"      # or vx/gemini-embedding-2-preview, etc.
+export MEMPAL_EMBEDDING_ENDPOINT="https://your-proxy.example.com"
+export MEMPAL_EMBEDDING_KEY="sk-..."
+
+# LLM — endpoint MUST include /v1 (OpenAI-compatible chat/completions)
+export MEMPAL_LLM_ENDPOINT="https://your-proxy.example.com/v1"
+export MEMPAL_LLM_MODEL="gemini-3.1-flash-lite-preview"     # any model your proxy routes
+export MEMPAL_LLM_KEY="sk-..."
+```
+
+**Two footguns to surface to the user:**
+
+1. **Embedding dimension must match the palace.** Defaults:
+   - `text-embedding-3-large` / Gemini `gemini-embedding-2-preview` → 3072
+   - `text-embedding-3-small` → 1536
+   - Vertex `text-embedding-005` → 768
+   - ChromaDB built-in MiniLM (no proxy) → 384
+
+   Switching dimension on a non-empty palace **breaks recall**. If the user
+   changes embedding model on a populated palace, warn them and offer:
+   ```bash
+   rm -rf ~/.mempalace/palace ~/.mempalace/wal
+   # then re-mine
+   ```
+
+2. **Endpoint URLs are NOT symmetric.** `MEMPAL_LLM_ENDPOINT` includes
+   `/v1`; `MEMPAL_EMBEDDING_ENDPOINT` does NOT (the embedding caller
+   appends `/v1/embeddings`). Mixing them up gives 404s.
+
+After editing, propagate AND restart agents (they cache env at launch):
 
 ```bash
 bash ~/git/mempalace/scripts/sync-plugins.sh
+# sync-plugins also bounces the singleton; agents (Claude Code/Codex)
+# still need their own restart.
 ```
 
 ### Path D — Offline
@@ -255,13 +291,21 @@ printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocol
 
 ### Claude Code
 
-Claude Code still requires IDE/plugin-side steps that shell commands do not
-replace. Tell the user:
+Claude Code requires both **marketplace registration** AND **plugin install**
+— neither alone is enough. Tell the user:
 
 1. Open Claude Code
 2. Run: `/plugin marketplace add ~/git/mempalace`
 3. Run: `/plugin install mempalace@mempalace`
-4. Restart Claude Code
+4. Re-run `bash ~/git/mempalace/scripts/sync-plugins.sh` from a terminal
+   (now that the plugin cache exists, this deploys hooks/skills into it)
+5. Restart Claude Code
+
+Note: the env block in `~/.claude/settings.json` is written by
+`sync-plugins.sh` regardless of whether `/plugin install` has been run —
+so endpoint changes are propagated immediately. But hooks live inside the
+plugin cache, which only exists after `/plugin install`, hence the
+re-run.
 
 ### Codex
 
@@ -281,9 +325,29 @@ Tell the user:
 
 Tell the user:
 
-- Hermes plugin/env were synced by install
-- If Hermes was selected, the sync flow already handled the runtime plugin and
-  service env updates
+- Hermes plugin/env were synced by install. **Verify** the package
+  actually installed into Hermes' venv (uv-managed venvs occasionally
+  miss the pip path):
+  ```bash
+  ~/.hermes/hermes-agent/venv/bin/python -c 'import mempalace; print(mempalace.__version__)'
+  ```
+  If this raises `ImportError`, the memory plugin will be silently inactive.
+  Fix:
+  ```bash
+  uv pip install --python ~/.hermes/hermes-agent/venv/bin/python ~/git/mempalace
+  hermes gateway restart
+  ```
+- **Optional but recommended**: create `~/.hermes/mempalace.json`:
+  ```json
+  {
+    "default_wing": "hermes"
+  }
+  ```
+  Without this, Hermes' wing defaults to the platform user_id (e.g.
+  `ou_e148fd...` for Feishu, similar IDs for Telegram/Discord), which is
+  visible in `mempalace status` and ugly. `"hermes"` matches the
+  convention; any human-readable string works. After creating the file,
+  `hermes gateway restart` so the plugin re-reads its cached config.
 
 ---
 
@@ -331,6 +395,113 @@ Do not claim one universal service manager.
 
 The install command is the same (`mempalace singleton install --start`), but the
 underlying manager differs.
+
+---
+
+## Troubleshooting recipes
+
+Concrete failure modes seen in the wild, with the actual fix. Use these
+when the user reports the symptom — don't ask them to re-read the install
+guide from the top.
+
+### Hook log says `no LLM rewrite available, using original query`
+
+Cause: the hook subprocess didn't inherit `MEMPAL_LLM_*` env, so the LLM
+call fell back to `http://127.0.0.1:4000/v1` and failed silently. This
+shouldn't happen with recent hook scripts (they source `~/.mempalace/env`
+at the top), but if the user is on an older copy, patch the hook:
+
+```bash
+# Insert near the top of the hook (before any `:-` default fallback):
+if [ -f "$HOME/.mempalace/env" ]; then
+  . "$HOME/.mempalace/env"
+fi
+```
+
+Confirm what env the hook actually inherits by temporarily adding:
+
+```bash
+env | grep -E "^MEMPAL_|^SSL_CERT" > ~/.mempalace/logs/hook-env-debug.log
+```
+
+at the top, re-trigger, and read the log.
+
+### Singleton has stale env after `~/.mempalace/env` change
+
+The singleton (launchd / systemd --user) inherits env at process launch,
+not on each MCP call. `sync-plugins.sh` bounces it automatically, but if
+the user is hand-editing env without running sync:
+
+```bash
+mempalace singleton stop && mempalace singleton start
+```
+
+Verify the new values are visible:
+
+```bash
+mempalace singleton status | grep MEMPAL_LLM_ENDPOINT
+```
+
+### Proxy returns `data: [DONE]` after JSON in a non-streaming response
+
+Symptom: `_call_openai_compat` returns None → "no LLM rewrite available".
+The body looks like:
+
+```
+{"id":"...","choices":[...]}data: [DONE]
+```
+
+This is an upstream proxy bug (LiteLLM with `stream=False` should not
+emit the SSE terminator). Two options:
+
+1. **Server side**: ask the proxy operator to drop the SSE terminator on
+   non-streaming responses (in LiteLLM: ensure `stream_options` aren't
+   force-applied to non-streaming requests).
+2. **Client side workaround**: swap `MEMPAL_LLM_ENDPOINT` to a known-good
+   endpoint.
+
+### Embedding hits 429 burst during `mempalace mine`
+
+The miner makes up to 10 concurrent embedding calls with a short backoff
+(0.5s × 3 retries). Proxies with tight per-minute limits will reject
+bursts and may temp-ban the connection (subsequent calls fail with
+`SSL: UNEXPECTED_EOF_WHILE_READING`).
+
+Workarounds, in order of preference:
+
+1. Switch to an embedding endpoint sized for bulk mining.
+2. Use `mempalace mine ... --limit 1` to verify the path works on a
+   single file before bulk ingest.
+3. Raise the proxy's per-minute embedding cap.
+
+### Hermes plugin loads but writes nothing to palace
+
+Verify it can `import mempalace`:
+
+```bash
+~/.hermes/hermes-agent/venv/bin/python -c 'import mempalace; print(mempalace.__version__)'
+```
+
+If `ImportError`, the package never installed into Hermes' venv. Fix:
+
+```bash
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python ~/git/mempalace
+hermes gateway restart
+```
+
+(Recent `sync-plugins.sh` will fail loudly if this install fails; older
+copies swallow the error.)
+
+### Hermes wing shows up as a platform user_id (`ou_...`, etc.)
+
+By design, Hermes scopes memory per-user when no override is set. Create
+`~/.hermes/mempalace.json`:
+
+```json
+{ "default_wing": "hermes" }
+```
+
+Then `hermes gateway restart`.
 
 ---
 

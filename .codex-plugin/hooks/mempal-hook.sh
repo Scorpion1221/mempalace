@@ -1,5 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Source the canonical env file so this hook sees MEMPAL_* even when the
+# parent (Codex) doesn't propagate them. Codex's
+# [shell_environment_policy.set] only injects env into shell-tool
+# subprocesses, NOT into hook subprocesses — relying on bash defaults below
+# would silently route LLM/embedding calls to 127.0.0.1:4000 and fail.
+if [ -f "$HOME/.mempalace/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.mempalace/env"
+fi
 HOOK_NAME="${1:?Usage: mempal-hook.sh <hook-name>}"
 export SSL_CERT_FILE="${SSL_CERT_FILE:-/opt/homebrew/etc/openssl@3/cert.pem}"
 # MemPalace embedding via LiteLLM (or any OpenAI-compatible) proxy.
