@@ -1,5 +1,12 @@
 #!/bin/bash
 # MemPalace Stop Hook — thin wrapper calling Python CLI
+# Source the canonical env file so this hook sees MEMPAL_* even when the
+# parent (Claude Code) doesn't propagate them. Without this, async save
+# silently no-ops because MEMPAL_LLM_* defaults to 127.0.0.1:4000.
+if [ -f "$HOME/.mempalace/env" ]; then
+  # shellcheck disable=SC1091
+  . "$HOME/.mempalace/env"
+fi
 export SSL_CERT_FILE="${SSL_CERT_FILE:-/opt/homebrew/etc/openssl@3/cert.pem}"
 # MemPalace embedding via LiteLLM proxy — see userprompt hook for the
 # rationale. Defaults match the standard local LiteLLM setup.
