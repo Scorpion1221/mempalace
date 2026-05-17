@@ -43,14 +43,25 @@ ensure_runtime() {
     return 0
   fi
 
+  # Probe for the newest Python >= 3.9 (pyproject.toml's requires-python).
+  # The previous "first python3 wins" loop silently picked Apple's stock
+  # python3 = 3.8 on macOS, causing chromadb (>=1.5.4 needs 3.9) to fail
+  # with "No matching distribution found" — install ostensibly succeeds.
   local bootstrap_python=""
-  for candidate in python3 python; do
-    if command -v "$candidate" &>/dev/null; then
-      bootstrap_python="$(command -v "$candidate")"
-      break
+  local cand_path=""
+  for candidate in python3.14 python3.13 python3.12 python3.11 python3.10 python3.9 python3 python; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      cand_path="$(command -v "$candidate")"
+      if "$cand_path" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; then
+        bootstrap_python="$cand_path"
+        break
+      fi
     fi
   done
-  [[ -n "$bootstrap_python" ]] || fail "Neither python3 nor python found to bootstrap $RUNTIME_DIR"
+  if [[ -z "$bootstrap_python" ]]; then
+    local found="$(python3 --version 2>&1 || echo none)"
+    fail "Need Python >= 3.9 to bootstrap $RUNTIME_DIR. Found: $found"
+  fi
 
   info "Creating dedicated runtime at $RUNTIME_DIR using $bootstrap_python..."
   mkdir -p "$(dirname "$RUNTIME_DIR")"
@@ -151,6 +162,17 @@ fi
 # ─── Step 1: Python package ───
 ensure_runtime
 
+runtime_is_healthy() {
+  # A "healthy" existing runtime has the core deps importable. Used to gate
+  # whether we can take the fast --no-deps snapshot path or must do a full
+  # cold install. Avoids the trap where a pre-created empty venv silently
+  # skipped chromadb install and the singleton later 失败 to import it.
+  (
+    cd /
+    "$RUNTIME_PYTHON" -c 'import chromadb, mempalace.config, mempalace.searcher' >/dev/null 2>&1
+  )
+}
+
 if $DEV_MODE; then
   info "Installing Python package in editable mode (--dev) into $RUNTIME_DIR..."
   "${RUNTIME_PIP[@]}" install -q -e "$REPO_DIR"
@@ -159,11 +181,19 @@ elif [[ "$RUNTIME_CREATED" == true ]]; then
   info "Installing Python package + dependencies into new runtime $RUNTIME_DIR..."
   "${RUNTIME_PIP[@]}" install -q --upgrade pip
   "${RUNTIME_PIP[@]}" install -q "$REPO_DIR"
-else
+elif runtime_is_healthy; then
   # Incremental upgrade against an existing runtime that already has deps.
   # ``--no-deps`` keeps upgrades fast and avoids churn on chromadb/pip metadata.
   info "Installing Python package from local checkout snapshot into $RUNTIME_DIR..."
   "${RUNTIME_PIP[@]}" install -q --force-reinstall --no-deps "$REPO_DIR"
+else
+  # Existing runtime is missing required deps (e.g. user pre-created an empty
+  # venv, or a previous --no-deps run skipped chromadb). Fall back to a full
+  # install so we don't ship a broken install that imports fine on the test
+  # line but explodes when the singleton actually tries to load chromadb.
+  warn "Existing runtime at $RUNTIME_DIR is missing required deps — running full install."
+  "${RUNTIME_PIP[@]}" install -q --upgrade pip
+  "${RUNTIME_PIP[@]}" install -q "$REPO_DIR"
 fi
 ok "Python package installed: $(cd / && $RUNTIME_PYTHON -c 'import importlib.metadata as md, mempalace; print("v%s (%s)" % (md.version("mempalace"), mempalace.__file__))')"
 MANIFEST_PATH="$(write_runtime_manifest)"
@@ -267,6 +297,41 @@ fi
 if $ENABLE_SINGLETON; then
   info "Installing shared-MCP singleton service..."
   "$RUNTIME_PYTHON" -m mempalace.cli singleton install --start || warn "singleton install failed (see output above)"
+fi
+
+# ─── Step 6: End-to-end self-test ───
+# Previously: install would exit 0 even when chromadb was missing or the
+# singleton never came up — the user only noticed when search started 404'ing.
+# Now: import + (if --singleton) MCP handshake must succeed. Failure = fail.
+info "Self-test: package import..."
+if ! (cd / && "$RUNTIME_PYTHON" -c '
+import sys
+import chromadb  # noqa: F401
+from mempalace.config import sanitize_name  # noqa: F401
+from mempalace.searcher import search_memories  # noqa: F401
+sys.stdout.write("import ok\n")
+' >/dev/null); then
+  fail "Package import failed after install — re-run with --dev or check $RUNTIME_PYTHON -c 'import chromadb' manually."
+fi
+ok "Self-test: imports OK"
+
+if $ENABLE_SINGLETON; then
+  info "Self-test: MCP bridge handshake..."
+  bridge_cmd=""
+  if command -v mempalace-mcp-bridge >/dev/null 2>&1; then
+    bridge_cmd="$(command -v mempalace-mcp-bridge)"
+  elif [[ -x "$PY_SCRIPT_DIR/mempalace-mcp-bridge" ]]; then
+    bridge_cmd="$PY_SCRIPT_DIR/mempalace-mcp-bridge"
+  fi
+  if [[ -z "$bridge_cmd" ]]; then
+    fail "mempalace-mcp-bridge not found on PATH or in $PY_SCRIPT_DIR after install."
+  fi
+  init_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"installer","version":"0.1"}}}'
+  resp="$(printf '%s\n' "$init_payload" | timeout 10 "$bridge_cmd" 2>/dev/null | head -1 || true)"
+  if [[ -z "$resp" ]] || ! echo "$resp" | grep -q '"serverInfo"'; then
+    fail "MCP bridge handshake failed. Check ~/.mempalace/logs/mcp.err.log and run: $RUNTIME_PYTHON -m mempalace.cli singleton status"
+  fi
+  ok "Self-test: MCP handshake OK"
 fi
 
 # ─── Summary ───
