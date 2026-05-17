@@ -563,12 +563,53 @@ PYEOF
 fi
 
 # --- [4/8] Hermes: sync plugin + upsert ~/.hermes/.env ----------------------
-HERMES_RUNTIME="$HOME/.hermes/hermes-agent/plugins/memory/mempalace"
+# Hermes can live in several places depending on how it was installed:
+#   - ~/.hermes/hermes-agent/         (user-level, the historical default)
+#   - /usr/local/lib/hermes-agent/    (system-level via pipx/manual install)
+#   - /opt/hermes-agent/              (some package-manager flows)
+#   - $HERMES_HOME                    (explicit override)
+# The previous hardcoded ~/.hermes/hermes-agent/ meant system-level installs
+# silently never received the plugin. Probe in order: env > `hermes` binary
+# resolution > conventional paths.
+detect_hermes_root() {
+    if [ -n "${HERMES_HOME:-}" ] && [ -d "$HERMES_HOME/plugins/memory" ]; then
+        echo "$HERMES_HOME"
+        return 0
+    fi
+    if command -v hermes >/dev/null 2>&1; then
+        local bin
+        bin="$(command -v hermes)"
+        # Resolve symlinks (readlink -f isn't portable on macOS; use python).
+        bin="$("$_PYTHON" -c "import os, sys; print(os.path.realpath(sys.argv[1]))" "$bin" 2>/dev/null || echo "$bin")"
+        # Typical layout: <root>/venv/bin/hermes → <root>
+        local root
+        root="$(dirname "$(dirname "$(dirname "$bin")")")"
+        if [ -d "$root/plugins/memory" ]; then
+            echo "$root"
+            return 0
+        fi
+    fi
+    local cand
+    for cand in "$HOME/.hermes/hermes-agent" /usr/local/lib/hermes-agent /opt/hermes-agent; do
+        if [ -d "$cand/plugins/memory" ]; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
 HERMES_ENV_FILE="$HOME/.hermes/.env"
 if ! $SYNC_HERMES; then
     echo "[4/8] Hermes: skipped (not in sync list)"
-elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
-    echo "[4/8] Syncing Hermes plugin + ~/.hermes/.env..."
+elif [ ! -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
+    echo "[4/8] Hermes plugin source not found at $HERMES_REPO, skipping"
+elif ! HERMES_ROOT="$(detect_hermes_root)"; then
+    echo "[4/8] Hermes: not detected (set HERMES_HOME or install hermes-agent), skipping"
+else
+    HERMES_RUNTIME="$HERMES_ROOT/plugins/memory/mempalace"
+    HERMES_VENV="$HERMES_ROOT/venv"
+    echo "[4/8] Syncing Hermes plugin + ~/.hermes/.env (root: $HERMES_ROOT)..."
     mkdir -p "$HERMES_RUNTIME"
     for f in "$HERMES_REPO/plugins/memory/mempalace/"*.py \
              "$HERMES_REPO/plugins/memory/mempalace/"*.yaml \
@@ -582,7 +623,7 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     # MemPalace, not Hermes git, so keep it out of `git status`; otherwise
     # `hermes update` sees the untracked plugin directory and repeatedly
     # autostashes/restores it before every update.
-    HERMES_GIT_EXCLUDE="$HOME/.hermes/hermes-agent/.git/info/exclude"
+    HERMES_GIT_EXCLUDE="$HERMES_ROOT/.git/info/exclude"
     if [ -d "$(dirname "$HERMES_GIT_EXCLUDE")" ] \
         && ! grep -qxF '/plugins/memory/mempalace/' "$HERMES_GIT_EXCLUDE" 2>/dev/null; then
         {
@@ -601,17 +642,25 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
     # installed, so the previous `python -m pip install` silently failed
     # under `2>/dev/null ... || true`. We try uv first (the supported path),
     # fall back to pip, and surface the failure loudly if both miss.
-    HERMES_VENV="$HOME/.hermes/hermes-agent/venv"
-    if [ -f "$HERMES_VENV/bin/python" ]; then
+    if [ -x "$HERMES_VENV/bin/python" ]; then
         installed=false
+        # Use a full install (with deps) the first time mempalace is missing
+        # from the Hermes venv — otherwise --no-deps leaves chromadb out and
+        # the plugin's is_available() still returns False. Subsequent runs
+        # take the --no-deps fast path.
+        already_imports="$("$HERMES_VENV/bin/python" -c 'import mempalace' >/dev/null 2>&1 && echo yes || echo no)"
+        deps_flag="--force-reinstall --no-deps"
+        if [ "$already_imports" = "no" ]; then
+            deps_flag="--force-reinstall"
+        fi
         if command -v uv >/dev/null 2>&1; then
-            if uv pip install --python "$HERMES_VENV/bin/python" --force-reinstall --no-deps "$REPO" --quiet; then
+            if uv pip install --python "$HERMES_VENV/bin/python" $deps_flag "$REPO" --quiet; then
                 installed=true
                 echo "  → Hermes venv mempalace installed (via uv)"
             fi
         fi
         if ! $installed && "$HERMES_VENV/bin/python" -m pip --version >/dev/null 2>&1; then
-            if "$HERMES_VENV/bin/python" -m pip install --force-reinstall --no-deps "$REPO" -q; then
+            if "$HERMES_VENV/bin/python" -m pip install $deps_flag "$REPO" -q; then
                 installed=true
                 echo "  → Hermes venv mempalace installed (via pip)"
             fi
@@ -621,10 +670,13 @@ elif [ -f "$HERMES_REPO/plugins/memory/mempalace/__init__.py" ]; then
             echo "    The memory plugin will be inactive until this is fixed."
             echo "    Manual fix:"
             echo "      uv pip install --python $HERMES_VENV/bin/python $REPO"
-        elif ! "$HERMES_VENV/bin/python" -c 'import mempalace' 2>/dev/null; then
-            echo "  ✗ Hermes venv: mempalace installed but 'import mempalace' fails"
-            echo "    Check $HERMES_VENV/bin/python -c 'import mempalace' for details."
+        elif ! "$HERMES_VENV/bin/python" -c 'import mempalace, chromadb' 2>/dev/null; then
+            echo "  ✗ Hermes venv: mempalace installed but 'import mempalace, chromadb' fails"
+            echo "    Check: $HERMES_VENV/bin/python -c 'import mempalace, chromadb'"
         fi
+    else
+        echo "  ⚠ Hermes venv not found at $HERMES_VENV — plugin will be inactive"
+        echo "    Run 'hermes setup' first to create the venv, then re-run this script."
     fi
 
     # Upsert env vars into Hermes' canonical env file, not the launchd plist.
@@ -672,8 +724,6 @@ env_path.write_text("\n".join(out).rstrip() + "\n", encoding="utf-8")
 env_path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 print(f"  → {len(vars_to_write)} env vars upserted in ~/.hermes/.env")
 PYEOF
-else
-    echo "[4/8] Hermes plugin source not found, skipping"
 fi
 
 # --- [5/8] Cursor: symlink plugin + register hooks + launchctl env ---------
@@ -828,10 +878,27 @@ fi
 # --- [7/8] Validation: all agents' env values MATCH ~/.mempalace/env --------
 echo "[7/8] Validating env var propagation..."
 DRIFT=0
+# OPTIONAL_VARS missing on the agent side is fine when the source is also
+# unset (offline-mode / Path D installs intentionally leave them empty).
+# But OPTIONAL_VARS with a value in ~/.mempalace/env that didn't propagate IS
+# drift — the user set it, we should have written it. The previous behaviour
+# treated any missing OPTIONAL_VAR as "drift detected", producing a scary
+# red banner on perfectly healthy installs (the install_bugs.md #8 footgun).
+_is_optional_var() {
+    case " $OPTIONAL_VARS " in
+        *" $1 "*) return 0 ;;
+        *)        return 1 ;;
+    esac
+}
+
 check_agent_var() {
     local agent="$1" var="$2" actual="$3"
     local expected="${!var:-}"
     if [ -z "$actual" ]; then
+        if [ -z "$expected" ] && _is_optional_var "$var"; then
+            # Optional + unset on both sides = expected offline-mode state.
+            return 0
+        fi
         echo "  ⚠ $agent: $var is missing"
         DRIFT=1
     elif [ "$actual" != "$expected" ]; then
@@ -956,6 +1023,19 @@ if [ -n "${CLAUDE_CACHE:-}" ] && [ -f "$CLAUDE_CACHE/skills/mempalace/SKILL.md" 
     fi
 fi
 [ $SKILL_DRIFT -eq 0 ] && echo "    ✓ canonical SKILL.md matches .claude-plugin and Claude Code runtime"
+
+# --- Refresh systemd-compatible env on Linux --------------------------------
+# ~/.mempalace/env is shell syntax (export VAR=...; ${VAR:-default}). systemd
+# EnvironmentFile= can't parse that — it rejects every `export` line with
+# "Ignoring invalid environment assignment". The package writes a stripped
+# derivative at ~/.mempalace/env.systemd which is what the unit actually reads.
+# Re-derive it now so any edits the user made to ~/.mempalace/env reach the
+# singleton on the next restart (no-op on macOS).
+if [ "$(uname)" = "Linux" ] && [ -x "$_PYTHON" ]; then
+    "$_PYTHON" -c 'from mempalace.singleton_manager import refresh_systemd_env; refresh_systemd_env()' 2>/dev/null \
+        && echo "  → ~/.mempalace/env.systemd refreshed for systemd EnvironmentFile" \
+        || true
+fi
 
 # --- Restart shared MCP singleton so it picks up new env --------------------
 # The singleton (launchd / systemd --user) inherits its env at process start

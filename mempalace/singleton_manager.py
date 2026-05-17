@@ -31,6 +31,14 @@ SYSTEMD_UNIT_NAME = "mempalace-server.service"
 SYSTEMD_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
 SYSTEMD_UNIT_PATH = SYSTEMD_UNIT_DIR / SYSTEMD_UNIT_NAME
 
+# Source-of-truth env (shell-syntax; sourceable from .zshrc / sync-plugins.sh)
+# vs the systemd-compatible derivative (no `export`, no $VAR expansion).
+# systemd's EnvironmentFile= rejects the former with
+#   "Ignoring invalid environment assignment 'export MEMPAL_LLM_KEY=...'"
+# leaving the unit running without any of our env vars.
+MEMPAL_ENV_FILE = Path.home() / ".mempalace" / "env"
+SYSTEMD_ENV_FILE = Path.home() / ".mempalace" / "env.systemd"
+
 SOCKET_PATH = Path.home() / ".mempalace" / "mcp.sock"
 
 
@@ -75,6 +83,71 @@ def _write_if_changed(path: Path, content: str) -> bool:
 
 def _run(cmd: list[str], *, check: bool = False) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, text=True, capture_output=True, check=check)
+
+
+def refresh_systemd_env() -> bool:
+    """Re-derive ``~/.mempalace/env.systemd`` from the current shell-syntax env.
+
+    Public wrapper around :func:`_generate_systemd_env_file` so callers
+    outside this module (notably ``scripts/sync-plugins.sh``) can refresh
+    the systemd env after editing ``~/.mempalace/env`` without having to
+    poke private helpers. No-op on platforms that don't use systemd.
+    """
+    if platform.system() != "Linux":
+        return False
+    return _generate_systemd_env_file()
+
+
+def _generate_systemd_env_file() -> bool:
+    """Produce ``~/.mempalace/env.systemd`` from ``~/.mempalace/env``.
+
+    systemd's ``EnvironmentFile=`` cannot parse shell syntax — it requires
+    bare ``KEY=value`` lines. ``~/.mempalace/env`` is intentionally written in
+    sourceable shell syntax (``export KEY="value"``, ``${KEY:-default}``)
+    because ``scripts/sync-plugins.sh`` sources it. We expand shell defaults
+    against the current environment, strip ``export``/quotes, and write the
+    result so systemd can read it. Comments and blank lines are dropped.
+
+    Returns True iff the systemd env file changed (used to decide whether
+    the singleton needs a restart after sync-plugins.sh).
+    """
+    if not MEMPAL_ENV_FILE.exists():
+        return False
+
+    import re
+
+    lines_out: list[str] = []
+    pattern = re.compile(r"^[A-Z_][A-Z0-9_]*=")
+    for raw in MEMPAL_ENV_FILE.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Drop the optional `export` prefix systemd chokes on.
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        if not pattern.match(line):
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        # Strip surrounding quotes (both shell-style "..." and '...').
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+            value = value[1:-1]
+
+        # Expand ${VAR:-default} / ${VAR-default} / $VAR against current env.
+        # We intentionally only handle the simple cases that appear in the
+        # bundled template — anything fancier (command substitution, nested
+        # parameter expansion) is out of scope and gets passed through.
+        def _expand(match: re.Match) -> str:
+            var = match.group(1)
+            default = match.group(3) or ""
+            return os.environ.get(var, default)
+
+        value = re.sub(r"\$\{([A-Z_][A-Z0-9_]*)(:?-)([^}]*)\}", _expand, value)
+        value = re.sub(r"\$([A-Z_][A-Z0-9_]*)", lambda m: os.environ.get(m.group(1), ""), value)
+        lines_out.append(f"{key}={value}")
+
+    rendered = "\n".join(lines_out) + ("\n" if lines_out else "")
+    return _write_if_changed(SYSTEMD_ENV_FILE, rendered)
 
 
 # ---------------------------------------------------------------------------
@@ -157,11 +230,14 @@ def _linux_install() -> None:
     )
     changed = _write_if_changed(SYSTEMD_UNIT_PATH, rendered)
     (Path.home() / ".mempalace" / "logs").mkdir(parents=True, exist_ok=True)
+    env_changed = _generate_systemd_env_file()
     _run(["systemctl", "--user", "daemon-reload"])
     if changed:
         print(f"  ✓ wrote {SYSTEMD_UNIT_PATH}")
     else:
         print(f"  ✓ {SYSTEMD_UNIT_PATH} already up to date")
+    if env_changed:
+        print(f"  ✓ wrote {SYSTEMD_ENV_FILE} (systemd-compatible env)")
 
 
 def _linux_start() -> None:
@@ -192,6 +268,11 @@ def _linux_uninstall() -> None:
         print(f"  ✓ removed {SYSTEMD_UNIT_PATH}")
     else:
         print(f"  {SYSTEMD_UNIT_PATH} already absent")
+    # env.systemd is derived state — remove on uninstall so a later reinstall
+    # regenerates it cleanly from the canonical ~/.mempalace/env.
+    if SYSTEMD_ENV_FILE.exists():
+        SYSTEMD_ENV_FILE.unlink()
+        print(f"  ✓ removed {SYSTEMD_ENV_FILE}")
 
 
 # ---------------------------------------------------------------------------

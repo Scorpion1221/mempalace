@@ -341,6 +341,30 @@ def _get_hash_embedding_function():
     return _HASH_EF_CACHE
 
 
+def _normalize_embedding_endpoint(endpoint: str) -> str:
+    """Strip a trailing ``/v1`` (or ``/v1/``) from the embedding endpoint.
+
+    ``ProxyEmbeddingFunction`` always appends ``/v1/embeddings`` itself, so a
+    user-configured endpoint that already ends in ``/v1`` hits the proxy at
+    ``/v1/v1/embeddings`` and gets a 404 — the kind of asymmetric trap (LLM
+    endpoints want ``/v1``, embedding endpoints don't) that wastes hours of
+    debugging. Normalize once with a loud warning instead.
+    """
+
+    endpoint = endpoint.rstrip("/")
+    if endpoint.endswith("/v1"):
+        if "embedding_v1_trim" not in _WARNED:
+            logger.warning(
+                "MEMPAL_EMBEDDING_ENDPOINT ends in /v1 (%r) — mempalace appends "
+                "/v1/embeddings itself, which would hit /v1/v1/embeddings (404). "
+                "Stripping /v1.",
+                endpoint,
+            )
+            _WARNED.add("embedding_v1_trim")
+        endpoint = endpoint[: -len("/v1")].rstrip("/")
+    return endpoint
+
+
 def _get_proxy_embedding_function():
     """Return a cached proxy EF when MEMPAL_EMBEDDING_MODEL is configured.
 
@@ -363,6 +387,7 @@ def _get_proxy_embedding_function():
             model,
         )
         return None
+    endpoint = _normalize_embedding_endpoint(endpoint)
 
     dims_str = os.environ.get("MEMPAL_EMBEDDING_DIMS", "")
     dims = int(dims_str) if dims_str.strip().isdigit() else DEFAULT_EMBEDDING_DIMS

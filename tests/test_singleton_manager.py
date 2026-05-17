@@ -164,5 +164,56 @@ def test_cmd_start_reports_warning_when_singleton_not_ready(short_sockdir, capsy
     assert "mcp.err.log" in out
 
 
+def test_generate_systemd_env_file_strips_export_and_quotes(tmp_path, monkeypatch):
+    """systemd EnvironmentFile= can't parse `export KEY=...` or quoted values.
+
+    Regression for install_bugs.md #9: previously the unit pointed straight at
+    ~/.mempalace/env which contains shell syntax, so journalctl was flooded
+    with "Ignoring invalid environment assignment 'export MEMPAL_LLM_KEY=...'"
+    and the singleton came up with no env vars.
+    """
+    env_in = tmp_path / "env"
+    env_out = tmp_path / "env.systemd"
+    env_in.write_text(
+        "# top comment\n"
+        'export MEMPAL_EMBEDDING_MODEL="gemini-embedding-2-preview"\n'
+        "export MEMPAL_EMBEDDING_ENDPOINT='http://127.0.0.1:4000'\n"
+        "export MEMPAL_LLM_ENDPOINT=http://127.0.0.1:4000/v1\n"
+        'export SSL_CERT_FILE="${SSL_CERT_FILE:-/opt/cert.pem}"\n'
+        "\n"
+        "# trailing comment\n"
+    )
+    monkeypatch.delenv("SSL_CERT_FILE", raising=False)
+    with (
+        patch.object(singleton_manager, "MEMPAL_ENV_FILE", env_in),
+        patch.object(singleton_manager, "SYSTEMD_ENV_FILE", env_out),
+    ):
+        changed = singleton_manager._generate_systemd_env_file()
+    assert changed is True
+    lines = env_out.read_text().splitlines()
+    assert lines == [
+        "MEMPAL_EMBEDDING_MODEL=gemini-embedding-2-preview",
+        "MEMPAL_EMBEDDING_ENDPOINT=http://127.0.0.1:4000",
+        "MEMPAL_LLM_ENDPOINT=http://127.0.0.1:4000/v1",
+        "SSL_CERT_FILE=/opt/cert.pem",
+    ]
+    # systemd would reject any "export" prefix on these lines.
+    assert "export" not in env_out.read_text()
+
+
+def test_refresh_systemd_env_noop_on_non_linux(monkeypatch, tmp_path):
+    """refresh_systemd_env is a no-op on macOS/Windows (no systemd)."""
+    env_in = tmp_path / "env"
+    env_out = tmp_path / "env.systemd"
+    env_in.write_text("export FOO=bar\n")
+    with (
+        patch.object(singleton_manager.platform, "system", lambda: "Darwin"),
+        patch.object(singleton_manager, "MEMPAL_ENV_FILE", env_in),
+        patch.object(singleton_manager, "SYSTEMD_ENV_FILE", env_out),
+    ):
+        assert singleton_manager.refresh_systemd_env() is False
+    assert not env_out.exists()
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

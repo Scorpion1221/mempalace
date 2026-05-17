@@ -166,6 +166,11 @@ def is_enabled() -> bool:
 # Cache gcloud access token within a single hook invocation
 _vertex_token_cache: dict = {}
 
+# One-shot warnings about env-var misconfiguration. We only want to log
+# each unique gotcha once per process (e.g. MEMPAL_LLM_ENDPOINT missing
+# /v1), otherwise every hook invocation would re-warn.
+_ENV_WARNED: set[str] = set()
+
 
 def _get_vertex_token() -> str | None:
     """Get a GCP access token via application-default credentials. Cached per process."""
@@ -209,9 +214,26 @@ def _get_llm_config() -> dict | None:
     endpoint = _read_llm_env("MEMPAL_LLM_ENDPOINT", "MEMPAL_RECALL_ENDPOINT")
     llm_model = _read_llm_env("MEMPAL_LLM_MODEL", "MEMPAL_RECALL_MODEL")
     if endpoint and llm_model:
+        endpoint = endpoint.rstrip("/")
+        # We append /chat/completions; almost every OpenAI-compatible proxy
+        # (LiteLLM, vLLM, Ollama, Together, etc.) expects the path prefix to
+        # be /v1. Endpoints missing /v1 mostly indicate a misconfig — keep
+        # firing the request (some setups have a custom prefix) but log a
+        # one-shot warning so users aren't left wondering why /chat/completions
+        # returns 404. Mirrors the symmetric strip on the embedding side.
+        if "_llm_no_v1_warned" not in _ENV_WARNED and not re.search(r"/v1(/|$)", endpoint):
+            logger.warning(
+                "MEMPAL_LLM_ENDPOINT=%r does not contain /v1 — mempalace appends "
+                "/chat/completions, which usually needs a /v1 prefix on the "
+                "endpoint (LiteLLM/Ollama/vLLM/etc). If you see 404s, set "
+                "MEMPAL_LLM_ENDPOINT=%s/v1",
+                endpoint,
+                endpoint,
+            )
+            _ENV_WARNED.add("_llm_no_v1_warned")
         return {
             "backend": "openai_compat",
-            "endpoint": endpoint.rstrip("/"),
+            "endpoint": endpoint,
             "model": llm_model,
             "key": _read_llm_env("MEMPAL_LLM_KEY", "MEMPAL_RECALL_KEY"),
         }

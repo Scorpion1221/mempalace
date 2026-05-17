@@ -175,6 +175,25 @@ def test_describe_device_reports_proxy(monkeypatch):
     assert embedding.describe_device("auto") == "proxy"
 
 
+def test_endpoint_trailing_v1_is_stripped_with_warning(monkeypatch, caplog):
+    """User-configured endpoint with trailing /v1 must not produce /v1/v1/embeddings.
+
+    Regression for install-flow gotcha: LLM endpoints want /v1, embedding
+    endpoints don't, and users frequently copy the LLM value over. Previously
+    this silently 404'd; now we strip and warn once.
+    """
+    monkeypatch.setenv("MEMPAL_EMBEDDING_MODEL", "gemini-embedding-2")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_ENDPOINT", "http://localhost:4000/v1")
+    monkeypatch.setenv("MEMPAL_EMBEDDING_KEY", "sk-test")
+    embedding._WARNED.discard("embedding_v1_trim")
+    with caplog.at_level(logging.WARNING, logger="mempalace.embedding"):
+        ef = embedding.get_embedding_function()
+    assert isinstance(ef, embedding.ProxyEmbeddingFunction)
+    assert ef._url == "http://localhost:4000/v1/embeddings"
+    assert "/v1/v1/embeddings" not in ef._url
+    assert "Stripping /v1" in caplog.text
+
+
 class TestBackwardCompatAlias:
     """The deprecated GeminiEmbeddingFunction name must still resolve."""
 

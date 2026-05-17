@@ -937,12 +937,33 @@ class MemPalaceMemoryProvider(MemoryProvider):
         return self._paths
 
     def is_available(self) -> bool:
-        """Check that the local MemPalace dependencies are importable."""
+        """Check that the local MemPalace dependencies are importable.
 
-        return all(
-            dependency is not None
-            for dependency in (chromadb, KnowledgeGraph, sanitize_name, search_memories)
+        When any dependency is missing, log a one-shot warning naming exactly
+        what failed to import. Previously this returned a bare ``False`` and
+        Hermes silently marked the plugin inactive — leaving users to grep
+        through Hermes logs trying to figure out which import broke.
+        """
+
+        deps = (
+            ("chromadb", chromadb),
+            ("mempalace.knowledge_graph.KnowledgeGraph", KnowledgeGraph),
+            ("mempalace.config.sanitize_name", sanitize_name),
+            ("mempalace.searcher.search_memories", search_memories),
         )
+        missing = [name for name, dep in deps if dep is None]
+        if missing:
+            if not getattr(self, "_unavailable_warned", False):
+                logger.warning(
+                    "MemPalace plugin unavailable; missing dependencies: %s. "
+                    "Install into Hermes' venv: "
+                    "uv pip install --python <hermes-venv-python> %s",
+                    ", ".join(missing),
+                    "mempalace",
+                )
+                self._unavailable_warned = True
+            return False
+        return True
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
         return [
