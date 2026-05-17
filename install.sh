@@ -326,12 +326,76 @@ if $ENABLE_SINGLETON; then
   if [[ -z "$bridge_cmd" ]]; then
     fail "mempalace-mcp-bridge not found on PATH or in $PY_SCRIPT_DIR after install."
   fi
-  init_payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"installer","version":"0.1"}}}'
-  resp="$(printf '%s\n' "$init_payload" | timeout 10 "$bridge_cmd" 2>/dev/null | head -1 || true)"
-  if [[ -z "$resp" ]] || ! echo "$resp" | grep -q '"serverInfo"'; then
-    fail "MCP bridge handshake failed. Check ~/.mempalace/logs/mcp.err.log and run: $RUNTIME_PYTHON -m mempalace.cli singleton status"
+  # Run the handshake through the runtime Python so we don't depend on the
+  # GNU `timeout` binary (BSD/macOS only ships `gtimeout` via coreutils, if
+  # at all), and so a stuck singleton can't hang the installer. Also routes
+  # bridge stderr to a temp file we can surface on failure.
+  bridge_err="$(mktemp -t mempalace-self-test.XXXXXX)"
+  handshake_rc=0
+  "$RUNTIME_PYTHON" - "$bridge_cmd" "$bridge_err" <<'PY' || handshake_rc=$?
+import json
+import subprocess
+import sys
+
+bridge_cmd = sys.argv[1]
+stderr_path = sys.argv[2]
+payload = json.dumps(
+    {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "installer", "version": "0.1"},
+        },
+    }
+)
+try:
+    with open(stderr_path, "wb") as err_f:
+        proc = subprocess.run(
+            [bridge_cmd],
+            input=payload + "\n",
+            capture_output=False,
+            stdout=subprocess.PIPE,
+            stderr=err_f,
+            text=True,
+            timeout=20,
+        )
+except FileNotFoundError as exc:
+    sys.stderr.write(f"bridge not executable: {exc}\n")
+    sys.exit(2)
+except subprocess.TimeoutExpired:
+    sys.stderr.write("bridge handshake timed out after 20s\n")
+    sys.exit(3)
+for line in (proc.stdout or "").splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    if '"serverInfo"' in line:
+        sys.exit(0)
+sys.stderr.write(
+    "bridge produced no serverInfo response. First 500 chars of stdout:\n"
+    + (proc.stdout or "")[:500]
+    + "\n"
+)
+sys.exit(4)
+PY
+  if [[ "$handshake_rc" -ne 0 ]]; then
+    # install.sh main flow already completed; treat this as a warning rather
+    # than a hard failure. The user can re-run handshake manually if they
+    # actually need to use the singleton right now.
+    warn "MCP bridge handshake failed (rc=$handshake_rc). Install completed otherwise."
+    if [[ -s "$bridge_err" ]]; then
+      warn "Bridge stderr:"
+      sed 's/^/    /' "$bridge_err" >&2
+    fi
+    warn "Check ~/.mempalace/logs/mcp.err.log and run:"
+    warn "    $RUNTIME_PYTHON -m mempalace.cli singleton status"
+  else
+    ok "Self-test: MCP handshake OK"
   fi
-  ok "Self-test: MCP handshake OK"
+  rm -f "$bridge_err"
 fi
 
 # ─── Summary ───
